@@ -1,0 +1,70 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isUser(userId) {
+      return request.auth.uid == userId;
+    }
+    
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+    
+    function isPDF() {
+      return request.resource.contentType == 'application/pdf';
+    }
+    
+    function isValidFileType() {
+      return isImage() || isPDF() || 
+             request.resource.contentType.matches('text/.*') ||
+             request.resource.contentType == 'application/msword' ||
+             request.resource.contentType == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    }
+    
+    function isValidSize() {
+      // Max 10MB per file
+      return request.resource.size < 10 * 1024 * 1024;
+    }
+    
+    // User avatars
+    match /avatars/{userId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isUser(userId) && isImage() && isValidSize();
+      allow delete: if isUser(userId);
+    }
+    
+    // Exam answer uploads
+    match /answers/{examId}/{sessionId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isValidFileType() && isValidSize();
+    }
+    
+    // Exam materials (teacher uploads)
+    match /exams/{examId}/materials/{fileName} {
+      allow read: if isAuthenticated();
+      // Only teachers can upload exam materials
+      allow write: if isAuthenticated() && isValidFileType() && isValidSize();
+    }
+    
+    // Teacher exam paper uploads
+    match /exams/{teacherId}/papers/{fileName} {
+      allow read: if isAuthenticated();
+      // Teachers can upload exam papers
+      allow write: if isUser(teacherId) && isValidFileType() && isValidSize();
+      allow delete: if isUser(teacherId);
+    }
+    
+    // General uploads
+    match /uploads/{userId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isUser(userId) && isValidFileType() && isValidSize();
+      allow delete: if isUser(userId);
+    }
+  }
+}
