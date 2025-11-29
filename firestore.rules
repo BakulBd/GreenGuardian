@@ -1,0 +1,178 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isUser(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && getUserData().role == 'admin';
+    }
+    
+    function isTeacher() {
+      return isAuthenticated() && getUserData().role == 'teacher' && getUserData().approved == true;
+    }
+    
+    function isStudent() {
+      return isAuthenticated() && getUserData().role == 'student';
+    }
+    
+    function isTeacherOrAdmin() {
+      return isAdmin() || isTeacher();
+    }
+    
+    // Users collection
+    match /users/{userId} {
+      // Anyone authenticated can read their own user document
+      allow read: if isUser(userId);
+      
+      // Admins can read all users
+      allow read: if isAdmin();
+      
+      // Users can only create their own document during registration
+      allow create: if isUser(userId) && 
+                      request.resource.data.id == userId &&
+                      request.resource.data.email == request.auth.token.email &&
+                      request.resource.data.role in ['student', 'teacher'] &&
+                      (!request.resource.data.keys().hasAny(['approved']) || 
+                       request.resource.data.role == 'student' && request.resource.data.approved == true ||
+                       request.resource.data.role == 'teacher' && request.resource.data.approved == false);
+      
+      // Users can update their own profile (except role and approved status)
+      allow update: if isUser(userId) && 
+                       !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'approved', 'rejected', 'id']);
+      
+      // Admins can update any user (for approval/rejection)
+      allow update: if isAdmin();
+      
+      // Only admins can delete users
+      allow delete: if isAdmin();
+    }
+    
+    // Exams collection
+    match /exams/{examId} {
+      // Students can read published/active exams
+      allow read: if isAuthenticated();
+      
+      // Teachers can create exams
+      allow create: if isTeacher() && 
+                       request.resource.data.teacherId == request.auth.uid &&
+                       request.resource.data.status in ['draft', 'published'];
+      
+      // Teachers can update their own exams
+      allow update: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      
+      // Admins can update/delete any exam
+      allow update, delete: if isAdmin();
+      
+      // Teachers can delete their own exams
+      allow delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
+    }
+    
+    // Questions collection
+    match /questions/{questionId} {
+      // Students can read questions of exams they're taking
+      allow read: if isAuthenticated();
+      
+      // Teachers can create questions for their exams
+      allow create: if isTeacher() && 
+                       exists(/databases/$(database)/documents/exams/$(request.resource.data.examId)) &&
+                       get(/databases/$(database)/documents/exams/$(request.resource.data.examId)).data.teacherId == request.auth.uid;
+      
+      // Teachers can update/delete questions for their exams
+      allow update, delete: if isTeacher() && 
+                               exists(/databases/$(database)/documents/exams/$(resource.data.examId)) &&
+                               get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid;
+      
+      // Admins can do everything
+      allow update, delete: if isAdmin();
+    }
+    
+    // Exam Sessions collection
+    match /examSessions/{sessionId} {
+      // Students can read their own sessions
+      allow read: if isUser(resource.data.studentId);
+      
+      // Teachers can read sessions for their exams
+      allow read: if isTeacher() && 
+                     exists(/databases/$(database)/documents/exams/$(resource.data.examId)) &&
+                     get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid;
+      
+      // Admins can read all sessions
+      allow read: if isAdmin();
+      
+      // Students can create their own sessions
+      allow create: if isStudent() && 
+                       request.resource.data.studentId == request.auth.uid &&
+                       exists(/databases/$(database)/documents/exams/$(request.resource.data.examId));
+      
+      // Students can update their own sessions
+      allow update: if isUser(resource.data.studentId);
+      
+      // Teachers and admins can update sessions for monitoring
+      allow update: if isTeacherOrAdmin();
+    }
+    
+    // Answers collection
+    match /answers/{answerId} {
+      // Students can read their own answers
+      allow read: if isUser(resource.data.studentId);
+      
+      // Teachers can read answers for their exams
+      allow read: if isTeacher() && 
+                     exists(/databases/$(database)/documents/examSessions/$(resource.data.examSessionId)) &&
+                     get(/databases/$(database)/documents/examSessions/$(resource.data.examSessionId)).data.studentId != request.auth.uid;
+      
+      // Admins can read all answers
+      allow read: if isAdmin();
+      
+      // Students can create/update their own answers
+      allow create, update: if isStudent() && 
+                               request.resource.data.studentId == request.auth.uid &&
+                               exists(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)) &&
+                               get(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)).data.studentId == request.auth.uid;
+    }
+    
+    // Exam Logs collection
+    match /examLogs/{logId} {
+      // Students can read their own logs
+      allow read: if isUser(resource.data.studentId);
+      
+      // Teachers can read logs for their exams
+      allow read: if isTeacher() && 
+                     exists(/databases/$(database)/documents/examSessions/$(resource.data.examSessionId));
+      
+      // Admins can read all logs
+      allow read: if isAdmin();
+      
+      // Anyone authenticated can create logs (for proctoring)
+      allow create: if isAuthenticated() && 
+                       request.resource.data.studentId == request.auth.uid;
+    }
+    
+    // Settings collection (admin only)
+    match /settings/{settingId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+    
+    // Teacher Applications collection (optional)
+    match /teacherApplications/{applicationId} {
+      allow read: if isAdmin() || isUser(resource.data.userId);
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+  }
+}
