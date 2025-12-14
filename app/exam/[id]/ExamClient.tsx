@@ -810,7 +810,7 @@ export default function ExamClient() {
 
   const handleSubmit = async (auto = false, reason?: string) => {
     if (!user || !exam || !sessionId) return;
-    
+
     // Prevent multiple submissions and further warnings
     if (submittedRef.current) return;
     submittedRef.current = true;
@@ -833,6 +833,24 @@ export default function ExamClient() {
     }
 
     setSubmitting(true);
+    const MAX_RETRIES = 3;
+    let attempt = 0;
+    let lastError: any = null;
+    // Helper for retrying async Firestore writes
+    async function retryAsync(fn: () => Promise<any>, label: string) {
+      for (let i = 0; i < MAX_RETRIES; i++) {
+        try {
+          return await fn();
+        } catch (err: any) {
+          lastError = err;
+          console.error(`Attempt ${i + 1} failed for ${label}:`, err);
+          if (i < MAX_RETRIES - 1) {
+            await new Promise(res => setTimeout(res, 500 * (i + 1)));
+          }
+        }
+      }
+      throw lastError;
+    }
     try {
       // Save answers with behavior score
       const answerData: any = {
@@ -853,7 +871,6 @@ export default function ExamClient() {
       } else {
         // For upload mode, include answer files and run OCR analysis
         answerData.answerFiles = answerFiles;
-        
         // Run OCR and AI detection on uploaded files (async, don't block submission)
         if (answerFiles.length > 0) {
           try {
@@ -861,7 +878,6 @@ export default function ExamClient() {
             const primaryFile = answerFiles[0];
             if (primaryFile.url) {
               const analysis = await analyzeSubmittedAnswer(primaryFile.url);
-              
               // Store OCR results with the answer
               answerData.ocrAnalysis = {
                 extractedText: analysis.extractedText.substring(0, 10000), // Limit text size
@@ -881,10 +897,9 @@ export default function ExamClient() {
         }
       }
 
-      await addDoc(collection(db, "answers"), answerData);
-
-      // Update session with behavior score and violation details
-      await updateDoc(doc(db, "examSessions", sessionId), {
+      // Retry Firestore writes for reliability
+      await retryAsync(() => addDoc(collection(db, "answers"), answerData), "addDoc(answers)");
+      await retryAsync(() => updateDoc(doc(db, "examSessions", sessionId), {
         status: "completed",
         completedAt: serverTimestamp(),
         warnings,
@@ -893,7 +908,7 @@ export default function ExamClient() {
         autoSubmitted: auto,
         flagged: behaviorScore < 50, // Flag if behavior score is poor
         flagReasons: behaviorScore < 50 ? ["Poor behavior score"] : [],
-      });
+      }), "updateDoc(examSessions)");
 
       // Stop camera
       if (streamRef.current) {
@@ -915,11 +930,18 @@ export default function ExamClient() {
 
       router.push("/dashboard/student");
     } catch (error: any) {
+      let message = error?.message || "Failed to submit exam";
+      if (lastError) {
+        message += `. Last error: ${lastError.message || lastError}`;
+      }
       toast({
-        title: "Error",
-        description: error.message || "Failed to submit exam",
+        title: "Submission Error",
+        description: message +
+          " Please check your internet connection and try again. If the problem persists, contact support.",
         variant: "destructive",
       });
+      // Allow retry
+      submittedRef.current = false;
     } finally {
       setSubmitting(false);
     }

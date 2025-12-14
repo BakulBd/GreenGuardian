@@ -24,7 +24,7 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!formData.email || !formData.password) {
       toast({
         title: "Validation Error",
@@ -36,18 +36,29 @@ export default function LoginPage() {
 
     setLoading(true);
 
-    try {
-      const { user, error } = await loginUser(formData.email, formData.password);
-
-      if (error || !user) {
-        toast({
-          title: "Login Failed",
-          description: error || "Invalid credentials",
-          variant: "destructive",
-        });
-        setLoading(false);
-        return;
+    const MAX_RETRIES = 3;
+    let lastError: any = null;
+    async function retryLogin() {
+      for (let i = 0; i < MAX_RETRIES; i++) {
+        try {
+          const { user, error } = await loginUser(formData.email, formData.password);
+          if (error || !user) {
+            lastError = error || "Invalid credentials";
+            throw new Error(lastError);
+          }
+          return user;
+        } catch (err) {
+          lastError = err;
+          if (i < MAX_RETRIES - 1) {
+            await new Promise(res => setTimeout(res, 500 * (i + 1)));
+          }
+        }
       }
+      throw lastError;
+    }
+
+    try {
+      const user = await retryLogin();
 
       toast({
         title: "Login Successful",
@@ -67,11 +78,14 @@ export default function LoginPage() {
         router.push("/exam");
       }
     } catch (error: any) {
+      let message = error?.message || "Something went wrong";
       toast({
-        title: "Error",
-        description: error.message || "Something went wrong",
+        title: "Login Error",
+        description: message +
+          " Please check your credentials and internet connection. If the problem persists, try again later or contact support.",
         variant: "destructive",
       });
+    } finally {
       setLoading(false);
     }
   };
