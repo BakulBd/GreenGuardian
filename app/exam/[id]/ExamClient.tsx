@@ -99,6 +99,7 @@ export default function ExamClient() {
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [examStep, setExamStep] = useState<"info" | "camera" | "ready" | "started">("info");
   const [selectedPaper, setSelectedPaper] = useState(0);
+  const [selectedPdfPage, setSelectedPdfPage] = useState(1);
   
   // Behavior score tracking - starts at 100, deducted for violations
   const [behaviorScore, setBehaviorScore] = useState(100);
@@ -593,6 +594,10 @@ export default function ExamClient() {
     
     setExamStep("ready");
   }, [toast]);
+
+  useEffect(() => {
+    setSelectedPdfPage(1);
+  }, [selectedPaper, exam?.id]);
 
   // Handle camera permission denied
   const handleCameraPermissionDenied = useCallback(() => {
@@ -1502,11 +1507,36 @@ export default function ExamClient() {
                 {exam.examPapers && exam.examPapers[selectedPaper] && (
                   <div className="w-full min-h-[70vh]">
                     {exam.examPapers[selectedPaper].type === "application/pdf" ? (
-                      <iframe
-                        src={exam.examPapers[selectedPaper].url}
-                        className="w-full h-[70vh] rounded-b-lg"
-                        title="Exam Paper"
-                      />
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-4">
+                          <div className="text-sm text-gray-300">
+                            PDF page {selectedPdfPage}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setSelectedPdfPage((page) => Math.max(1, page - 1))}
+                            >
+                              Previous Page
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setSelectedPdfPage((page) => page + 1)}
+                            >
+                              Next Page
+                            </Button>
+                          </div>
+                        </div>
+                        <iframe
+                          src={`${exam.examPapers[selectedPaper].url}#page=${selectedPdfPage}&view=FitH`}
+                          className="w-full h-[70vh] rounded-b-lg"
+                          title="Exam Paper"
+                        />
+                      </div>
                     ) : exam.examPapers[selectedPaper].type.startsWith("image/") ? (
                       <img
                         src={exam.examPapers[selectedPaper].url}

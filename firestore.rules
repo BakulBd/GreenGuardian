@@ -113,9 +113,9 @@ service cloud.firestore {
       allow read: if isAdmin();
       
       // Students can create their own sessions
-      allow create: if isStudent() && 
-                       request.resource.data.studentId == request.auth.uid &&
-                       exists(/databases/$(database)/documents/exams/$(request.resource.data.examId));
+      allow create: if isAuthenticated() &&
+               request.resource.data.studentId == request.auth.uid &&
+               exists(/databases/$(database)/documents/exams/$(request.resource.data.examId));
       
       // Students can update their own sessions
       allow update: if isUser(resource.data.studentId);
