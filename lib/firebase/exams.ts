@@ -77,11 +77,11 @@ export async function getQuestion(questionId: string): Promise<Question | null> 
 export async function getQuestionsByExam(examId: string): Promise<Question[]> {
   const q = query(
     collection(db, "questions"),
-    where("examId", "==", examId),
-    orderBy("order", "asc")
+    where("examId", "==", examId)
   );
   const snapshot = await getDocs(q);
-  return snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as Question));
+  const questions = snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as Question));
+  return questions.sort((a, b) => (a.order || 0) - (b.order || 0));
 }
 
 export async function updateQuestion(questionId: string, data: Partial<Question>): Promise<void> {
@@ -114,21 +114,29 @@ export async function getExamSession(sessionId: string): Promise<ExamSession | n
 export async function getSessionsByExam(examId: string): Promise<ExamSession[]> {
   const q = query(
     collection(db, "examSessions"),
-    where("examId", "==", examId),
-    orderBy("startTime", "desc")
+    where("examId", "==", examId)
   );
   const snapshot = await getDocs(q);
-  return snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as ExamSession));
+  const sessions = snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as ExamSession));
+  return sessions.sort((a, b) => {
+    const aMs = (a.startTime as any)?.toDate?.()?.getTime?.() ?? 0;
+    const bMs = (b.startTime as any)?.toDate?.()?.getTime?.() ?? 0;
+    return bMs - aMs;
+  });
 }
 
 export async function getSessionsByStudent(studentId: string): Promise<ExamSession[]> {
   const q = query(
     collection(db, "examSessions"),
-    where("studentId", "==", studentId),
-    orderBy("startTime", "desc")
+    where("studentId", "==", studentId)
   );
   const snapshot = await getDocs(q);
-  return snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as ExamSession));
+  const sessions = snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as ExamSession));
+  return sessions.sort((a, b) => {
+    const aMs = (a.startTime as any)?.toDate?.()?.getTime?.() ?? 0;
+    const bMs = (b.startTime as any)?.toDate?.()?.getTime?.() ?? 0;
+    return bMs - aMs;
+  });
 }
 
 export async function updateExamSession(sessionId: string, data: Partial<ExamSession>): Promise<void> {

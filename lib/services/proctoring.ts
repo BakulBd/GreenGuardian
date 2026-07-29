@@ -9,10 +9,7 @@ import {
   query, 
   where, 
   serverTimestamp,
-  Timestamp,
   addDoc,
-  orderBy,
-  limit,
   getDocs,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
@@ -343,9 +340,7 @@ export function subscribeToLiveSessions(
       // Get recent events for this session
       const eventsQuery = query(
         collection(db, "proctoringEvents"),
-        where("sessionId", "==", docSnapshot.id),
-        orderBy("timestamp", "desc"),
-        limit(10)
+        where("sessionId", "==", docSnapshot.id)
       );
       
       const eventsSnapshot = await getDocs(eventsQuery);
@@ -353,12 +348,18 @@ export function subscribeToLiveSessions(
         ...e.data(),
         timestamp: e.data().timestamp?.toDate?.() || new Date(),
       })) as ProctoringEvent[];
+      recentEvents.sort((a, b) => {
+        const aMs = new Date(a.timestamp as any).getTime();
+        const bMs = new Date(b.timestamp as any).getTime();
+        return bMs - aMs;
+      });
+      const recentEventsLimited = recentEvents.slice(0, 10);
       
       // Determine alert status
-      const hasAlert = recentEvents.some(
+      const hasAlert = recentEventsLimited.some(
         e => e.severity === 'critical' || e.severity === 'high'
       );
-      const alertReasons = recentEvents
+      const alertReasons = recentEventsLimited
         .filter(e => e.severity === 'critical' || e.severity === 'high')
         .map(e => e.message)
         .slice(0, 3);
@@ -366,7 +367,7 @@ export function subscribeToLiveSessions(
       // Get latest proctoring data
       const proctoring = data.proctoring || {};
       const behaviorScore = proctoring.behaviorScore ?? 100;
-      const warningCount = proctoring.suspiciousEvents ?? 0;
+      const warningCount = data.warnings ?? proctoring.suspiciousEvents ?? 0;
       
       // Calculate risk level
       let riskLevel: 'low' | 'medium' | 'high' | 'critical';
@@ -387,7 +388,7 @@ export function subscribeToLiveSessions(
         warningCount,
         riskLevel,
         latestSnapshot: proctoring.lastSnapshot,
-        recentEvents,
+        recentEvents: recentEventsLimited,
         hasAlert,
         alertReasons,
       });
@@ -413,15 +414,19 @@ export async function getSessionEvents(
 ): Promise<ProctoringEvent[]> {
   const eventsQuery = query(
     collection(db, "proctoringEvents"),
-    where("sessionId", "==", sessionId),
-    orderBy("timestamp", "desc")
+    where("sessionId", "==", sessionId)
   );
   
   const snapshot = await getDocs(eventsQuery);
-  return snapshot.docs.map(doc => ({
+  const events = snapshot.docs.map(doc => ({
     ...doc.data(),
     timestamp: doc.data().timestamp?.toDate?.() || new Date(),
   })) as ProctoringEvent[];
+  return events.sort((a, b) => {
+    const aMs = new Date(a.timestamp as any).getTime();
+    const bMs = new Date(b.timestamp as any).getTime();
+    return bMs - aMs;
+  });
 }
 
 /**
@@ -433,14 +438,19 @@ export async function getSessionSnapshots(
 ): Promise<ProctoringSnapshot[]> {
   const snapshotsQuery = query(
     collection(db, "proctoringSnapshots"),
-    where("sessionId", "==", sessionId),
-    orderBy("timestamp", "desc"),
-    limit(limitCount)
+    where("sessionId", "==", sessionId)
   );
   
   const snapshot = await getDocs(snapshotsQuery);
-  return snapshot.docs.map(doc => ({
+  const snapshots = snapshot.docs.map(doc => ({
     ...doc.data(),
     timestamp: doc.data().timestamp?.toDate?.() || new Date(),
   })) as ProctoringSnapshot[];
+  return snapshots
+    .sort((a, b) => {
+      const aMs = new Date(a.timestamp as any).getTime();
+      const bMs = new Date(b.timestamp as any).getTime();
+      return bMs - aMs;
+    })
+    .slice(0, limitCount);
 }

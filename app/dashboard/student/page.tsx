@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { collection, query, where, getDocs, orderBy, limit } from "firebase/firestore";
+import { collection, query, where, getDocs, limit } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import Link from "next/link";
 
@@ -39,7 +39,7 @@ interface ExamSession {
   examId: string;
   examTitle?: string;
   status: string;
-  startedAt: any;
+  startTime: any;
   completedAt?: any;
   score?: number;
   totalMarks?: number;
@@ -90,11 +90,10 @@ export default function StudentDashboardPage() {
       const sessionsQuery = query(
         collection(db, "examSessions"),
         where("studentId", "==", user.id),
-        orderBy("startedAt", "desc"),
         limit(10)
       );
       const sessionsSnapshot = await getDocs(sessionsQuery);
-      const sessions = await Promise.all(
+      const sessionsUnsorted = await Promise.all(
         sessionsSnapshot.docs.map(async (doc) => {
           const session = { id: doc.id, ...doc.data() } as ExamSession;
           // Get exam title
@@ -107,10 +106,17 @@ export default function StudentDashboardPage() {
           return session;
         })
       );
+      const sessions = sessionsUnsorted.sort((a, b) => {
+        const aMs = a.startTime?.toDate?.()?.getTime?.() ?? 0;
+        const bMs = b.startTime?.toDate?.()?.getTime?.() ?? 0;
+        return bMs - aMs;
+      });
       setRecentSessions(sessions);
 
       // Calculate stats
-      const completedSessions = sessions.filter(s => s.status === "submitted" || s.status === "auto-submitted");
+      const completedSessions = sessions.filter(
+        (s) => s.status === "submitted" || s.status === "auto-submitted" || s.status === "completed"
+      );
       const scores = completedSessions
         .filter(s => s.score !== undefined && s.totalMarks)
         .map(s => (s.score! / s.totalMarks!) * 100);
@@ -282,8 +288,8 @@ export default function StudentDashboardPage() {
                       <div className="flex flex-wrap gap-2 mt-1 text-sm text-gray-500">
                         <span className="flex items-center gap-1">
                           <Calendar className="h-3 w-3" />
-                          {session.startedAt?.toDate?.()
-                            ? session.startedAt.toDate().toLocaleDateString()
+                          {session.startTime?.toDate?.()
+                            ? session.startTime.toDate().toLocaleDateString()
                             : "Unknown date"}
                         </span>
                         <Badge

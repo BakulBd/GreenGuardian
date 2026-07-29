@@ -42,7 +42,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
-import { doc, getDoc, collection, query, where, getDocs, orderBy } from "firebase/firestore";
+import { doc, getDoc, collection, query, where, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { getBehaviorLevel, getViolationSummary, ViolationCounts } from "@/lib/utils/helpers";
 import Link from "next/link";
@@ -162,8 +162,7 @@ function ResultsContent() {
       // Load proctoring events
       const eventsQuery = query(
         collection(db, "proctoringEvents"),
-        where("sessionId", "==", sessionId),
-        orderBy("timestamp", "desc")
+        where("sessionId", "==", sessionId)
       );
       
       try {
@@ -173,6 +172,7 @@ function ResultsContent() {
           ...doc.data(),
           timestamp: doc.data().timestamp?.toDate() || new Date(),
         })) as ProctoringEvent[];
+        eventsList.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
         setEvents(eventsList);
       } catch (e) {
         console.log("No proctoring events found");

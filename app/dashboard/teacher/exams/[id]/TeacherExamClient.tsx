@@ -23,7 +23,7 @@ import {
   Loader2,
   Eye
 } from "lucide-react";
-import { getExam, updateExam, deleteExam, getQuestionsByExam, createQuestion, deleteQuestion, getSessionsByExam } from "@/lib/firebase/exams";
+import { getExam, updateExam, deleteExam, getQuestionsByExam, createQuestion, deleteQuestion, getSessionsByExam, updateQuestion } from "@/lib/firebase/exams";
 import { Exam, Question, ExamSession } from "@/lib/types";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -44,6 +44,8 @@ export default function TeacherExamClient() {
   const [editedExam, setEditedExam] = useState<Partial<Exam>>({});
   
   const [showNewQuestion, setShowNewQuestion] = useState(false);
+  const [editingQuestionId, setEditingQuestionId] = useState<string | null>(null);
+  const [editedQuestion, setEditedQuestion] = useState<Partial<Question>>({});
   const [newQuestion, setNewQuestion] = useState({
     text: "",
     type: "multiple-choice" as "multiple-choice" | "true-false" | "short-answer",
@@ -142,6 +144,40 @@ export default function TeacherExamClient() {
       toast({ title: "Success", description: "Question added" });
     } catch (error) {
       toast({ title: "Error", description: "Failed to add", variant: "destructive" });
+    }
+  };
+
+  const startEditQuestion = (question: Question) => {
+    setEditingQuestionId(question.id);
+    setEditedQuestion({
+      text: question.text,
+      type: question.type,
+      options: question.options || [],
+      correctAnswer: (question as any).correctAnswer || "",
+      marks: question.marks,
+    });
+  };
+
+  const handleSaveQuestion = async (questionId: string) => {
+    if (!editedQuestion.text?.trim()) {
+      toast({ title: "Error", description: "Question text required", variant: "destructive" });
+      return;
+    }
+
+    try {
+      await updateQuestion(questionId, {
+        text: editedQuestion.text!,
+        type: (editedQuestion.type as any) || "multiple-choice",
+        options: (editedQuestion.type === "multiple-choice" ? (editedQuestion.options || []).filter((option) => String(option).trim()) : []),
+        correctAnswer: String(editedQuestion.correctAnswer || ""),
+        marks: Number(editedQuestion.marks || 1),
+      } as any);
+      await loadExamData();
+      setEditingQuestionId(null);
+      setEditedQuestion({});
+      toast({ title: "Success", description: "Question updated" });
+    } catch (error) {
+      toast({ title: "Error", description: "Failed to update question", variant: "destructive" });
     }
   };
 
@@ -268,12 +304,70 @@ export default function TeacherExamClient() {
             ) : (
               <div className="space-y-3">
                 {questions.map((q, i) => (
-                  <div key={q.id} className="p-3 border rounded-lg flex justify-between">
-                    <div>
-                      <Badge variant="outline">Q{i + 1}</Badge>
-                      <span className="ml-2">{q.text}</span>
+                  <div key={q.id} className="p-4 border rounded-lg space-y-3 bg-white">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <Badge variant="outline">Q{i + 1}</Badge>
+                        <span className="font-medium truncate">{q.text}</span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <Button variant="outline" size="sm" onClick={() => startEditQuestion(q)}>
+                          <Edit className="h-4 w-4 mr-2" />
+                          Edit
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => handleDeleteQuestion(q.id)}>
+                          <Trash2 className="h-4 w-4 text-red-500" />
+                        </Button>
+                      </div>
                     </div>
-                    <Button variant="ghost" size="sm" onClick={() => handleDeleteQuestion(q.id)}><Trash2 className="h-4 w-4 text-red-500" /></Button>
+
+                    {editingQuestionId === q.id ? (
+                      <div className="space-y-3 rounded-lg bg-gray-50 p-4">
+                        <div>
+                          <Label>Question</Label>
+                          <Textarea
+                            value={editedQuestion.text || ""}
+                            onChange={(e) => setEditedQuestion({ ...editedQuestion, text: e.target.value })}
+                          />
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <Label>Type</Label>
+                            <Input
+                              value={String(editedQuestion.type || "multiple-choice")}
+                              onChange={(e) => setEditedQuestion({ ...editedQuestion, type: e.target.value as any })}
+                            />
+                          </div>
+                          <div>
+                            <Label>Marks</Label>
+                            <Input
+                              type="number"
+                              value={editedQuestion.marks || 1}
+                              onChange={(e) => setEditedQuestion({ ...editedQuestion, marks: parseInt(e.target.value) || 1 })}
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <Label>Correct Answer</Label>
+                          <Textarea
+                            value={String(editedQuestion.correctAnswer || "")}
+                            onChange={(e) => setEditedQuestion({ ...editedQuestion, correctAnswer: e.target.value })}
+                          />
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <Button variant="outline" onClick={() => { setEditingQuestionId(null); setEditedQuestion({}); }}>
+                            Cancel
+                          </Button>
+                          <Button onClick={() => handleSaveQuestion(q.id)}>Save Question</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2 text-xs text-gray-600">
+                        <Badge variant="secondary">Type: {q.type}</Badge>
+                        <Badge variant="secondary">Marks: {q.marks}</Badge>
+                        {(q as any).correctAnswer && <Badge variant="outline">Correct answer set</Badge>}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

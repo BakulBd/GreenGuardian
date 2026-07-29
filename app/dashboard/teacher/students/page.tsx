@@ -32,8 +32,10 @@ interface StudentData {
   email: string;
   examsCompleted: number;
   avgScore: number;
+  avgAccuracy: number;
   lastExamDate?: Date;
   totalWarnings: number;
+  flaggedCount: number;
   sessions: ExamSession[];
 }
 
@@ -82,7 +84,9 @@ export default function TeacherStudentsPage() {
             email: studentInfo?.email || "Unknown",
             examsCompleted: 0,
             avgScore: 0,
+            avgAccuracy: 0,
             totalWarnings: 0,
+            flaggedCount: 0,
             sessions: [],
           });
         }
@@ -95,9 +99,16 @@ export default function TeacherStudentsPage() {
           if (session.score !== undefined) {
             student.avgScore = (student.avgScore * (student.examsCompleted - 1) + session.score) / student.examsCompleted;
           }
+          const accuracy = (session as any).accuracy;
+          if (accuracy !== undefined) {
+            student.avgAccuracy = (student.avgAccuracy * (student.examsCompleted - 1) + accuracy) / student.examsCompleted;
+          }
         }
         
         student.totalWarnings += session.proctoring?.suspiciousEvents || 0;
+        if ((session as any).flagged) {
+          student.flaggedCount += 1;
+        }
         
         const sessionDate = session.endTime ? 
           (session.endTime instanceof Date ? session.endTime : (session.endTime as any)?.toDate?.()) : 
@@ -141,6 +152,7 @@ export default function TeacherStudentsPage() {
       ? students.reduce((acc, s) => acc + s.avgScore, 0) / students.length 
       : 0,
     totalWarnings: students.reduce((acc, s) => acc + s.totalWarnings, 0),
+    flagged: students.reduce((acc, s) => acc + s.flaggedCount, 0),
   };
 
   return (
@@ -155,7 +167,7 @@ export default function TeacherStudentsPage() {
         </div>
 
         {/* Stats Overview */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center">
@@ -204,6 +216,19 @@ export default function TeacherStudentsPage() {
                 <div className="ml-4">
                   <p className="text-sm text-gray-600">Total Warnings</p>
                   <p className="text-2xl font-bold">{totalStats.totalWarnings}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="pt-6">
+              <div className="flex items-center">
+                <div className="p-3 bg-red-100 rounded-lg">
+                  <AlertTriangle className="h-6 w-6 text-red-600" />
+                </div>
+                <div className="ml-4">
+                  <p className="text-sm text-gray-600">Flagged</p>
+                  <p className="text-2xl font-bold">{totalStats.flagged}</p>
                 </div>
               </div>
             </CardContent>
@@ -328,53 +353,89 @@ export default function TeacherStudentsPage() {
 
         {/* Student Details Modal/Card */}
         {selectedStudent && (
-          <Card className="border-primary-200">
-            <CardHeader>
-              <div className="flex items-center justify-between">
+          <Card className="border-primary-200 shadow-xl">
+            <CardHeader className="bg-gradient-to-r from-slate-50 to-white border-b">
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div>
-                  <CardTitle>{selectedStudent.name}</CardTitle>
-                  <CardDescription>{selectedStudent.email}</CardDescription>
+                  <CardTitle className="text-2xl">{selectedStudent.name}</CardTitle>
+                  <CardDescription className="text-base">{selectedStudent.email}</CardDescription>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Badge variant="secondary">{selectedStudent.examsCompleted} exams</Badge>
+                    <Badge className="bg-green-100 text-green-700">Avg Score {selectedStudent.avgScore.toFixed(1)}%</Badge>
+                    <Badge className="bg-indigo-100 text-indigo-700">Avg Accuracy {selectedStudent.avgAccuracy.toFixed(1)}%</Badge>
+                    <Badge className="bg-orange-100 text-orange-700">Warnings {selectedStudent.totalWarnings}</Badge>
+                    <Badge className="bg-red-100 text-red-700">Flagged {selectedStudent.flaggedCount}</Badge>
+                  </div>
                 </div>
                 <Button variant="ghost" onClick={() => setSelectedStudent(null)}>
                   Close
                 </Button>
               </div>
             </CardHeader>
-            <CardContent>
-              <h4 className="font-medium text-gray-900 mb-4">Exam History</h4>
-              <div className="space-y-3">
-                {selectedStudent.sessions.map((session) => (
-                  <div 
-                    key={session.id} 
-                    className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
-                  >
-                    <div>
-                      <p className="font-medium">{(session as any).examTitle || "Exam"}</p>
-                      <div className="flex items-center space-x-2 text-sm text-gray-600">
-                        <Clock className="h-3 w-3" />
-                        <span>
-                          {session.startTime instanceof Date ? session.startTime.toLocaleDateString() : 
-                            (session.startTime as any)?.toDate?.()?.toLocaleDateString() || "Unknown date"}
-                        </span>
+            <CardContent className="space-y-6 pt-6">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <Card>
+                  <CardContent className="pt-6">
+                    <p className="text-sm text-gray-500">Average Score</p>
+                    <p className="text-2xl font-bold text-green-600">{selectedStudent.avgScore.toFixed(1)}%</p>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="pt-6">
+                    <p className="text-sm text-gray-500">Average Accuracy</p>
+                    <p className="text-2xl font-bold text-indigo-600">{selectedStudent.avgAccuracy.toFixed(1)}%</p>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="pt-6">
+                    <p className="text-sm text-gray-500">Warnings</p>
+                    <p className="text-2xl font-bold text-orange-600">{selectedStudent.totalWarnings}</p>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="pt-6">
+                    <p className="text-sm text-gray-500">Flagged Sessions</p>
+                    <p className="text-2xl font-bold text-red-600">{selectedStudent.flaggedCount}</p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div>
+                <h4 className="font-semibold text-gray-900 mb-3">Exam History</h4>
+                <div className="space-y-3">
+                  {selectedStudent.sessions.map((session) => (
+                    <div key={session.id} className="rounded-xl border bg-white p-4 shadow-sm">
+                      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-gray-900 truncate">{(session as any).examTitle || "Exam"}</p>
+                          <p className="text-sm text-gray-500 mt-1">
+                            {session.startTime instanceof Date ? session.startTime.toLocaleDateString() : 
+                              (session.startTime as any)?.toDate?.()?.toLocaleDateString() || "Unknown date"}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge className={
+                            (session.status === "submitted" || session.status === "auto-submitted") ? "bg-green-100 text-green-700" :
+                            session.status === "in-progress" ? "bg-blue-100 text-blue-700" :
+                            "bg-gray-100 text-gray-700"
+                          }>
+                            {session.status}
+                          </Badge>
+                          <Badge variant="outline">Behavior {(session as any).behaviorScore ?? 0}%</Badge>
+                          <Badge variant="outline">Accuracy {(session as any).accuracy ?? 0}%</Badge>
+                          <Badge variant="outline">Score {(session as any).score ?? 0}</Badge>
+                          <Badge variant="outline">Warnings {(session as any).warnings ?? session.proctoring?.suspiciousEvents || 0}</Badge>
+                          {(session as any).flagged && <Badge className="bg-red-100 text-red-700">Flagged</Badge>}
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex items-center space-x-4">
-                      <Badge className={
-                        (session.status === "submitted" || session.status === "auto-submitted") ? "bg-green-100 text-green-700" :
-                        session.status === "in-progress" ? "bg-blue-100 text-blue-700" :
-                        "bg-gray-100 text-gray-700"
-                      }>
-                        {session.status}
-                      </Badge>
-                      {session.score !== undefined && (
-                        <span className="font-medium">{session.score}%</span>
+                      {(session as any).flagReasons?.length > 0 && (
+                        <div className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">
+                          {(session as any).flagReasons.join(", ")}
+                        </div>
                       )}
-                      <Badge variant="outline">
-                        {session.proctoring?.suspiciousEvents || 0} warnings
-                      </Badge>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             </CardContent>
           </Card>

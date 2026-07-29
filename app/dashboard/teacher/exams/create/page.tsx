@@ -56,7 +56,7 @@ export default function CreateExamPage() {
   });
   const [questions, setQuestions] = useState<Question[]>([]);
   const [examPapers, setExamPapers] = useState<UploadResult[]>([]);
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const { toast } = useToast();
   const router = useRouter();
 
@@ -359,6 +359,7 @@ export default function CreateExamPage() {
                 basePath={`exams/${user?.id}/papers`}
                 onUploadComplete={(files) => setExamPapers(files)}
                 maxFiles={10}
+                disabled={!user || authLoading}
               />
               
               <div className="space-y-2">
@@ -509,14 +510,14 @@ export default function CreateExamPage() {
           <Button
             variant="outline"
             onClick={() => handleSubmit("draft")}
-            disabled={saving}
+            disabled={saving || authLoading || !user}
           >
             {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
             Save as Draft
           </Button>
           <Button
             onClick={() => handleSubmit("published")}
-            disabled={saving}
+            disabled={saving || authLoading || !user}
           >
             {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
             Publish Exam

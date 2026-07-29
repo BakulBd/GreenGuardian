@@ -40,6 +40,7 @@ import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
 import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
+import { captureVideoFrame, sendProctoringSnapshot } from "@/lib/services/proctoring";
 
 interface Question {
   id: string;
@@ -71,6 +72,39 @@ interface Exam {
   totalMarks: number;
 }
 
+const mapViolationToEventType = (violationType: keyof ViolationCounts | null): string => {
+  switch (violationType) {
+    case "tabSwitch":
+      return "tab_switch";
+    case "fullscreenExit":
+      return "fullscreen_exit";
+    case "noFace":
+      return "no_face";
+    case "multipleFaces":
+      return "multiple_faces";
+    case "lookingAway":
+      return "looking_away";
+    case "copyAttempt":
+      return "copy_attempt";
+    case "pasteAttempt":
+      return "paste_attempt";
+    case "suspiciousKeyboard":
+      return "suspicious_keyboard";
+    case "windowBlur":
+      return "window_blur";
+    case "mobilePhoneDetected":
+      return "mobile_phone_detected";
+    case "bookDetected":
+      return "book_detected";
+    case "additionalDevice":
+      return "laptop_detected";
+    case "secondPerson":
+      return "second_person_detected";
+    default:
+      return "suspicious_keyboard";
+  }
+};
+
 export default function ExamClient() {
   const params = useParams();
   const router = useRouter();
@@ -99,10 +133,13 @@ export default function ExamClient() {
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [examStep, setExamStep] = useState<"info" | "camera" | "ready" | "started">("info");
   const [selectedPaper, setSelectedPaper] = useState(0);
+  const [selectedPdfPage, setSelectedPdfPage] = useState(1);
   
   // Behavior score tracking - starts at 100, deducted for violations
   const [behaviorScore, setBehaviorScore] = useState(100);
   const [violationCounts, setViolationCounts] = useState<ViolationCounts>(initializeViolationCounts());
+  const behaviorScoreRef = useRef(100);
+  const warningsRef = useRef(0);
 
   const maxWarnings = 5;
 
@@ -162,6 +199,14 @@ export default function ExamClient() {
       disposeFaceDetectionModel();
     };
   }, []);
+
+  useEffect(() => {
+    behaviorScoreRef.current = behaviorScore;
+  }, [behaviorScore]);
+
+  useEffect(() => {
+    warningsRef.current = warnings;
+  }, [warnings]);
 
   // Safe play function that handles the AbortError gracefully
   const playVideoRef = useRef<Promise<void> | null>(null);
@@ -328,6 +373,10 @@ export default function ExamClient() {
       
       // Track the violation type and update counts
       const violationType = getViolationType(reason);
+      const nextViolationCounts = violationType
+        ? { ...violationCounts, [violationType]: violationCounts[violationType] + 1 }
+        : violationCounts;
+      const nextBehaviorScore = calculateBehaviorScore(nextViolationCounts);
       
       if (violationType) {
         setViolationCounts((prevCounts) => {
@@ -353,11 +402,51 @@ export default function ExamClient() {
           reason,
           timestamp: serverTimestamp(),
         }).catch(err => console.error("Failed to log warning:", err));
+
+        updateDoc(doc(db, "examSessions", sessionId), {
+          warnings: newCount,
+          behaviorScore: nextBehaviorScore,
+          violationCounts: nextViolationCounts,
+          "proctoring.suspiciousEvents": newCount,
+          updatedAt: serverTimestamp(),
+        }).catch((err) => console.error("Failed to update session warning counters:", err));
+
+        addDoc(collection(db, "proctoringEvents"), {
+          sessionId,
+          studentId: user.id,
+          eventType: mapViolationToEventType(violationType),
+          severity: nextBehaviorScore < 40 ? "critical" : nextBehaviorScore < 65 ? "high" : "medium",
+          penalty: 1,
+          message: reason,
+          timestamp: serverTimestamp(),
+          ...(exam?.id ? { examId: exam.id } : {}),
+        }).catch((err) => console.error("Failed to log proctoring event:", err));
+
+        const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
+        if (screenshot && exam?.id) {
+          sendProctoringSnapshot({
+            sessionId,
+            studentId: user.id,
+            examId: exam.id,
+            faceDetected: true,
+            faceCount: 1,
+            isLookingAway: false,
+            mobilePhoneDetected: reason.toLowerCase().includes("mobile") || reason.toLowerCase().includes("phone"),
+            bookDetected: reason.toLowerCase().includes("book"),
+            additionalDeviceDetected: reason.toLowerCase().includes("device") || reason.toLowerCase().includes("laptop"),
+            secondPersonDetected: reason.toLowerCase().includes("person"),
+            snapshotUrl: screenshot,
+            behaviorScore: nextBehaviorScore,
+            warningCount: newCount,
+            isOnline: true,
+            lastActivityAt: serverTimestamp(),
+          }).catch((err) => console.error("Failed to store warning snapshot:", err));
+        }
       }
 
       return newCount;
     });
-  }, [sessionId, user, maxWarnings]);
+  }, [sessionId, user, maxWarnings, violationCounts, exam?.id]);
 
   // Effect to show toast notifications for warnings (avoids setState during render)
   useEffect(() => {
@@ -594,6 +683,10 @@ export default function ExamClient() {
     setExamStep("ready");
   }, [toast]);
 
+  useEffect(() => {
+    setSelectedPdfPage(1);
+  }, [selectedPaper, exam?.id]);
+
   // Handle camera permission denied
   const handleCameraPermissionDenied = useCallback(() => {
     toast({
@@ -733,8 +826,8 @@ export default function ExamClient() {
                     additionalDeviceDetected: false,
                     secondPersonDetected: false,
                     snapshotUrl: thumbnail,
-                    behaviorScore,
-                    warningCount: warnings,
+                    behaviorScore: behaviorScoreRef.current,
+                    warningCount: warningsRef.current,
                     isOnline: true,
                     lastActivityAt: serverTimestamp(),
                   });
@@ -743,7 +836,7 @@ export default function ExamClient() {
                 console.error("Failed to send snapshot:", error);
               }
             }
-          }, 30000); // Every 30 seconds
+          }, 5000); // Every 5 seconds for near-live teacher monitoring
         }
       } catch (error) {
         console.error("Failed to initialize detection modules:", error);
@@ -751,7 +844,7 @@ export default function ExamClient() {
     };
     
     loadModules();
-  }, [modelLoaded, addWarning, sessionId, user, exam, behaviorScore, warnings]);
+  }, [modelLoaded, addWarning, sessionId, user, exam]);
 
   const proceedToCamera = () => {
     setExamStep("camera");
@@ -852,6 +945,62 @@ export default function ExamClient() {
       throw lastError;
     }
     try {
+      const submissionReason = reason ?? (auto ? "Auto-submitted" : undefined);
+      const sessionStatus = auto ? "auto-submitted" : "submitted";
+      let gradingSummary: {
+        correctAnswers: number;
+        wrongAnswers: number;
+        attemptedAnswers: number;
+        totalQuestions: number;
+        accuracy: number;
+        obtainedMarks: number;
+        totalMarks: number;
+      } | null = null;
+
+      if (exam.examMode === "online" || !exam.examMode) {
+        const examDocForGrading = await getDoc(doc(db, "exams", exam.id));
+        const gradingQuestions = (examDocForGrading.data()?.questions || []) as Array<{
+          id: string;
+          correctAnswer?: string;
+          marks?: number;
+        }>;
+        const normalize = (value: unknown) => String(value ?? "").trim().toLowerCase();
+
+        let correctAnswers = 0;
+        let wrongAnswers = 0;
+        let attemptedAnswers = 0;
+        let obtainedMarks = 0;
+        let totalMarks = 0;
+
+        for (const question of gradingQuestions) {
+          const marks = Number(question.marks || 0);
+          totalMarks += marks;
+
+          const submittedAnswer = answers[question.id];
+          if (!submittedAnswer || !submittedAnswer.trim()) {
+            continue;
+          }
+
+          attemptedAnswers += 1;
+          if (normalize(submittedAnswer) === normalize(question.correctAnswer)) {
+            correctAnswers += 1;
+            obtainedMarks += marks;
+          } else {
+            wrongAnswers += 1;
+          }
+        }
+
+        gradingSummary = {
+          correctAnswers,
+          wrongAnswers,
+          attemptedAnswers,
+          totalQuestions: gradingQuestions.length,
+          accuracy: attemptedAnswers > 0 ? Math.round((correctAnswers / attemptedAnswers) * 100) : 0,
+          obtainedMarks,
+          totalMarks,
+        };
+      }
+
       // Save answers with behavior score
       const answerData: any = {
         sessionId,
@@ -860,9 +1009,20 @@ export default function ExamClient() {
         studentId: user.id,
         submittedAt: serverTimestamp(),
         autoSubmitted: auto,
-        reason,
         behaviorScore, // Include behavior score (0-100)
+        warningCount: warnings,
+        flagged: behaviorScore < 50,
+        flagReasons: behaviorScore < 50 ? ["Poor behavior score"] : [],
         violationCounts, // Include detailed violation breakdown
+        ...(gradingSummary
+          ? {
+              score: gradingSummary.obtainedMarks,
+              totalMarks: gradingSummary.totalMarks,
+              accuracy: gradingSummary.accuracy,
+              grading: gradingSummary,
+            }
+          : {}),
+        ...(submissionReason ? { reason: submissionReason } : {}),
       };
 
       // For online mode, include answers object
@@ -878,13 +1038,14 @@ export default function ExamClient() {
             const primaryFile = answerFiles[0];
             if (primaryFile.url) {
               const analysis = await analyzeSubmittedAnswer(primaryFile.url);
+              const ocrErrors = analysis.errors?.filter(Boolean) ?? [];
               // Store OCR results with the answer
               answerData.ocrAnalysis = {
                 extractedText: analysis.extractedText.substring(0, 10000), // Limit text size
                 wordCount: analysis.wordCount,
                 aiDetection: analysis.aiDetection,
-                errors: analysis.errors,
                 analyzedAt: new Date().toISOString(),
+                ...(ocrErrors.length > 0 ? { errors: ocrErrors } : {}),
               };
             }
           } catch (ocrError) {
@@ -900,12 +1061,25 @@ export default function ExamClient() {
       // Retry Firestore writes for reliability
       await retryAsync(() => addDoc(collection(db, "answers"), answerData), "addDoc(answers)");
       await retryAsync(() => updateDoc(doc(db, "examSessions", sessionId), {
-        status: "completed",
+        status: sessionStatus,
+        submitted: true,
         completedAt: serverTimestamp(),
         warnings,
         behaviorScore,
         violationCounts,
         autoSubmitted: auto,
+        ...(gradingSummary
+          ? {
+              correctAnswers: gradingSummary.correctAnswers,
+              wrongAnswers: gradingSummary.wrongAnswers,
+              attemptedAnswers: gradingSummary.attemptedAnswers,
+              totalQuestions: gradingSummary.totalQuestions,
+              accuracy: gradingSummary.accuracy,
+              score: gradingSummary.obtainedMarks,
+              totalMarks: gradingSummary.totalMarks,
+            }
+          : {}),
+        "proctoring.suspiciousEvents": warnings,
         flagged: behaviorScore < 50, // Flag if behavior score is poor
         flagReasons: behaviorScore < 50 ? ["Poor behavior score"] : [],
       }), "updateDoc(examSessions)");
@@ -1437,7 +1611,7 @@ export default function ExamClient() {
               <CardContent>
                 <div className="space-y-3">
                   <FileUpload
-                    basePath={`answers/${sessionId}`}
+                    basePath={`answers/${exam.id}/${sessionId}`}
                     onUploadComplete={(files) => setAnswerFiles(files)}
                     maxFiles={10}
                     allowedTypes={ANSWER_ALLOWED_TYPES}
@@ -1502,11 +1676,36 @@ export default function ExamClient() {
                 {exam.examPapers && exam.examPapers[selectedPaper] && (
                   <div className="w-full min-h-[70vh]">
                     {exam.examPapers[selectedPaper].type === "application/pdf" ? (
-                      <iframe
-                        src={exam.examPapers[selectedPaper].url}
-                        className="w-full h-[70vh] rounded-b-lg"
-                        title="Exam Paper"
-                      />
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-4">
+                          <div className="text-sm text-gray-300">
+                            PDF page {selectedPdfPage}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setSelectedPdfPage((page) => Math.max(1, page - 1))}
+                            >
+                              Previous Page
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setSelectedPdfPage((page) => page + 1)}
+                            >
+                              Next Page
+                            </Button>
+                          </div>
+                        </div>
+                        <iframe
+                          src={`${exam.examPapers[selectedPaper].url}#page=${selectedPdfPage}&view=FitH`}
+                          className="w-full h-[70vh] rounded-b-lg"
+                          title="Exam Paper"
+                        />
+                      </div>
                     ) : exam.examPapers[selectedPaper].type.startsWith("image/") ? (
                       <img
                         src={exam.examPapers[selectedPaper].url}

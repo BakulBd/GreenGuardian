@@ -56,7 +56,7 @@ service firebase.storage {
     match /exams/{teacherId}/papers/{fileName} {
       allow read: if isAuthenticated();
       // Teachers can upload exam papers
-      allow write: if isUser(teacherId) && isValidFileType() && isValidSize();
+      allow write: if isAuthenticated() && isUser(teacherId) && isValidFileType() && isValidSize();
       allow delete: if isUser(teacherId);
     }
     
