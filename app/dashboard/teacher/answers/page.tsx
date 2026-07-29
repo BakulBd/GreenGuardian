@@ -46,9 +46,22 @@ interface Answer {
   reason?: string;
   answerFiles?: Array<{
     name: string;
+    url?: string;
     downloadURL: string;
     type: string;
   }>;
+  grading?: {
+    correctAnswers: number;
+    wrongAnswers: number;
+    attemptedAnswers: number;
+    totalQuestions: number;
+    accuracy: number;
+    obtainedMarks: number;
+    totalMarks: number;
+  };
+  accuracy?: number;
+  score?: number;
+  totalMarks?: number;
   ocrAnalysis?: {
     extractedText?: string;
     wordCount?: number;
@@ -301,6 +314,17 @@ function AnswerReviewContent() {
     );
   };
 
+  const flaggedCount = answers.filter((a) => a.flagged).length;
+  const totalWarnings = answers.reduce((acc, a) => acc + (a.warningCount || 0), 0);
+  const gradedAnswers = answers.filter((a) => a.grading || a.accuracy !== undefined);
+  const avgAccuracy =
+    gradedAnswers.length > 0
+      ? Math.round(
+          gradedAnswers.reduce((acc, a) => acc + (a.grading?.accuracy ?? a.accuracy ?? 0), 0) /
+            gradedAnswers.length
+        )
+      : 0;
+
   if (loading) {
     return (
       <DashboardLayout role="teacher">
@@ -352,7 +376,7 @@ function AnswerReviewContent() {
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center">
@@ -380,11 +404,11 @@ function AnswerReviewContent() {
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center">
-                <Bot className="h-6 w-6 text-yellow-600" />
+                <BarChart className="h-6 w-6 text-indigo-600" />
                 <div className="ml-4">
-                  <p className="text-sm text-gray-600">AI Detected</p>
+                  <p className="text-sm text-gray-600">Avg Accuracy</p>
                   <p className="text-2xl font-bold">
-                    {answers.filter(a => a.ocrAnalysis?.aiDetection?.isAIGenerated).length}
+                    {avgAccuracy}%
                   </p>
                 </div>
               </div>
@@ -395,10 +419,21 @@ function AnswerReviewContent() {
               <div className="flex items-center">
                 <AlertTriangle className="h-6 w-6 text-red-600" />
                 <div className="ml-4">
-                  <p className="text-sm text-gray-600">High Similarity</p>
+                  <p className="text-sm text-gray-600">Flagged</p>
                   <p className="text-2xl font-bold">
-                    {answers.filter(a => (a.similarityScore || 0) >= SIMILARITY_THRESHOLDS.PLAGIARIZED).length}
+                    {flaggedCount}
                   </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="pt-6">
+              <div className="flex items-center">
+                <Bot className="h-6 w-6 text-yellow-600" />
+                <div className="ml-4">
+                  <p className="text-sm text-gray-600">Total Warnings</p>
+                  <p className="text-2xl font-bold">{totalWarnings}</p>
                 </div>
               </div>
             </CardContent>
@@ -462,6 +497,11 @@ function AnswerReviewContent() {
                           {answer.warningCount !== undefined && answer.warningCount > 0 && (
                             <Badge variant="secondary">
                               Warnings: {answer.warningCount}
+                            </Badge>
+                          )}
+                          {(answer.grading?.accuracy !== undefined || answer.accuracy !== undefined) && (
+                            <Badge variant="outline">
+                              Accuracy: {answer.grading?.accuracy ?? answer.accuracy}%
                             </Badge>
                           )}
                           {getAIBadge(answer.ocrAnalysis?.aiDetection)}
@@ -539,6 +579,18 @@ function AnswerReviewContent() {
                       </p>
                     </div>
                     <div>
+                      <p className="text-sm text-gray-600">Correct / Wrong</p>
+                      <p className="font-medium">
+                        {(selectedAnswer.grading?.correctAnswers ?? 0)} / {(selectedAnswer.grading?.wrongAnswers ?? 0)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Accuracy</p>
+                      <p className="font-medium">
+                        {selectedAnswer.grading?.accuracy ?? selectedAnswer.accuracy ?? 0}%
+                      </p>
+                    </div>
+                    <div>
                       <p className="text-sm text-gray-600">Word Count</p>
                       <p className="font-medium">
                         {selectedAnswer.ocrAnalysis?.wordCount ?? "-"}
@@ -564,7 +616,7 @@ function AnswerReviewContent() {
                         {selectedAnswer.answerFiles.map((file, i) => (
                           <a
                             key={i}
-                            href={file.downloadURL}
+                            href={file.downloadURL || file.url}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="flex items-center px-3 py-2 bg-gray-100 rounded-lg hover:bg-gray-200"

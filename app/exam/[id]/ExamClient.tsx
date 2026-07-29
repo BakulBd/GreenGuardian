@@ -71,6 +71,39 @@ interface Exam {
   totalMarks: number;
 }
 
+const mapViolationToEventType = (violationType: keyof ViolationCounts | null): string => {
+  switch (violationType) {
+    case "tabSwitch":
+      return "tab_switch";
+    case "fullscreenExit":
+      return "fullscreen_exit";
+    case "noFace":
+      return "no_face";
+    case "multipleFaces":
+      return "multiple_faces";
+    case "lookingAway":
+      return "looking_away";
+    case "copyAttempt":
+      return "copy_attempt";
+    case "pasteAttempt":
+      return "paste_attempt";
+    case "suspiciousKeyboard":
+      return "suspicious_keyboard";
+    case "windowBlur":
+      return "window_blur";
+    case "mobilePhoneDetected":
+      return "mobile_phone_detected";
+    case "bookDetected":
+      return "book_detected";
+    case "additionalDevice":
+      return "laptop_detected";
+    case "secondPerson":
+      return "second_person_detected";
+    default:
+      return "suspicious_keyboard";
+  }
+};
+
 export default function ExamClient() {
   const params = useParams();
   const router = useRouter();
@@ -104,6 +137,8 @@ export default function ExamClient() {
   // Behavior score tracking - starts at 100, deducted for violations
   const [behaviorScore, setBehaviorScore] = useState(100);
   const [violationCounts, setViolationCounts] = useState<ViolationCounts>(initializeViolationCounts());
+  const behaviorScoreRef = useRef(100);
+  const warningsRef = useRef(0);
 
   const maxWarnings = 5;
 
@@ -163,6 +198,14 @@ export default function ExamClient() {
       disposeFaceDetectionModel();
     };
   }, []);
+
+  useEffect(() => {
+    behaviorScoreRef.current = behaviorScore;
+  }, [behaviorScore]);
+
+  useEffect(() => {
+    warningsRef.current = warnings;
+  }, [warnings]);
 
   // Safe play function that handles the AbortError gracefully
   const playVideoRef = useRef<Promise<void> | null>(null);
@@ -329,6 +372,10 @@ export default function ExamClient() {
       
       // Track the violation type and update counts
       const violationType = getViolationType(reason);
+      const nextViolationCounts = violationType
+        ? { ...violationCounts, [violationType]: violationCounts[violationType] + 1 }
+        : violationCounts;
+      const nextBehaviorScore = calculateBehaviorScore(nextViolationCounts);
       
       if (violationType) {
         setViolationCounts((prevCounts) => {
@@ -354,11 +401,30 @@ export default function ExamClient() {
           reason,
           timestamp: serverTimestamp(),
         }).catch(err => console.error("Failed to log warning:", err));
+
+        updateDoc(doc(db, "examSessions", sessionId), {
+          warnings: newCount,
+          behaviorScore: nextBehaviorScore,
+          violationCounts: nextViolationCounts,
+          "proctoring.suspiciousEvents": newCount,
+          updatedAt: serverTimestamp(),
+        }).catch((err) => console.error("Failed to update session warning counters:", err));
+
+        addDoc(collection(db, "proctoringEvents"), {
+          sessionId,
+          studentId: user.id,
+          eventType: mapViolationToEventType(violationType),
+          severity: nextBehaviorScore < 40 ? "critical" : nextBehaviorScore < 65 ? "high" : "medium",
+          penalty: 1,
+          message: reason,
+          timestamp: serverTimestamp(),
+          ...(exam?.id ? { examId: exam.id } : {}),
+        }).catch((err) => console.error("Failed to log proctoring event:", err));
       }
 
       return newCount;
     });
-  }, [sessionId, user, maxWarnings]);
+  }, [sessionId, user, maxWarnings, violationCounts, exam?.id]);
 
   // Effect to show toast notifications for warnings (avoids setState during render)
   useEffect(() => {
@@ -738,8 +804,8 @@ export default function ExamClient() {
                     additionalDeviceDetected: false,
                     secondPersonDetected: false,
                     snapshotUrl: thumbnail,
-                    behaviorScore,
-                    warningCount: warnings,
+                    behaviorScore: behaviorScoreRef.current,
+                    warningCount: warningsRef.current,
                     isOnline: true,
                     lastActivityAt: serverTimestamp(),
                   });
@@ -748,7 +814,7 @@ export default function ExamClient() {
                 console.error("Failed to send snapshot:", error);
               }
             }
-          }, 30000); // Every 30 seconds
+          }, 5000); // Every 5 seconds for near-live teacher monitoring
         }
       } catch (error) {
         console.error("Failed to initialize detection modules:", error);
@@ -756,7 +822,7 @@ export default function ExamClient() {
     };
     
     loadModules();
-  }, [modelLoaded, addWarning, sessionId, user, exam, behaviorScore, warnings]);
+  }, [modelLoaded, addWarning, sessionId, user, exam]);
 
   const proceedToCamera = () => {
     setExamStep("camera");
@@ -858,6 +924,60 @@ export default function ExamClient() {
     }
     try {
       const submissionReason = reason ?? (auto ? "Auto-submitted" : undefined);
+      const sessionStatus = auto ? "auto-submitted" : "submitted";
+      let gradingSummary: {
+        correctAnswers: number;
+        wrongAnswers: number;
+        attemptedAnswers: number;
+        totalQuestions: number;
+        accuracy: number;
+        obtainedMarks: number;
+        totalMarks: number;
+      } | null = null;
+
+      if (exam.examMode === "online" || !exam.examMode) {
+        const examDocForGrading = await getDoc(doc(db, "exams", exam.id));
+        const gradingQuestions = (examDocForGrading.data()?.questions || []) as Array<{
+          id: string;
+          correctAnswer?: string;
+          marks?: number;
+        }>;
+        const normalize = (value: unknown) => String(value ?? "").trim().toLowerCase();
+
+        let correctAnswers = 0;
+        let wrongAnswers = 0;
+        let attemptedAnswers = 0;
+        let obtainedMarks = 0;
+        let totalMarks = 0;
+
+        for (const question of gradingQuestions) {
+          const marks = Number(question.marks || 0);
+          totalMarks += marks;
+
+          const submittedAnswer = answers[question.id];
+          if (!submittedAnswer || !submittedAnswer.trim()) {
+            continue;
+          }
+
+          attemptedAnswers += 1;
+          if (normalize(submittedAnswer) === normalize(question.correctAnswer)) {
+            correctAnswers += 1;
+            obtainedMarks += marks;
+          } else {
+            wrongAnswers += 1;
+          }
+        }
+
+        gradingSummary = {
+          correctAnswers,
+          wrongAnswers,
+          attemptedAnswers,
+          totalQuestions: gradingQuestions.length,
+          accuracy: attemptedAnswers > 0 ? Math.round((correctAnswers / attemptedAnswers) * 100) : 0,
+          obtainedMarks,
+          totalMarks,
+        };
+      }
 
       // Save answers with behavior score
       const answerData: any = {
@@ -872,6 +992,14 @@ export default function ExamClient() {
         flagged: behaviorScore < 50,
         flagReasons: behaviorScore < 50 ? ["Poor behavior score"] : [],
         violationCounts, // Include detailed violation breakdown
+        ...(gradingSummary
+          ? {
+              score: gradingSummary.obtainedMarks,
+              totalMarks: gradingSummary.totalMarks,
+              accuracy: gradingSummary.accuracy,
+              grading: gradingSummary,
+            }
+          : {}),
         ...(submissionReason ? { reason: submissionReason } : {}),
       };
 
@@ -911,12 +1039,25 @@ export default function ExamClient() {
       // Retry Firestore writes for reliability
       await retryAsync(() => addDoc(collection(db, "answers"), answerData), "addDoc(answers)");
       await retryAsync(() => updateDoc(doc(db, "examSessions", sessionId), {
-        status: "completed",
+        status: sessionStatus,
+        submitted: true,
         completedAt: serverTimestamp(),
         warnings,
         behaviorScore,
         violationCounts,
         autoSubmitted: auto,
+        ...(gradingSummary
+          ? {
+              correctAnswers: gradingSummary.correctAnswers,
+              wrongAnswers: gradingSummary.wrongAnswers,
+              attemptedAnswers: gradingSummary.attemptedAnswers,
+              totalQuestions: gradingSummary.totalQuestions,
+              accuracy: gradingSummary.accuracy,
+              score: gradingSummary.obtainedMarks,
+              totalMarks: gradingSummary.totalMarks,
+            }
+          : {}),
+        "proctoring.suspiciousEvents": warnings,
         flagged: behaviorScore < 50, // Flag if behavior score is poor
         flagReasons: behaviorScore < 50 ? ["Poor behavior score"] : [],
       }), "updateDoc(examSessions)");
