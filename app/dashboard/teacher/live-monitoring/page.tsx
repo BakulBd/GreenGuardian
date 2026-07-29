@@ -553,7 +553,7 @@ export default function LiveMonitoringPage() {
                                   {behaviorLevel.level}
                                 </Badge>
                               </div>
-                              <Button variant="ghost" size="sm">
+                              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleViewStudent(session); }}>
                                 <Eye className="h-4 w-4" />
                               </Button>
                             </div>
@@ -585,6 +585,13 @@ export default function LiveMonitoringPage() {
                   Session started: {selectedStudent.startTime.toLocaleString()}
                 </DialogDescription>
               </DialogHeader>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                <Card><CardContent className="pt-4"><p className="text-xs text-gray-500">Behavior Score</p><p className="text-2xl font-bold">{selectedStudent.behaviorScore}</p></CardContent></Card>
+                <Card><CardContent className="pt-4"><p className="text-xs text-gray-500">Warnings</p><p className="text-2xl font-bold">{selectedStudent.warningCount}</p></CardContent></Card>
+                <Card><CardContent className="pt-4"><p className="text-xs text-gray-500">Alerts</p><p className="text-2xl font-bold">{selectedStudent.alertReasons.length}</p></CardContent></Card>
+                <Card><CardContent className="pt-4"><p className="text-xs text-gray-500">Online</p><p className="text-2xl font-bold">{selectedStudent.isOnline ? "Yes" : "No"}</p></CardContent></Card>
+              </div>
               
               <Tabs defaultValue="overview" className="mt-4">
                 <TabsList className="w-full justify-start">
@@ -611,6 +618,25 @@ export default function LiveMonitoringPage() {
                           : " Multiple violations, manual review required"
                         }
                       </p>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm">Live Snapshot</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      {selectedStudent.latestSnapshot?.snapshotUrl ? (
+                        <img
+                          src={selectedStudent.latestSnapshot.snapshotUrl}
+                          alt="Live camera"
+                          className="w-full rounded-lg border object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-56 items-center justify-center rounded-lg border bg-gray-50 text-gray-500">
+                          No live snapshot yet
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
                   

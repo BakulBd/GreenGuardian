@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
+import { useRouter } from "next/navigation";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,7 @@ interface LiveSession extends ExamSession {
 export default function TeacherMonitoringPage() {
   const { user } = useAuth();
   const { toast } = useToast();
+  const router = useRouter();
   
   const [exams, setExams] = useState<Exam[]>([]);
   const [selectedExamId, setSelectedExamId] = useState<string>("");
@@ -321,7 +323,7 @@ export default function TeacherMonitoringPage() {
                               </div>
 
                               {/* Actions */}
-                              <Button variant="outline" size="sm">
+                              <Button variant="outline" size="sm" onClick={() => router.push("/dashboard/teacher/live-monitoring") }>
                                 <Eye className="h-4 w-4 mr-2" />
                                 View Details
                               </Button>

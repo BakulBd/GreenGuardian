@@ -31,6 +31,7 @@ import { db } from "@/lib/firebase/config";
 import { getSimilarityLevel, getSimilarityColor, SIMILARITY_THRESHOLDS } from "@/lib/utils/similarity";
 import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
 import { formatDate } from "@/lib/utils/helpers";
+import { getQuestionsByExam } from "@/lib/firebase/exams";
 
 interface Answer {
   id: string;
@@ -92,6 +93,13 @@ interface Exam {
   id: string;
   title: string;
   examMode: string;
+  questions?: Array<{
+    id: string;
+    text: string;
+    correctAnswer?: string;
+    marks?: number;
+    type?: string;
+  }>;
 }
 
 // Main component that uses search params
@@ -125,6 +133,20 @@ function AnswerReviewContent() {
         return;
       }
       const examData = { id: examDoc.id, ...examDoc.data() } as Exam;
+      if ((!examData.questions || examData.questions.length === 0) && examData.examMode === "online") {
+        try {
+          const questionsData = await getQuestionsByExam(examData.id);
+          examData.questions = questionsData.map((question) => ({
+            id: question.id,
+            text: question.text,
+            correctAnswer: (question as any).correctAnswer,
+            marks: question.marks,
+            type: question.type,
+          }));
+        } catch (questionError) {
+          console.warn("Failed to load questions for answer review:", questionError);
+        }
+      }
       setExam(examData);
 
       // Load answers for this exam
@@ -164,6 +186,11 @@ function AnswerReviewContent() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const getAnswerText = (value: unknown) => {
+    if (value === undefined || value === null || value === "") return "—";
+    return String(value);
   };
 
   const runOCRAnalysis = async (answer: Answer) => {
@@ -552,6 +579,7 @@ function AnswerReviewContent() {
                 <TabsList>
                   <TabsTrigger value="overview">Overview</TabsTrigger>
                   <TabsTrigger value="content">Content</TabsTrigger>
+                  <TabsTrigger value="questions">Question Breakdown</TabsTrigger>
                   <TabsTrigger value="ai-detection">AI Detection</TabsTrigger>
                   <TabsTrigger value="similarity">Similarity</TabsTrigger>
                 </TabsList>
@@ -646,6 +674,51 @@ function AnswerReviewContent() {
                           Run OCR Analysis
                         </Button>
                       )}
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="questions" className="mt-4">
+                  {exam.questions && exam.questions.length > 0 && selectedAnswer.answers ? (
+                    <div className="space-y-3">
+                      {exam.questions.map((question, index) => {
+                        const submittedAnswer = selectedAnswer.answers?.[question.id];
+                        const correctAnswer = question.correctAnswer || "";
+                        const isCorrect = submittedAnswer !== undefined && String(submittedAnswer).trim().toLowerCase() === String(correctAnswer).trim().toLowerCase();
+                        return (
+                          <Card key={question.id} className={isCorrect ? "border-green-200" : "border-red-200"}>
+                            <CardContent className="pt-4 space-y-3">
+                              <div className="flex items-center justify-between gap-4">
+                                <div>
+                                  <p className="text-sm text-gray-500">Question {index + 1}</p>
+                                  <p className="font-medium">{question.text}</p>
+                                </div>
+                                <Badge className={isCorrect ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}>
+                                  {isCorrect ? "Correct" : "Wrong"}
+                                </Badge>
+                              </div>
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                                <div className="rounded-lg bg-gray-50 p-3">
+                                  <p className="text-gray-500">Student Answer</p>
+                                  <p className="mt-1 font-medium">{getAnswerText(submittedAnswer)}</p>
+                                </div>
+                                <div className="rounded-lg bg-gray-50 p-3">
+                                  <p className="text-gray-500">Correct Answer</p>
+                                  <p className="mt-1 font-medium">{getAnswerText(correctAnswer)}</p>
+                                </div>
+                                <div className="rounded-lg bg-gray-50 p-3">
+                                  <p className="text-gray-500">Marks</p>
+                                  <p className="mt-1 font-medium">{question.marks ?? 0}</p>
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-gray-600">
+                      Question breakdown is only available for online exams with saved questions and answers.
                     </div>
                   )}
                 </TabsContent>

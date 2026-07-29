@@ -40,6 +40,7 @@ import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
 import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
+import { captureVideoFrame, sendProctoringSnapshot } from "@/lib/services/proctoring";
 
 interface Question {
   id: string;
@@ -420,6 +421,27 @@ export default function ExamClient() {
           timestamp: serverTimestamp(),
           ...(exam?.id ? { examId: exam.id } : {}),
         }).catch((err) => console.error("Failed to log proctoring event:", err));
+
+        const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
+        if (screenshot && exam?.id) {
+          sendProctoringSnapshot({
+            sessionId,
+            studentId: user.id,
+            examId: exam.id,
+            faceDetected: true,
+            faceCount: 1,
+            isLookingAway: false,
+            mobilePhoneDetected: reason.toLowerCase().includes("mobile") || reason.toLowerCase().includes("phone"),
+            bookDetected: reason.toLowerCase().includes("book"),
+            additionalDeviceDetected: reason.toLowerCase().includes("device") || reason.toLowerCase().includes("laptop"),
+            secondPersonDetected: reason.toLowerCase().includes("person"),
+            snapshotUrl: screenshot,
+            behaviorScore: nextBehaviorScore,
+            warningCount: newCount,
+            isOnline: true,
+            lastActivityAt: serverTimestamp(),
+          }).catch((err) => console.error("Failed to store warning snapshot:", err));
+        }
       }
 
       return newCount;
