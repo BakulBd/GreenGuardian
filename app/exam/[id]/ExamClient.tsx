@@ -1448,7 +1448,7 @@ export default function ExamClient() {
               <CardContent>
                 <div className="space-y-3">
                   <FileUpload
-                    basePath={`answers/${sessionId}`}
+                    basePath={`answers/${exam.id}/${sessionId}`}
                     onUploadComplete={(files) => setAnswerFiles(files)}
                     maxFiles={10}
                     allowedTypes={ANSWER_ALLOWED_TYPES}

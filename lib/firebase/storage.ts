@@ -18,6 +18,21 @@ export interface UploadResult {
 
 const COMPRESSIBLE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
+const fileToDataUrl = async (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("Failed to convert file to data URL"));
+      }
+    };
+    reader.onerror = () => reject(new Error("Failed to convert file to data URL"));
+    reader.readAsDataURL(file);
+  });
+};
+
 const compressImageFile = async (file: File): Promise<File> => {
   if (typeof window === "undefined" || !COMPRESSIBLE_IMAGE_TYPES.has(file.type)) {
     return file;
@@ -100,6 +115,24 @@ export const uploadFile = (
             const storageRef = ref(storage, path);
             const uploadTask = uploadBytesResumable(storageRef, uploadFileCandidate);
 
+            const resolveInlineFallback = async () => {
+              const dataUrl = await fileToDataUrl(uploadFileCandidate);
+
+              if (dataUrl.length > 900000) {
+                throw new Error(
+                  "Firebase Storage is full and this file is too large to store inline. Please use a smaller file or upgrade the Firebase Storage quota."
+                );
+              }
+
+              resolve({
+                url: dataUrl,
+                path: `inline:${path}`,
+                name: file.name,
+                type: uploadFileCandidate.type,
+                size: uploadFileCandidate.size,
+              });
+            };
+
             uploadTask.on(
               "state_changed",
               (snapshot: UploadTaskSnapshot) => {
@@ -114,6 +147,18 @@ export const uploadFile = (
               },
               (error) => {
                 console.error("Upload error:", error);
+                const code = (error as { code?: string }).code || "";
+                const message = (error as { message?: string }).message || "";
+                const isQuotaError =
+                  code === "storage/quota-exceeded" ||
+                  message.toLowerCase().includes("quota for bucket") ||
+                  message.toLowerCase().includes("quota-exceeded");
+
+                if (isQuotaError) {
+                  resolveInlineFallback().catch(reject);
+                  return;
+                }
+
                 reject(error);
               },
               async () => {

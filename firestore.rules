@@ -138,10 +138,10 @@ service cloud.firestore {
       allow read: if isAdmin();
       
       // Students can create/update their own answers
-      allow create, update: if isStudent() && 
-                               request.resource.data.studentId == request.auth.uid &&
-                               exists(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)) &&
-                               get(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)).data.studentId == request.auth.uid;
+      allow create, update: if isAuthenticated() &&
+               request.resource.data.studentId == request.auth.uid &&
+               exists(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)) &&
+               get(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)).data.studentId == request.auth.uid;
     }
     
     // Exam Logs collection
