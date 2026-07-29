@@ -40,6 +40,10 @@ interface Answer {
   submittedAt: any;
   autoSubmitted: boolean;
   behaviorScore?: number;
+  warningCount?: number;
+  flagged?: boolean;
+  flagReasons?: string[];
+  reason?: string;
   answerFiles?: Array<{
     name: string;
     downloadURL: string;
@@ -450,6 +454,16 @@ function AnswerReviewContent() {
                               Behavior: {answer.behaviorScore}%
                             </Badge>
                           )}
+                          {answer.flagged && (
+                            <Badge className="bg-red-100 text-red-700">
+                              Flagged
+                            </Badge>
+                          )}
+                          {answer.warningCount !== undefined && answer.warningCount > 0 && (
+                            <Badge variant="secondary">
+                              Warnings: {answer.warningCount}
+                            </Badge>
+                          )}
                           {getAIBadge(answer.ocrAnalysis?.aiDetection)}
                           {getSimilarityBadge(answer.similarityScore)}
                           {!answer.ocrAnalysis?.extractedText && (answer.answerFiles?.length ?? 0) > 0 && (
@@ -515,6 +529,16 @@ function AnswerReviewContent() {
                       <p className="font-medium">{selectedAnswer.behaviorScore ?? "-"}%</p>
                     </div>
                     <div>
+                      <p className="text-sm text-gray-600">Warnings</p>
+                      <p className="font-medium">{selectedAnswer.warningCount ?? 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-gray-600">Flag Status</p>
+                      <p className="font-medium">
+                        {selectedAnswer.flagged ? "Flagged" : "Clear"}
+                      </p>
+                    </div>
+                    <div>
                       <p className="text-sm text-gray-600">Word Count</p>
                       <p className="font-medium">
                         {selectedAnswer.ocrAnalysis?.wordCount ?? "-"}
@@ -527,6 +551,12 @@ function AnswerReviewContent() {
                       </p>
                     </div>
                   </div>
+                  {selectedAnswer.reason && (
+                    <div className="rounded-lg border bg-gray-50 p-4">
+                      <p className="text-sm text-gray-600">Submission Reason</p>
+                      <p className="mt-1 text-sm text-gray-900">{selectedAnswer.reason}</p>
+                    </div>
+                  )}
                   {selectedAnswer.answerFiles && selectedAnswer.answerFiles.length > 0 && (
                     <div>
                       <p className="text-sm text-gray-600 mb-2">Uploaded Files</p>

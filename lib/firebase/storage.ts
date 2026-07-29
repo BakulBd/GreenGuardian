@@ -1,5 +1,6 @@
 import { ref, uploadBytesResumable, getDownloadURL, deleteObject, UploadTaskSnapshot } from "firebase/storage";
-import { storage } from "./config";
+import { onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
+import { auth, storage } from "./config";
 
 export interface UploadProgress {
   progress: number;
@@ -15,6 +16,70 @@ export interface UploadResult {
   size: number;
 }
 
+const COMPRESSIBLE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+const compressImageFile = async (file: File): Promise<File> => {
+  if (typeof window === "undefined" || !COMPRESSIBLE_IMAGE_TYPES.has(file.type)) {
+    return file;
+  }
+
+  const bitmap = await createImageBitmap(file);
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+
+  if (scale >= 1) {
+    bitmap.close();
+    return file;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    return file;
+  }
+
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+
+  const blob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((result) => resolve(result), file.type === "image/png" ? "image/png" : "image/jpeg", 0.85);
+  });
+
+  if (!blob) {
+    return file;
+  }
+
+  return new File([blob], file.name, {
+    type: file.type === "image/png" ? "image/png" : "image/jpeg",
+    lastModified: file.lastModified,
+  });
+};
+
+const waitForAuthenticatedUser = async (): Promise<FirebaseUser> => {
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      unsubscribe();
+      reject(new Error("Authentication is still loading. Please wait a moment and try again."));
+    }, 5000);
+
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        clearTimeout(timeoutId);
+        unsubscribe();
+        resolve(user);
+      }
+    });
+  });
+};
+
 /**
  * Upload a file to Firebase Storage
  * @param file The file to upload
@@ -28,40 +93,48 @@ export const uploadFile = (
   onProgress?: (progress: UploadProgress) => void
 ): Promise<UploadResult> => {
   return new Promise((resolve, reject) => {
-    const storageRef = ref(storage, path);
-    const uploadTask = uploadBytesResumable(storageRef, file);
+    waitForAuthenticatedUser()
+      .then(() => {
+        compressImageFile(file)
+          .then((uploadFileCandidate) => {
+            const storageRef = ref(storage, path);
+            const uploadTask = uploadBytesResumable(storageRef, uploadFileCandidate);
 
-    uploadTask.on(
-      "state_changed",
-      (snapshot: UploadTaskSnapshot) => {
-        const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-        if (onProgress) {
-          onProgress({
-            progress,
-            bytesTransferred: snapshot.bytesTransferred,
-            totalBytes: snapshot.totalBytes,
-          });
-        }
-      },
-      (error) => {
-        console.error("Upload error:", error);
-        reject(error);
-      },
-      async () => {
-        try {
-          const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-          resolve({
-            url: downloadURL,
-            path,
-            name: file.name,
-            type: file.type,
-            size: file.size,
-          });
-        } catch (error) {
-          reject(error);
-        }
-      }
-    );
+            uploadTask.on(
+              "state_changed",
+              (snapshot: UploadTaskSnapshot) => {
+                const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+                if (onProgress) {
+                  onProgress({
+                    progress,
+                    bytesTransferred: snapshot.bytesTransferred,
+                    totalBytes: snapshot.totalBytes,
+                  });
+                }
+              },
+              (error) => {
+                console.error("Upload error:", error);
+                reject(error);
+              },
+              async () => {
+                try {
+                  const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+                  resolve({
+                    url: downloadURL,
+                    path,
+                    name: file.name,
+                    type: uploadFileCandidate.type,
+                    size: uploadFileCandidate.size,
+                  });
+                } catch (error) {
+                  reject(error);
+                }
+              }
+            );
+          })
+          .catch(reject);
+      })
+      .catch(reject);
   });
 };
 

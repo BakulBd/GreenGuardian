@@ -857,6 +857,8 @@ export default function ExamClient() {
       throw lastError;
     }
     try {
+      const submissionReason = reason ?? (auto ? "Auto-submitted" : undefined);
+
       // Save answers with behavior score
       const answerData: any = {
         sessionId,
@@ -865,9 +867,12 @@ export default function ExamClient() {
         studentId: user.id,
         submittedAt: serverTimestamp(),
         autoSubmitted: auto,
-        reason,
         behaviorScore, // Include behavior score (0-100)
+        warningCount: warnings,
+        flagged: behaviorScore < 50,
+        flagReasons: behaviorScore < 50 ? ["Poor behavior score"] : [],
         violationCounts, // Include detailed violation breakdown
+        ...(submissionReason ? { reason: submissionReason } : {}),
       };
 
       // For online mode, include answers object
@@ -883,13 +888,14 @@ export default function ExamClient() {
             const primaryFile = answerFiles[0];
             if (primaryFile.url) {
               const analysis = await analyzeSubmittedAnswer(primaryFile.url);
+              const ocrErrors = analysis.errors?.filter(Boolean) ?? [];
               // Store OCR results with the answer
               answerData.ocrAnalysis = {
                 extractedText: analysis.extractedText.substring(0, 10000), // Limit text size
                 wordCount: analysis.wordCount,
                 aiDetection: analysis.aiDetection,
-                errors: analysis.errors,
                 analyzedAt: new Date().toISOString(),
+                ...(ocrErrors.length > 0 ? { errors: ocrErrors } : {}),
               };
             }
           } catch (ocrError) {
