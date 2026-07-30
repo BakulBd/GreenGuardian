@@ -78,15 +78,39 @@ export default function ExamReviewPage() {
         return;
       }
 
-      // Load user's answer
-      const answersQuery = query(
-        collection(db, "answers"),
-        where("examId", "==", examId),
-        where("studentId", "==", user!.id)
-      );
-      const answerSnapshot = await getDocs(answersQuery);
+      // Load user's answer (index-independent single field query)
+      let answerDocData: any = null;
+      try {
+        const answersQuery = query(
+          collection(db, "answers"),
+          where("studentId", "==", user!.id)
+        );
+        const answerSnapshot = await getDocs(answersQuery);
+        const match = answerSnapshot.docs.find(doc => doc.data().examId === examId);
+        if (match) {
+          answerDocData = { id: match.id, ...match.data() };
+        }
+      } catch (err) {
+        console.warn("Query by studentId failed:", err);
+      }
+
+      if (!answerDocData) {
+        try {
+          const fallbackQuery = query(
+            collection(db, "answers"),
+            where("examId", "==", examId)
+          );
+          const fallbackSnapshot = await getDocs(fallbackQuery);
+          const match = fallbackSnapshot.docs.find(doc => doc.data().studentId === user!.id);
+          if (match) {
+            answerDocData = { id: match.id, ...match.data() };
+          }
+        } catch (err) {
+          console.warn("Fallback query by examId failed:", err);
+        }
+      }
       
-      if (answerSnapshot.empty) {
+      if (!answerDocData) {
         toast({
           title: "Not Found",
           description: "No submission found for this exam.",
@@ -96,7 +120,7 @@ export default function ExamReviewPage() {
         return;
       }
       
-      setAnswerData(answerSnapshot.docs[0].data());
+      setAnswerData(answerDocData);
     } catch (error) {
       console.error("Error loading review:", error);
       toast({
