@@ -51,6 +51,13 @@ service firebase.storage {
       allow write: if isAuthenticated() && isValidFileType() && isValidSize();
     }
     
+    // Warning screenshots (permanent, one per warning, never overwritten)
+    match /warningScreenshots/{sessionId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isImage() && isValidSize();
+      allow delete: if false; // Never allow deletion - screenshots are permanent evidence
+    }
+    
     // Exam materials (teacher uploads)
     match /exams/{examId}/materials/{fileName} {
       allow read: if isAuthenticated();

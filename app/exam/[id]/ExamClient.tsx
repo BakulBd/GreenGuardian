@@ -40,7 +40,7 @@ import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
 import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
-import { captureVideoFrame, sendProctoringSnapshot } from "@/lib/services/proctoring";
+import { captureVideoFrame, sendProctoringSnapshot, captureAndUploadWarningScreenshot } from "@/lib/services/proctoring";
 
 interface Question {
   id: string;
@@ -430,7 +430,7 @@ export default function ExamClient() {
           ...(exam?.id ? { examId: exam.id } : {}),
         }).catch((err) => console.error("Failed to log proctoring event:", err));
 
-        const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
+const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         if (screenshot && exam?.id) {
           sendProctoringSnapshot({
             sessionId,
@@ -449,6 +449,23 @@ export default function ExamClient() {
             isOnline: true,
             lastActivityAt: serverTimestamp(),
           }).catch((err) => console.error("Failed to store warning snapshot:", err));
+        }
+
+// Capture and store a permanent high-resolution warning screenshot
+        // Each warning gets its own unique screenshot (never overwritten)
+        const violationTypeStr = violationType || "other";
+        const warningType = mapViolationToEventType(violationType);
+        if (exam) {
+          captureAndUploadWarningScreenshot(
+            videoRef.current,
+            sessionId,
+            user.id,
+            user.name || user.email || "Unknown",
+            exam.id,
+            exam.title,
+            warningType,
+            reason
+          ).catch((err) => console.error("Failed to capture warning screenshot:", err));
         }
       }
 

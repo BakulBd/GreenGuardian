@@ -8,6 +8,7 @@ import {
   collection, 
   query, 
   where, 
+  orderBy, 
   serverTimestamp,
   addDoc,
   getDocs,
@@ -457,4 +458,176 @@ export async function getSessionSnapshots(
       return bMs - aMs;
     })
     .slice(0, limitCount);
+}
+
+// ============================================================
+// WARNING SCREENSHOT SERVICE
+// ============================================================
+
+// Interface for warning screenshot documents stored in Firestore
+export interface WarningScreenshot {
+  id?: string;
+  sessionId: string;
+  studentId: string;
+  studentName: string;
+  examId: string;
+  examTitle?: string;
+  warningType: string;
+  warningMessage: string;
+  screenshotUrl: string;
+  storagePath: string;
+  timestamp: any;
+}
+
+/**
+ * Capture a high-resolution screenshot from the video element,
+ * upload it to Firebase Storage, and save metadata in Firestore.
+ * Returns the WarningScreenshot document data or null on failure.
+ * 
+ * Each warning gets its own unique screenshot (never overwritten)
+ * because the filename uses a unique timestamp.
+ */
+export async function captureAndUploadWarningScreenshot(
+  videoElement: HTMLVideoElement | null,
+  sessionId: string,
+  studentId: string,
+  studentName: string,
+  examId: string,
+  examTitle: string,
+  warningType: string,
+  warningMessage: string
+): Promise<WarningScreenshot | null> {
+  try {
+    if (!videoElement || videoElement.readyState < 2) {
+      console.warn("Video element not ready for screenshot capture");
+      return null;
+    }
+
+    // Capture high-resolution frame (640x480 for better quality)
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      console.warn("Failed to get canvas context");
+      return null;
+    }
+
+    // Use higher resolution for permanent screenshot storage
+    const targetWidth = 640;
+    const targetHeight = 480;
+    const aspectRatio = videoElement.videoWidth / videoElement.videoHeight;
+    
+    let width = targetWidth;
+    let height = targetWidth / aspectRatio;
+    
+    if (height > targetHeight) {
+      height = targetHeight;
+      width = targetHeight * aspectRatio;
+    }
+    
+    canvas.width = width;
+    canvas.height = height;
+    
+    ctx.drawImage(videoElement, 0, 0, width, height);
+    
+    // Convert to JPEG with good quality
+    const base64Data = canvas.toDataURL('image/jpeg', 0.8);
+    
+    // Generate unique filename using timestamp and random suffix
+    const timestamp = Date.now();
+    const randomSuffix = Math.random().toString(36).substring(2, 8);
+    const fileName = `${timestamp}_${randomSuffix}.jpg`;
+    const storagePath = `warningScreenshots/${sessionId}/${fileName}`;
+    
+    // Upload to Firebase Storage
+    const storageRef = ref(storage, storagePath);
+    await uploadString(storageRef, base64Data, 'data_url', {
+      contentType: 'image/jpeg',
+    });
+    const screenshotUrl = await getDownloadURL(storageRef);
+    
+    // Create document in Firestore warningScreenshots collection
+    const docRef = await addDoc(collection(db, "warningScreenshots"), {
+      sessionId,
+      studentId,
+      studentName,
+      examId,
+      examTitle,
+      warningType,
+      warningMessage,
+      screenshotUrl,
+      storagePath,
+      timestamp: serverTimestamp(),
+    });
+    
+    const result: WarningScreenshot = {
+      id: docRef.id,
+      sessionId,
+      studentId,
+      studentName,
+      examId,
+      examTitle,
+      warningType,
+      warningMessage,
+      screenshotUrl,
+      storagePath,
+      timestamp,
+    };
+    
+    console.log(`Warning screenshot captured and saved: ${fileName}`);
+    return result;
+  } catch (error) {
+    console.error("Failed to capture and upload warning screenshot:", error);
+    return null;
+  }
+}
+
+/**
+ * Get all warning screenshots for a given session, ordered by most recent first.
+ * Used by teachers to view screenshot history after exams.
+ */
+export async function getWarningScreenshots(
+  sessionId: string
+): Promise<WarningScreenshot[]> {
+  try {
+    const screenshotsQuery = query(
+      collection(db, "warningScreenshots"),
+      where("sessionId", "==", sessionId),
+      orderBy("timestamp", "desc")
+    );
+    
+    const snapshot = await getDocs(screenshotsQuery);
+    return snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      timestamp: doc.data().timestamp?.toDate?.() || new Date(),
+    })) as WarningScreenshot[];
+  } catch (error) {
+    console.error("Failed to get warning screenshots:", error);
+    return [];
+  }
+}
+
+/**
+ * Get all warning screenshots for a given exam (for teacher overview).
+ */
+export async function getExamWarningScreenshots(
+  examId: string
+): Promise<WarningScreenshot[]> {
+  try {
+    const screenshotsQuery = query(
+      collection(db, "warningScreenshots"),
+      where("examId", "==", examId),
+      orderBy("timestamp", "desc")
+    );
+    
+    const snapshot = await getDocs(screenshotsQuery);
+    return snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      timestamp: doc.data().timestamp?.toDate?.() || new Date(),
+    })) as WarningScreenshot[];
+  } catch (error) {
+    console.error("Failed to get exam warning screenshots:", error);
+    return [];
+  }
 }
