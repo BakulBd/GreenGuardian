@@ -203,6 +203,27 @@ service cloud.firestore {
                        get(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)).data.studentId == request.auth.uid;
     }
     
+    // Warning Screenshots collection
+    match /warningScreenshots/{screenshotId} {
+      // Students can read their own warning screenshots
+      allow read: if isUser(resource.data.studentId);
+
+      // Teachers can read warning screenshots for their exams
+      allow read: if isTeacher() && (
+        (resource.data.examId != null && exists(/databases/$(database)/documents/exams/$(resource.data.examId)) && get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid) ||
+        (resource.data.sessionId != null && exists(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)) && exists(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)) && get(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)).data.teacherId == request.auth.uid)
+      );
+
+      // Admins can read all warning screenshots
+      allow read: if isAdmin();
+
+      // Students can create their own warning screenshots during a session
+      allow create: if isAuthenticated() &&
+                       request.resource.data.studentId == request.auth.uid &&
+                       exists(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)) &&
+                       get(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)).data.studentId == request.auth.uid;
+    }
+
     // Settings collection (admin only)
     match /settings/{settingId} {
       allow read: if isAuthenticated();
