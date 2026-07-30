@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  turbopack: {},
   // Only use static export in production build
   ...(process.env.NODE_ENV === 'production' ? { output: 'export' } : {}),
   images: {
