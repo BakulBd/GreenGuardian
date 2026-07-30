@@ -16,6 +16,7 @@ import {
   Menu,
   X,
   Loader2,
+  Camera,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
@@ -117,10 +118,11 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
     { icon: User, label: "My Profile", href: "/profile" },
   ];
 
-  const teacherMenuItems = [
+const teacherMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/teacher" },
     { icon: FileText, label: "My Exams", href: "/dashboard/teacher/exams" },
     { icon: FileText, label: "Submissions & OCR", href: "/dashboard/teacher/answers" },
+    { icon: Camera, label: "Watch Live", href: "/dashboard/teacher/watch-live" },
     { icon: Shield, label: "Live Monitoring", href: "/dashboard/teacher/monitoring" },
     { icon: Users, label: "Students", href: "/dashboard/teacher/students" },
     { icon: User, label: "My Profile", href: "/profile" },
