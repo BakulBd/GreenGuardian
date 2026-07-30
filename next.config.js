@@ -2,8 +2,8 @@
 const nextConfig = {
   reactStrictMode: true,
   turbopack: {},
-  // Only use static export in production build
-  ...(process.env.NODE_ENV === 'production' ? { output: 'export' } : {}),
+  // Only use static export if explicitly requested (e.g. for pure static hosting)
+  ...(process.env.STATIC_EXPORT === 'true' ? { output: 'export' } : {}),
   images: {
     domains: ['firebasestorage.googleapis.com'],
     // Required for static export
