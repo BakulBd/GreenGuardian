@@ -1,0 +1,15 @@
+[
+  {
+    "origin": [
+      "https://green.bakul.app",
+      "https://*.bakul.app",
+      "https://*.vercel.app",
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "http://192.168.0.203:3000"
+    ],
+    "method": ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
+    "responseHeader": ["*"],
+    "maxAgeSeconds": 3600
+  }
+]

@@ -149,12 +149,17 @@ export const uploadFile = (
                 console.error("Upload error:", error);
                 const code = (error as { code?: string }).code || "";
                 const message = (error as { message?: string }).message || "";
-                const isQuotaError =
+                const isFallbackTrigger =
                   code === "storage/quota-exceeded" ||
-                  message.toLowerCase().includes("quota for bucket") ||
-                  message.toLowerCase().includes("quota-exceeded");
+                  code === "storage/unknown" ||
+                  code === "storage/retry-limit-exceeded" ||
+                  message.toLowerCase().includes("cors") ||
+                  message.toLowerCase().includes("quota") ||
+                  message.toLowerCase().includes("network") ||
+                  message.toLowerCase().includes("failed");
 
-                if (isQuotaError) {
+                if (isFallbackTrigger) {
+                  console.warn("Storage upload encountered issue (CORS/Quota/Network), activating resilient inline fallback:", error);
                   resolveInlineFallback().catch(reject);
                   return;
                 }
