@@ -12,6 +12,7 @@ import {
   LogOut,
   Shield,
   UserCheck,
+  User,
   Menu,
   X,
   Loader2,
@@ -19,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
 import { signOut } from "@/lib/firebase/auth";
+import { auth } from "@/lib/firebase/config";
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -26,16 +28,25 @@ interface DashboardLayoutProps {
 }
 
 export default function DashboardLayout({ children, role }: DashboardLayoutProps) {
-  const { user, loading, initialized } = useAuth();
+  const { user, loading: authLoading, initialized } = useAuth();
+  const [loading, setLoading] = useState(!initialized || authLoading);
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [authChecked, setAuthChecked] = useState(false);
+
+  useEffect(() => {
+    if (initialized && !authLoading) {
+      setLoading(false);
+    }
+  }, [initialized, authLoading]);
 
   useEffect(() => {
     // Only check auth after fully initialized and not loading
-    if (initialized && !loading && !authChecked) {
-      setAuthChecked(true);
-      
+    if (initialized && !authLoading) {
+      if (!user && auth.currentUser) {
+        // Firebase Auth is active, user profile sync in progress
+        return;
+      }
+
       if (!user) {
         router.replace("/login");
       } else if (role === "admin" && user.role !== "admin") {
@@ -48,10 +59,10 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
         router.replace("/login");
       }
     }
-  }, [initialized, loading, user, role, router, authChecked]);
+  }, [initialized, loading, user, role, router]);
 
-  // Show loading state while auth is initializing
-  if (!initialized || loading) {
+  // Show loading state while auth is initializing or user profile is syncing
+  if (!initialized || loading || (!user && auth.currentUser)) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-green-50 to-white">
         <Loader2 className="h-12 w-12 text-green-600 animate-spin mb-4" />
@@ -103,18 +114,22 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
     { icon: Users, label: "Students", href: "/dashboard/admin/students" },
     { icon: FileText, label: "Exams", href: "/dashboard/admin/exams" },
     { icon: Settings, label: "Settings", href: "/dashboard/admin/settings" },
+    { icon: User, label: "My Profile", href: "/profile" },
   ];
 
   const teacherMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/teacher" },
     { icon: FileText, label: "My Exams", href: "/dashboard/teacher/exams" },
+    { icon: FileText, label: "Submissions & OCR", href: "/dashboard/teacher/answers" },
+    { icon: Shield, label: "Live Monitoring", href: "/dashboard/teacher/monitoring" },
     { icon: Users, label: "Students", href: "/dashboard/teacher/students" },
-    { icon: Shield, label: "Monitoring", href: "/dashboard/teacher/monitoring" },
+    { icon: User, label: "My Profile", href: "/profile" },
   ];
 
   const studentMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/student" },
     { icon: FileText, label: "Available Exams", href: "/exam" },
+    { icon: User, label: "My Profile", href: "/profile" },
   ];
 
   const menuItems = role === "admin" ? adminMenuItems : role === "teacher" ? teacherMenuItems : studentMenuItems;
@@ -192,7 +207,13 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
               <Menu className="h-5 w-5" />
             </button>
             <div className="flex items-center space-x-4">
-              <span className="text-sm text-gray-600">Welcome back, {user.name}!</span>
+              <span className="text-sm text-gray-600 hidden sm:inline">Welcome back, {user.name}!</span>
+              <Link href="/profile">
+                <Button variant="outline" size="sm">
+                  <UserCheck className="h-4 w-4 mr-2" />
+                  Profile
+                </Button>
+              </Link>
             </div>
           </div>
         </header>

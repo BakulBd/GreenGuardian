@@ -58,6 +58,7 @@ if (!getApps().length) {
   storage = getStorage(app);
   
   if (typeof window !== "undefined") {
+    setPersistence(auth, browserLocalPersistence).catch(() => {});
     try {
       analytics = getAnalytics(app);
     } catch (e) {}

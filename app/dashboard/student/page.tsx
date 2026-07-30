@@ -15,7 +15,8 @@ import {
   Award,
   TrendingUp,
   Loader2,
-  PlayCircle
+  PlayCircle,
+  Eye
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
@@ -143,6 +144,14 @@ export default function StudentDashboardPage() {
     return recentSessions.some(s => s.examId === examId);
   };
 
+  const [selectedSession, setSelectedSession] = useState<ExamSession | null>(null);
+  const [showResultModal, setShowResultModal] = useState(false);
+
+  const handleViewSessionResult = (session: ExamSession) => {
+    setSelectedSession(session);
+    setShowResultModal(true);
+  };
+
   if (loading) {
     return (
       <DashboardLayout role="student">
@@ -268,7 +277,7 @@ export default function StudentDashboardPage() {
         <Card>
           <CardHeader>
             <CardTitle>Recent Activity</CardTitle>
-            <CardDescription>Your exam history</CardDescription>
+            <CardDescription>Click any exam attempt to view detailed score breakdown</CardDescription>
           </CardHeader>
           <CardContent>
             {recentSessions.length === 0 ? (
@@ -277,45 +286,141 @@ export default function StudentDashboardPage() {
                 <p className="mt-4">No exam attempts yet</p>
               </div>
             ) : (
-              <div className="space-y-4">
-                {recentSessions.map((session) => (
-                  <div
-                    key={session.id}
-                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 border rounded-lg"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <h4 className="font-medium truncate">{session.examTitle || "Exam"}</h4>
-                      <div className="flex flex-wrap gap-2 mt-1 text-sm text-gray-500">
-                        <span className="flex items-center gap-1">
-                          <Calendar className="h-3 w-3" />
-                          {session.startTime?.toDate?.()
-                            ? session.startTime.toDate().toLocaleDateString()
-                            : "Unknown date"}
-                        </span>
-                        <Badge
-                          variant={session.status === "submitted" || session.status === "auto-submitted" ? "default" : "secondary"}
-                        >
-                          {session.status}
-                        </Badge>
+              <div className="space-y-3">
+                {recentSessions.map((session) => {
+                  const percentage = session.score !== undefined && session.totalMarks ? Math.round((session.score / session.totalMarks) * 100) : null;
+                  
+                  return (
+                    <div
+                      key={session.id}
+                      onClick={() => handleViewSessionResult(session)}
+                      className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 border rounded-lg hover:border-green-400 hover:shadow-sm cursor-pointer transition-all bg-white"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-semibold text-slate-900 truncate">{session.examTitle || "Exam"}</h4>
+                        <div className="flex flex-wrap items-center gap-2 mt-1 text-xs text-gray-500">
+                          <span className="flex items-center gap-1">
+                            <Calendar className="h-3.5 w-3.5 text-slate-400" />
+                            {session.startTime?.toDate?.()
+                              ? session.startTime.toDate().toLocaleDateString()
+                              : "Unknown date"}
+                          </span>
+                          <Badge
+                            variant={session.status === "submitted" || session.status === "auto-submitted" ? "default" : "secondary"}
+                            className="capitalize"
+                          >
+                            {session.status}
+                          </Badge>
+                        </div>
                       </div>
+                      
+                      {percentage !== null ? (
+                        <div className="flex items-center gap-3 text-right">
+                          <div>
+                            <p className={`text-xl font-bold ${percentage >= 50 ? 'text-green-600' : 'text-red-600'}`}>
+                              {percentage}%
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              {session.score}/{session.totalMarks} Marks
+                            </p>
+                          </div>
+                          <Button variant="ghost" size="sm" className="hidden sm:inline-flex">
+                            View Details
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button variant="outline" size="sm">
+                          Details
+                        </Button>
+                      )}
                     </div>
-                    {session.score !== undefined && session.totalMarks && (
-                      <div className="text-right">
-                        <p className="text-xl font-bold">
-                          {Math.round((session.score / session.totalMarks) * 100)}%
-                        </p>
-                        <p className="text-sm text-gray-500">
-                          {session.score}/{session.totalMarks}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </CardContent>
         </Card>
       </div>
+
+      {/* Result Details Modal */}
+      {selectedSession && (
+        <div
+          className={`fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm transition-opacity ${showResultModal ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
+          onClick={() => setShowResultModal(false)}
+        >
+          <Card className="max-w-lg w-full bg-white shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <CardHeader className="bg-gradient-to-r from-slate-900 to-slate-800 text-white">
+              <div className="flex justify-between items-start">
+                <div>
+                  <CardTitle className="text-xl text-white">{selectedSession.examTitle || "Exam Result"}</CardTitle>
+                  <CardDescription className="text-slate-300 text-xs mt-1">
+                    Submitted: {selectedSession.completedAt?.toDate?.() ? selectedSession.completedAt.toDate().toLocaleString() : "Recently"}
+                  </CardDescription>
+                </div>
+                <Badge className="bg-emerald-500 text-white capitalize">{selectedSession.status}</Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="p-6 space-y-4">
+              {/* Score Display */}
+              <div className="grid grid-cols-2 gap-3 text-center">
+                <div className="p-4 bg-slate-50 rounded-xl border">
+                  <p className="text-xs text-slate-500 font-medium">Obtained Score</p>
+                  <p className="text-3xl font-extrabold text-slate-900 mt-1">
+                    {selectedSession.score ?? 0} <span className="text-sm font-normal text-slate-500">/ {selectedSession.totalMarks || 100}</span>
+                  </p>
+                </div>
+                <div className="p-4 bg-slate-50 rounded-xl border">
+                  <p className="text-xs text-slate-500 font-medium">Accuracy Percentage</p>
+                  <p className={`text-3xl font-extrabold mt-1 ${(selectedSession.score && selectedSession.totalMarks && (selectedSession.score / selectedSession.totalMarks) >= 0.5) ? "text-emerald-600" : "text-amber-600"}`}>
+                    {selectedSession.score && selectedSession.totalMarks ? Math.round((selectedSession.score / selectedSession.totalMarks) * 100) : 0}%
+                  </p>
+                </div>
+              </div>
+
+              {/* Statistical Breakdown */}
+              <div className="space-y-2 border-t pt-4 text-sm text-slate-700">
+                <div className="flex justify-between items-center py-1">
+                  <span className="flex items-center gap-2">
+                    <CheckCircle className="h-4 w-4 text-emerald-600" /> Correct Answers:
+                  </span>
+                  <span className="font-semibold text-emerald-600">{(selectedSession as any).correctAnswers ?? "N/A"}</span>
+                </div>
+                <div className="flex justify-between items-center py-1">
+                  <span className="flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4 text-red-500" /> Wrong Answers:
+                  </span>
+                  <span className="font-semibold text-red-500">{(selectedSession as any).wrongAnswers ?? "N/A"}</span>
+                </div>
+                <div className="flex justify-between items-center py-1">
+                  <span className="flex items-center gap-2">
+                    <Award className="h-4 w-4 text-blue-500" /> Behavior Score:
+                  </span>
+                  <span className="font-semibold text-slate-900">{(selectedSession as any).behaviorScore ?? 100} / 100</span>
+                </div>
+                <div className="flex justify-between items-center py-1">
+                  <span className="flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-amber-500" /> Proctor Warnings:
+                  </span>
+                  <span className="font-semibold text-slate-900">{(selectedSession as any).warnings ?? 0}</span>
+                </div>
+              </div>
+
+              <div className="flex gap-2 mt-4">
+                <Button 
+                  className="flex-1 bg-blue-600 hover:bg-blue-700" 
+                  onClick={() => router.push(`/exam/${selectedSession.examId}/review`)}
+                >
+                  <Eye className="w-4 h-4 mr-2" />
+                  Review Answers
+                </Button>
+                <Button className="flex-1 bg-slate-900 hover:bg-slate-800" onClick={() => setShowResultModal(false)}>
+                  Close Details
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </DashboardLayout>
   );
 }

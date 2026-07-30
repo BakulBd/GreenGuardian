@@ -166,10 +166,11 @@ service cloud.firestore {
       // Students can read their own events
       allow read: if isUser(resource.data.studentId);
 
-      // Teachers can read events for their exams
-      allow read: if isTeacher() &&
-                     exists(/databases/$(database)/documents/exams/$(resource.data.examId)) &&
-                     get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid;
+      // Teachers can read events for their exams (via examId or sessionId)
+      allow read: if isTeacher() && (
+        (resource.data.examId != null && exists(/databases/$(database)/documents/exams/$(resource.data.examId)) && get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid) ||
+        (resource.data.sessionId != null && exists(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)) && exists(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)) && get(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)).data.teacherId == request.auth.uid)
+      );
 
       // Admins can read all events
       allow read: if isAdmin();
@@ -186,10 +187,11 @@ service cloud.firestore {
       // Students can read their own snapshots
       allow read: if isUser(resource.data.studentId);
 
-      // Teachers can read snapshots for their exams
-      allow read: if isTeacher() &&
-                     exists(/databases/$(database)/documents/exams/$(resource.data.examId)) &&
-                     get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid;
+      // Teachers can read snapshots for their exams (via examId or sessionId)
+      allow read: if isTeacher() && (
+        (resource.data.examId != null && exists(/databases/$(database)/documents/exams/$(resource.data.examId)) && get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid) ||
+        (resource.data.sessionId != null && exists(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)) && exists(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)) && get(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)).data.teacherId == request.auth.uid)
+      );
 
       // Admins can read all snapshots
       allow read: if isAdmin();

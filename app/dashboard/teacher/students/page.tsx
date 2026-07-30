@@ -16,7 +16,8 @@ import {
   TrendingUp,
   Clock,
   Eye,
-  BarChart
+  BarChart,
+  AlertTriangle
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -424,7 +425,7 @@ export default function TeacherStudentsPage() {
                           <Badge variant="outline">Behavior {(session as any).behaviorScore ?? 0}%</Badge>
                           <Badge variant="outline">Accuracy {(session as any).accuracy ?? 0}%</Badge>
                           <Badge variant="outline">Score {(session as any).score ?? 0}</Badge>
-                          <Badge variant="outline">Warnings {(session as any).warnings ?? session.proctoring?.suspiciousEvents || 0}</Badge>
+                          <Badge variant="outline">Warnings {((session as any).warnings ?? session.proctoring?.suspiciousEvents) || 0}</Badge>
                           {(session as any).flagged && <Badge className="bg-red-100 text-red-700">Flagged</Badge>}
                         </div>
                       </div>

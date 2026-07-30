@@ -327,35 +327,39 @@ export function subscribeToLiveSessions(
 ): () => void {
   const sessionsQuery = query(
     collection(db, "examSessions"),
-    where("examId", "==", examId),
-    where("status", "==", "in-progress")
+    where("examId", "==", examId)
   );
   
   const unsubscribe = onSnapshot(sessionsQuery, async (snapshot) => {
-    const sessions: LiveStudentSession[] = [];
-    
-    for (const docSnapshot of snapshot.docs) {
+    const activeDocs = snapshot.docs.filter((doc) => {
+      const status = doc.data().status;
+      return status === "in-progress" || status === "started" || !doc.data().submitted;
+    });
+
+    const sessionsPromises = activeDocs.map(async (docSnapshot) => {
       const data = docSnapshot.data();
+      let recentEventsLimited: ProctoringEvent[] = [];
+
+      try {
+        const eventsQuery = query(
+          collection(db, "proctoringEvents"),
+          where("sessionId", "==", docSnapshot.id)
+        );
+        const eventsSnapshot = await getDocs(eventsQuery);
+        const recentEvents: ProctoringEvent[] = eventsSnapshot.docs.map(e => ({
+          ...e.data(),
+          timestamp: e.data().timestamp?.toDate?.() || new Date(),
+        })) as ProctoringEvent[];
+        recentEvents.sort((a, b) => {
+          const aMs = new Date(a.timestamp as any).getTime();
+          const bMs = new Date(b.timestamp as any).getTime();
+          return bMs - aMs;
+        });
+        recentEventsLimited = recentEvents.slice(0, 10);
+      } catch (err) {
+        // Handle missing index or query error gracefully
+      }
       
-      // Get recent events for this session
-      const eventsQuery = query(
-        collection(db, "proctoringEvents"),
-        where("sessionId", "==", docSnapshot.id)
-      );
-      
-      const eventsSnapshot = await getDocs(eventsQuery);
-      const recentEvents: ProctoringEvent[] = eventsSnapshot.docs.map(e => ({
-        ...e.data(),
-        timestamp: e.data().timestamp?.toDate?.() || new Date(),
-      })) as ProctoringEvent[];
-      recentEvents.sort((a, b) => {
-        const aMs = new Date(a.timestamp as any).getTime();
-        const bMs = new Date(b.timestamp as any).getTime();
-        return bMs - aMs;
-      });
-      const recentEventsLimited = recentEvents.slice(0, 10);
-      
-      // Determine alert status
       const hasAlert = recentEventsLimited.some(
         e => e.severity === 'critical' || e.severity === 'high'
       );
@@ -364,19 +368,17 @@ export function subscribeToLiveSessions(
         .map(e => e.message)
         .slice(0, 3);
       
-      // Get latest proctoring data
       const proctoring = data.proctoring || {};
-      const behaviorScore = proctoring.behaviorScore ?? 100;
+      const behaviorScore = data.behaviorScore ?? proctoring.behaviorScore ?? 100;
       const warningCount = data.warnings ?? proctoring.suspiciousEvents ?? 0;
       
-      // Calculate risk level
       let riskLevel: 'low' | 'medium' | 'high' | 'critical';
       if (behaviorScore >= 85) riskLevel = 'low';
       else if (behaviorScore >= 65) riskLevel = 'medium';
       else if (behaviorScore >= 40) riskLevel = 'high';
       else riskLevel = 'critical';
       
-      sessions.push({
+      return {
         sessionId: docSnapshot.id,
         studentId: data.studentId,
         studentName: data.studentName || 'Unknown Student',
@@ -391,9 +393,11 @@ export function subscribeToLiveSessions(
         recentEvents: recentEventsLimited,
         hasAlert,
         alertReasons,
-      });
-    }
+      } as LiveStudentSession;
+    });
     
+    const sessions = await Promise.all(sessionsPromises);
+
     // Sort by risk level (critical first)
     sessions.sort((a, b) => {
       const riskOrder = { critical: 0, high: 1, medium: 2, low: 3 };

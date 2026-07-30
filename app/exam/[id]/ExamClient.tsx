@@ -315,6 +315,8 @@ export default function ExamClient() {
     };
   }, [cameraStream, examStarted, toast, safePlayVideo]);
 
+  const [isExamClosed, setIsExamClosed] = useState(false);
+
   const loadExam = async (examId: string) => {
     try {
       const examDoc = await getDoc(doc(db, "exams", examId));
@@ -328,7 +330,13 @@ export default function ExamClient() {
         return;
       }
 
-      const examData = { id: examDoc.id, ...examDoc.data() } as Exam;
+      const examData = { id: examDoc.id, ...examDoc.data() } as any;
+      const now = new Date();
+      const isPast = (examData.endDate && new Date(examData.endDate) < now) || examData.status === "archived";
+
+      if (isPast) {
+        setIsExamClosed(true);
+      }
       
       // Shuffle questions if enabled
       if (examData.shuffleQuestions && examData.questions) {
@@ -337,7 +345,7 @@ export default function ExamClient() {
 
       // Remove correct answers from questions
       if (examData.questions) {
-        examData.questions = examData.questions.map(q => ({
+        examData.questions = examData.questions.map((q: any) => ({
           ...q,
           correctAnswer: undefined,
         })) as Question[];
@@ -1152,6 +1160,33 @@ export default function ExamClient() {
             <h2 className="mt-4 text-xl font-semibold">Exam Not Found</h2>
             <Button className="mt-4" onClick={() => router.push("/dashboard/student")}>
               Back to Dashboard
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (isExamClosed) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-slate-100 p-4">
+        <Card className="max-w-lg w-full text-center shadow-lg border-2 border-red-100">
+          <CardHeader>
+            <div className="mx-auto p-4 bg-red-50 rounded-full w-16 h-16 flex items-center justify-center mb-2">
+              <Clock className="h-8 w-8 text-red-500" />
+            </div>
+            <CardTitle className="text-2xl text-slate-800">Exam Finished / Expired</CardTitle>
+            <CardDescription className="text-slate-600">
+              The exam &quot;{exam.title}&quot; has ended and is no longer accepting submissions.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="p-3 bg-slate-50 rounded-lg text-sm text-slate-600 space-y-1">
+              <p><strong>Duration:</strong> {exam.duration} minutes</p>
+              <p><strong>Total Marks:</strong> {exam.totalMarks}</p>
+            </div>
+            <Button className="w-full bg-slate-900 hover:bg-slate-800" onClick={() => router.push("/dashboard/student")}>
+              Return to Student Dashboard
             </Button>
           </CardContent>
         </Card>

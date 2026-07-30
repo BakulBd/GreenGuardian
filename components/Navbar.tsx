@@ -53,7 +53,7 @@ function Navbar() {
       case "teacher":
         return user.approved ? "/dashboard/teacher" : "/pending-approval";
       case "student":
-        return "/exam";
+        return "/dashboard/student";
       default:
         return "/";
     }
@@ -91,8 +91,31 @@ function Navbar() {
           {/* Desktop Navigation */}
           <nav className="hidden md:flex items-center space-x-1">
             <NavLink href="/" active={pathname === "/"}>Home</NavLink>
-            <NavLink href="#features" active={false} onClick={(e) => scrollToSection(e, "features")}>Features</NavLink>
-            <NavLink href="#how-it-works" active={false} onClick={(e) => scrollToSection(e, "how-it-works")}>How It Works</NavLink>
+            {user ? (
+              <>
+                <NavLink href={getDashboardLink()} active={pathname.startsWith("/dashboard")}>Dashboard</NavLink>
+                {user.role === "student" && (
+                  <NavLink href="/exam" active={pathname === "/exam"}>Available Exams</NavLink>
+                )}
+                {user.role === "teacher" && (
+                  <>
+                    <NavLink href="/dashboard/teacher/exams" active={pathname.startsWith("/dashboard/teacher/exams")}>My Exams</NavLink>
+                    <NavLink href="/dashboard/teacher/monitoring" active={pathname.startsWith("/dashboard/teacher/monitoring")}>Live Monitoring</NavLink>
+                  </>
+                )}
+                {user.role === "admin" && (
+                  <>
+                    <NavLink href="/dashboard/admin/teachers" active={pathname.startsWith("/dashboard/admin/teachers")}>Teachers</NavLink>
+                    <NavLink href="/dashboard/admin/students" active={pathname.startsWith("/dashboard/admin/students")}>Students</NavLink>
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <NavLink href="#features" active={false} onClick={(e) => scrollToSection(e, "features")}>Features</NavLink>
+                <NavLink href="#how-it-works" active={false} onClick={(e) => scrollToSection(e, "how-it-works")}>How It Works</NavLink>
+              </>
+            )}
           </nav>
 
           {/* Desktop Auth Buttons */}

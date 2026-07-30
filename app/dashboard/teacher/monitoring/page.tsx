@@ -18,21 +18,14 @@ import {
   CheckCircle,
   AlertCircle,
   Activity,
-  MonitorStop
+  MonitorStop,
+  Image as ImageIcon
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
-import { getExamsByTeacher, getSessionsByExam } from "@/lib/firebase/exams";
-import { Exam, ExamSession } from "@/lib/types";
-import { collection, query, where, onSnapshot, orderBy } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
-
-interface LiveSession extends ExamSession {
-  examTitle?: string;
-  warningCount: number;
-  lastActivity?: Date;
-  isOnline: boolean;
-}
+import { getExamsByTeacher } from "@/lib/firebase/exams";
+import { Exam } from "@/lib/types";
+import { subscribeToLiveSessions, LiveStudentSession } from "@/lib/services/proctoring";
 
 export default function TeacherMonitoringPage() {
   const { user } = useAuth();
@@ -41,10 +34,12 @@ export default function TeacherMonitoringPage() {
   
   const [exams, setExams] = useState<Exam[]>([]);
   const [selectedExamId, setSelectedExamId] = useState<string>("");
-  const [liveSessions, setLiveSessions] = useState<LiveSession[]>([]);
+  const [liveSessions, setLiveSessions] = useState<LiveStudentSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const refreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Store the unsubscribe function for cleanup
+  const unsubscribeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (user) {
@@ -53,24 +48,36 @@ export default function TeacherMonitoringPage() {
   }, [user]);
 
   useEffect(() => {
-    if (selectedExamId) {
-      loadLiveSessions(selectedExamId);
+    // Cleanup previous subscription
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current();
+      unsubscribeRef.current = null;
     }
-  }, [selectedExamId]);
 
-  useEffect(() => {
-    if (autoRefresh && selectedExamId) {
-      refreshIntervalRef.current = setInterval(() => {
-        loadLiveSessions(selectedExamId);
-      }, 10000); // Refresh every 10 seconds
+    if (selectedExamId && autoRefresh) {
+      // Start real-time listener
+      const unsubscribe = subscribeToLiveSessions(selectedExamId, (sessions) => {
+        setLiveSessions(sessions);
+      });
+      unsubscribeRef.current = unsubscribe;
+    } else if (selectedExamId && !autoRefresh) {
+      // Fetch once (by subscribing and immediately unsubscribing after first payload)
+      // For simplicity, we just leave it subscribed but only start it if autoRefresh is true.
+      // If user toggles off, we just clear the listener.
+      const unsubscribe = subscribeToLiveSessions(selectedExamId, (sessions) => {
+        setLiveSessions(sessions);
+        unsubscribe();
+        unsubscribeRef.current = null;
+      });
     }
-    
+
     return () => {
-      if (refreshIntervalRef.current) {
-        clearInterval(refreshIntervalRef.current);
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
+        unsubscribeRef.current = null;
       }
     };
-  }, [autoRefresh, selectedExamId]);
+  }, [selectedExamId, autoRefresh]);
 
   const loadExams = async () => {
     try {
@@ -90,32 +97,15 @@ export default function TeacherMonitoringPage() {
     }
   };
 
-  const loadLiveSessions = async (examId: string) => {
-    try {
-      const sessions = await getSessionsByExam(examId);
-      const exam = exams.find(e => e.id === examId);
-      
-      // Map sessions to LiveSession format
-      const live: LiveSession[] = sessions
-        .filter(s => s.status === "in-progress")
-        .map(session => ({
-          ...session,
-          examTitle: exam?.title,
-          warningCount: session.proctoring?.suspiciousEvents || 0,
-          lastActivity: session.updatedAt instanceof Date ? session.updatedAt : 
-            (session.updatedAt as any)?.toDate?.() || new Date(),
-          isOnline: true, // Could be enhanced with real-time presence
-        }));
-      
-      setLiveSessions(live);
-    } catch (error) {
-      console.error("Error loading sessions:", error);
-    }
-  };
-
   const handleManualRefresh = () => {
     if (selectedExamId) {
-      loadLiveSessions(selectedExamId);
+      // Temporarily trigger a one-off fetch by re-subscribing
+      if (!autoRefresh) {
+        const unsubscribe = subscribeToLiveSessions(selectedExamId, (sessions) => {
+          setLiveSessions(sessions);
+          unsubscribe();
+        });
+      }
       toast({ title: "Refreshed", description: "Session data updated" });
     }
   };
@@ -125,15 +115,18 @@ export default function TeacherMonitoringPage() {
   const sessionStats = {
     total: liveSessions.length,
     active: liveSessions.filter(s => s.isOnline).length,
-    flagged: liveSessions.filter(s => s.warningCount >= 3).length,
+    flagged: liveSessions.filter(s => s.hasAlert).length,
     warnings: liveSessions.reduce((acc, s) => acc + s.warningCount, 0),
   };
 
-  const getWarningLevel = (count: number) => {
-    if (count >= 5) return { level: "Critical", color: "bg-red-100 text-red-700", icon: XCircle };
-    if (count >= 3) return { level: "High", color: "bg-orange-100 text-orange-700", icon: AlertTriangle };
-    if (count >= 1) return { level: "Low", color: "bg-yellow-100 text-yellow-700", icon: AlertCircle };
-    return { level: "None", color: "bg-green-100 text-green-700", icon: CheckCircle };
+  const getWarningLevel = (riskLevel: string) => {
+    switch (riskLevel) {
+      case 'critical': return { level: "Critical", color: "bg-red-100 text-red-700 border-red-200", icon: XCircle };
+      case 'high': return { level: "High", color: "bg-orange-100 text-orange-700 border-orange-200", icon: AlertTriangle };
+      case 'medium': return { level: "Medium", color: "bg-yellow-100 text-yellow-700 border-yellow-200", icon: AlertCircle };
+      case 'low': 
+      default: return { level: "Low", color: "bg-green-100 text-green-700 border-green-200", icon: CheckCircle };
+    }
   };
 
   return (
@@ -149,6 +142,7 @@ export default function TeacherMonitoringPage() {
             <Button
               variant={autoRefresh ? "default" : "outline"}
               onClick={() => setAutoRefresh(!autoRefresh)}
+              className={autoRefresh ? "bg-emerald-600 hover:bg-emerald-700" : ""}
             >
               <Activity className={`h-4 w-4 mr-2 ${autoRefresh ? "animate-pulse" : ""}`} />
               Auto Refresh {autoRefresh ? "ON" : "OFF"}
@@ -224,7 +218,7 @@ export default function TeacherMonitoringPage() {
                     <AlertTriangle className="h-6 w-6 text-red-600" />
                   </div>
                   <div className="ml-4">
-                    <p className="text-sm text-gray-600">Flagged</p>
+                    <p className="text-sm text-gray-600">Alerts</p>
                     <p className="text-2xl font-bold">{sessionStats.flagged}</p>
                   </div>
                 </div>
@@ -265,94 +259,90 @@ export default function TeacherMonitoringPage() {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-4">
+                <div className="grid grid-cols-1 gap-4">
                   {liveSessions.map((session) => {
-                    const warning = getWarningLevel(session.warningCount);
+                    const warning = getWarningLevel(session.riskLevel);
                     const WarningIcon = warning.icon;
                     
                     return (
-                      <Card key={session.id} className={session.warningCount >= 3 ? "border-red-200" : ""}>
-                        <CardContent className="pt-4">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center space-x-4">
-                              {/* Status indicator */}
-                              <div className="relative">
-                                <div className="w-12 h-12 bg-gray-200 rounded-full flex items-center justify-center">
-                                  <Camera className="h-6 w-6 text-gray-600" />
+                      <Card key={session.sessionId} className={`overflow-hidden border-l-4 ${
+                        session.riskLevel === 'critical' ? 'border-l-red-500' :
+                        session.riskLevel === 'high' ? 'border-l-orange-500' :
+                        session.riskLevel === 'medium' ? 'border-l-yellow-500' : 'border-l-green-500'
+                      }`}>
+                        <CardContent className="p-0">
+                          <div className="flex flex-col md:flex-row">
+                            
+                            {/* Snapshot Display */}
+                            <div className="bg-black flex-shrink-0 relative h-32 md:h-auto md:w-48 flex items-center justify-center">
+                              {session.latestSnapshot?.snapshotUrl ? (
+                                <img 
+                                  src={session.latestSnapshot.snapshotUrl} 
+                                  alt="Proctoring Snapshot" 
+                                  className="h-full w-full object-cover"
+                                />
+                              ) : (
+                                <div className="text-gray-500 flex flex-col items-center">
+                                  <ImageIcon className="w-8 h-8 mb-2 opacity-50" />
+                                  <span className="text-xs">No Snapshot</span>
                                 </div>
-                                <div className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full ${
-                                  session.isOnline ? "bg-green-500" : "bg-gray-400"
-                                } border-2 border-white`} />
-                              </div>
-                              
-                              {/* Student info */}
-                              <div>
-                                <p className="font-medium text-gray-900">
-                                  {session.studentName || `Student ${session.studentId.slice(0, 8)}...`}
-                                </p>
-                                <div className="flex items-center space-x-2 text-sm text-gray-600">
-                                  <Clock className="h-3 w-3" />
-                                  <span>
-                                    Started: {session.startTime instanceof Date ? session.startTime.toLocaleTimeString() : 
-                                      (session.startTime as any)?.toDate?.()?.toLocaleTimeString() || "Unknown"}
-                                  </span>
-                                </div>
+                              )}
+                              <div className="absolute top-2 right-2">
+                                <div className={`w-3 h-3 rounded-full border border-white ${session.isOnline ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
                               </div>
                             </div>
-
-                            {/* Warning status */}
-                            <div className="flex items-center space-x-4">
-                              <div className="text-right">
-                                <div className="flex items-center space-x-2">
-                                  <Badge className={warning.color}>
-                                    <WarningIcon className="h-3 w-3 mr-1" />
-                                    {session.warningCount} Warnings
-                                  </Badge>
+                            
+                            {/* Session Details */}
+                            <div className="p-4 flex-1 flex flex-col justify-between">
+                              <div className="flex justify-between items-start">
+                                <div>
+                                  <h3 className="font-bold text-lg text-gray-900">
+                                    {session.studentName}
+                                  </h3>
+                                  <div className="flex items-center space-x-2 text-sm text-gray-500 mt-1">
+                                    <Clock className="h-3.5 w-3.5" />
+                                    <span>
+                                      Started: {session.startTime.toLocaleTimeString()}
+                                    </span>
+                                  </div>
                                 </div>
-                                <p className="text-sm text-gray-600 mt-1">
-                                  Risk: {warning.level}
-                                </p>
+                                
+                                <div className="text-right">
+                                  <Badge className={`border ${warning.color}`}>
+                                    <WarningIcon className="h-3 w-3 mr-1" />
+                                    {warning.level} Risk
+                                  </Badge>
+                                  <p className="text-sm font-medium mt-2 text-gray-700">
+                                    Behavior: {session.behaviorScore}/100
+                                  </p>
+                                </div>
                               </div>
 
-                              {/* Progress */}
-                              <div className="w-32">
-                                <p className="text-xs text-gray-600 mb-1">Progress</p>
-                                <Progress 
-                                  value={50} // Placeholder - actual progress would come from answers count
-                                />
-                              </div>
+                              <div className="mt-4 flex flex-col md:flex-row justify-between items-end gap-4">
+                                <div className="flex-1 space-y-2">
+                                  {session.recentEvents && session.recentEvents.length > 0 && (
+                                    <div className="flex flex-wrap gap-1">
+                                      <span className="text-xs font-semibold text-gray-500 uppercase mr-1">Alerts:</span>
+                                      {session.recentEvents.slice(0, 3).map((event, i) => (
+                                        <Badge key={i} variant="outline" className="text-xs bg-red-50 text-red-700 border-red-200">
+                                          {event.message}
+                                        </Badge>
+                                      ))}
+                                    </div>
+                                  )}
+                                  <div className="flex gap-2">
+                                    <span className="text-xs font-semibold text-gray-500 uppercase mr-1">Warnings Total:</span>
+                                    <span className="text-xs font-bold text-gray-900">{session.warningCount}</span>
+                                  </div>
+                                </div>
 
-                              {/* Actions */}
-                              <Button variant="outline" size="sm" onClick={() => router.push("/dashboard/teacher/live-monitoring") }>
-                                <Eye className="h-4 w-4 mr-2" />
-                                View Details
-                              </Button>
+                                <Button variant="outline" size="sm" onClick={() => router.push(`/dashboard/teacher/session-results?sessionId=${session.sessionId}`) }>
+                                  <Eye className="h-4 w-4 mr-2" />
+                                  Full Details
+                                </Button>
+                              </div>
                             </div>
                           </div>
-
-                          {/* Proctoring events */}
-                          {session.proctoring && (
-                            <div className="mt-4 pt-4 border-t">
-                              <p className="text-sm font-medium text-gray-700 mb-2">Recent Events:</p>
-                              <div className="flex flex-wrap gap-2">
-                                {session.proctoring.tabSwitches > 0 && (
-                                  <Badge variant="outline" className="text-yellow-700">
-                                    Tab Switches: {session.proctoring.tabSwitches}
-                                  </Badge>
-                                )}
-                                {session.proctoring.noFaceDuration > 0 && (
-                                  <Badge variant="outline" className="text-red-700">
-                                    Face Not Detected: {session.proctoring.noFaceDuration}s
-                                  </Badge>
-                                )}
-                                {session.proctoring.multipleFacesCount > 0 && (
-                                  <Badge variant="outline" className="text-red-700">
-                                    Multiple Faces: {session.proctoring.multipleFacesCount}
-                                  </Badge>
-                                )}
-                              </div>
-                            </div>
-                          )}
                         </CardContent>
                       </Card>
                     );

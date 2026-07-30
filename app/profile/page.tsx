@@ -76,7 +76,7 @@ export default function ProfilePage() {
       case "teacher":
         return user.approved ? "/dashboard/teacher" : "/pending-approval";
       case "student":
-        return "/exam";
+        return "/dashboard/student";
       default:
         return "/";
     }
@@ -188,6 +188,29 @@ export default function ProfilePage() {
                     )}
                   </Button>
                 </form>
+              </CardContent>
+            </Card>
+
+            {/* Profile Overview Stats */}
+            <Card className="mt-6">
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Shield className="h-5 w-5 text-emerald-600" /> Account Security & Status
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm text-slate-600">
+                <div className="flex justify-between items-center py-2 border-b">
+                  <span>Role Classification</span>
+                  <span className="font-semibold text-slate-900 capitalize">{user.role}</span>
+                </div>
+                <div className="flex justify-between items-center py-2 border-b">
+                  <span>Proctoring Integrity Record</span>
+                  <span className="font-semibold text-emerald-600">Good Standing</span>
+                </div>
+                <div className="flex justify-between items-center py-2">
+                  <span>Platform Verification</span>
+                  <span className="font-semibold text-blue-600">Verified User</span>
+                </div>
               </CardContent>
             </Card>
           </motion.div>

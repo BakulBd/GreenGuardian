@@ -44,7 +44,9 @@ export default function CameraPermission({
     isChecking,
     isRequesting,
     deviceInfo,
+    isInsecureContext,
     requestPermission,
+    requestMockPermission,
     retryPermission,
     stopStream,
     transferStream,
@@ -91,6 +93,13 @@ export default function CameraPermission({
     }
   };
 
+  const handleUseTestCamera = () => {
+    const mock = requestMockPermission();
+    transferStream();
+    setStreamTransferred(true);
+    onPermissionGranted(mock);
+  };
+
   const getStatusIcon = () => {
     switch (status) {
       case "pending":
@@ -100,6 +109,8 @@ export default function CameraPermission({
         return <CheckCircle className="h-12 w-12 text-green-500" />;
       case "denied":
         return <CameraOff className="h-12 w-12 text-red-500" />;
+      case "insecure":
+        return <AlertTriangle className="h-12 w-12 text-amber-500" />;
       case "unavailable":
         return <AlertTriangle className="h-12 w-12 text-yellow-500" />;
       case "error":
@@ -119,6 +130,8 @@ export default function CameraPermission({
         return <Badge className="bg-green-500">Access Granted</Badge>;
       case "denied":
         return <Badge variant="destructive">Access Denied</Badge>;
+      case "insecure":
+        return <Badge variant="outline" className="border-amber-500 text-amber-600 bg-amber-50">HTTP Network IP</Badge>;
       case "unavailable":
         return <Badge variant="outline" className="border-yellow-500 text-yellow-500">Camera Unavailable</Badge>;
       case "error":
@@ -310,6 +323,42 @@ export default function CameraPermission({
             <Button onClick={retryPermission}>
               <Camera className="h-4 w-4 mr-2" />
               Try Again
+            </Button>
+          </div>
+        </div>
+      );
+    }
+
+    if (status === "insecure") {
+      return (
+        <div className="space-y-4">
+          <Alert className="border-amber-500 bg-amber-50 text-amber-900">
+            <AlertTriangle className="h-4 w-4 text-amber-600" />
+            <AlertTitle className="font-semibold text-amber-900">Camera Blocked on Network IP (Insecure Context)</AlertTitle>
+            <AlertDescription className="text-amber-800 text-sm mt-1">
+              You are accessing this app via a local network IP (<code className="bg-amber-100 px-1 py-0.5 rounded font-mono">http://192.168.0.203:3000</code>). Web browsers block hardware camera access over HTTP non-localhost URLs for security reasons.
+            </AlertDescription>
+          </Alert>
+
+          <div className="bg-slate-50 rounded-lg p-4 space-y-3 border text-sm text-slate-700">
+            <p className="font-medium text-slate-900 flex items-center gap-2">
+              <Info className="h-4 w-4 text-blue-600" /> How to test on Local Network IP:
+            </p>
+            <ul className="list-disc list-inside space-y-1 text-slate-600">
+              <li>Click <strong>&quot;Use Test Mode Camera&quot;</strong> below to proceed with a simulated proctoring feed for local testing.</li>
+              <li>Or visit <code className="bg-slate-200 px-1 rounded">http://localhost:3000</code> directly on the host machine.</li>
+              <li>Or enable <code className="bg-slate-200 px-1 rounded">chrome://flags/#unsafely-treat-insecure-origin-as-secure</code> in Chrome for full camera access.</li>
+            </ul>
+          </div>
+
+          <div className="flex flex-col sm:flex-row justify-center gap-3">
+            <Button onClick={handleUseTestCamera} className="bg-amber-600 hover:bg-amber-700 text-white">
+              <Camera className="h-4 w-4 mr-2" />
+              Use Test Mode Camera & Start
+            </Button>
+            <Button onClick={handleRequestPermission} variant="outline">
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Try Real Camera Again
             </Button>
           </div>
         </div>

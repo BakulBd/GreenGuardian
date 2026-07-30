@@ -45,7 +45,7 @@ export default function HomePage() {
           router.replace(user.approved ? "/dashboard/teacher" : "/pending-approval");
           break;
         case "student":
-          router.replace("/exam");
+          router.replace("/dashboard/student");
           break;
       }
     }

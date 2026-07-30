@@ -68,53 +68,67 @@ function wasLoggedIn(): boolean {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   // Start with cached user if we were previously logged in
-  const [user, setUser] = useState<User | null>(() => getCachedUser());
+  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [initialized, setInitialized] = useState(false);
 
   useEffect(() => {
+    const cached = getCachedUser();
+    if (cached) {
+      const validCachedRole = ["admin", "teacher", "student"].includes(cached.role) ? cached.role : "student";
+      setUser({ ...cached, role: validCachedRole as any });
+      setLoading(false);
+      setInitialized(true);
+    }
     let isMounted = true;
-    let authCheckTimeout: NodeJS.Timeout | null = null;
-    const hadPreviousSession = wasLoggedIn();
 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      // Clear any pending timeout
-      if (authCheckTimeout) {
-        clearTimeout(authCheckTimeout);
-        authCheckTimeout = null;
-      }
-
       if (!isMounted) return;
 
       if (firebaseUser) {
+        // Only show loading if we don't have a cached user to avoid blocking UI during background refresh
+        if (isMounted && !cached) setLoading(true);
         try {
-          // Fetch user data from Firestore
           const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
           
           if (userDoc.exists() && isMounted) {
+            const data = userDoc.data() || {};
+            const validRole = ["admin", "teacher", "student"].includes(data.role) ? data.role : "student";
             const userData = { 
-              ...userDoc.data(), 
+              ...data, 
+              role: validRole,
               id: firebaseUser.uid 
             } as User;
             setUser(userData);
             setCachedUser(userData);
           } else if (isMounted) {
-            // User in Auth but not in Firestore - keep cached if available
             const cached = getCachedUser();
             if (cached && cached.id === firebaseUser.uid) {
-              setUser(cached);
+              const validCachedRole = ["admin", "teacher", "student"].includes(cached.role) ? cached.role : "student";
+              setUser({ ...cached, role: validCachedRole as any });
             } else {
-              setUser(null);
-              setCachedUser(null);
+              // Construct fallback user object if doc missing
+              const fallbackUser: User = {
+                id: firebaseUser.uid,
+                email: firebaseUser.email || "",
+                name: firebaseUser.displayName || firebaseUser.email || "User",
+                role: "student",
+                approved: true,
+                rejected: false,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              };
+              setUser(fallbackUser);
+              setCachedUser(fallbackUser);
             }
           }
         } catch (error) {
           console.error("Error fetching user data:", error);
           if (isMounted) {
-            // On error, use cached data if available
             const cached = getCachedUser();
             if (cached && cached.id === firebaseUser.uid) {
-              setUser(cached);
+              const validCachedRole = ["admin", "teacher", "student"].includes(cached.role) ? cached.role : "student";
+              setUser({ ...cached, role: validCachedRole as any });
             }
           }
         }
@@ -124,35 +138,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setInitialized(true);
         }
       } else {
-        // No firebaseUser - but wait a bit if we had a previous session
-        // Firebase might still be restoring from IndexedDB
-        if (hadPreviousSession && !initialized) {
-          authCheckTimeout = setTimeout(() => {
-            if (isMounted) {
-              // After waiting, if still no user, clear everything
-              setUser(null);
-              setCachedUser(null);
-              setLoading(false);
-              setInitialized(true);
-            }
-          }, 2000); // Wait 2 seconds for Firebase to restore session
-        } else {
-          // No previous session, immediately set to null
-          if (isMounted) {
-            setUser(null);
-            setCachedUser(null);
-            setLoading(false);
-            setInitialized(true);
-          }
+        if (isMounted) {
+          setUser(null);
+          setCachedUser(null);
+          setLoading(false);
+          setInitialized(true);
         }
       }
     });
 
     return () => {
       isMounted = false;
-      if (authCheckTimeout) {
-        clearTimeout(authCheckTimeout);
-      }
       unsubscribe();
     };
   }, []);

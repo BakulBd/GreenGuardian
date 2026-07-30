@@ -29,6 +29,8 @@ export interface Exam {
   questionCount?: number;
   startTime?: FirestoreDate;
   endTime?: FirestoreDate;
+  startDate?: any;
+  endDate?: any;
   settings: ExamSettings;
   status: "draft" | "published" | "active" | "completed" | "archived";
   createdAt: FirestoreDate;

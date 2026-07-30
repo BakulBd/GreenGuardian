@@ -92,6 +92,10 @@ export async function loginUser(
 }
 
 export async function signOut(): Promise<void> {
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("greenguardian_user_cache");
+    localStorage.removeItem("greenguardian_auth_token");
+  }
   await firebaseSignOut(auth);
 }
 

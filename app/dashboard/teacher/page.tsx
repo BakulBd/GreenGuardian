@@ -7,12 +7,13 @@ import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { FileText, Users, Shield, Plus, TrendingUp } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { getExamsByTeacher } from "@/lib/firebase/exams";
+import { getExamsByTeacher, getSessionsByExam } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
 
 export default function TeacherDashboard() {
   const { user } = useAuth();
   const [exams, setExams] = useState<Exam[]>([]);
+  const [totalStudentsCount, setTotalStudentsCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -26,6 +27,16 @@ export default function TeacherDashboard() {
       if (!user) return;
       const teacherExams = await getExamsByTeacher(user.id);
       setExams(teacherExams);
+
+      // Compute unique student IDs across all teacher exams
+      const studentIds = new Set<string>();
+      for (const exam of teacherExams) {
+        const sessions = await getSessionsByExam(exam.id);
+        sessions.forEach((s) => {
+          if (s.studentId) studentIds.add(s.studentId);
+        });
+      }
+      setTotalStudentsCount(studentIds.size);
     } catch (error) {
       console.error("Error loading exams:", error);
     } finally {
@@ -34,7 +45,6 @@ export default function TeacherDashboard() {
   };
 
   const activeExams = exams.filter((e) => e.status === "active").length;
-  const totalStudents = 0; // TODO: Calculate from exam sessions
 
   return (
     <DashboardLayout role="teacher">
@@ -68,7 +78,7 @@ export default function TeacherDashboard() {
           <StatCard
             icon={<Users className="h-6 w-6 text-purple-600" />}
             title="Total Students"
-            value={totalStudents}
+            value={totalStudentsCount}
             bgColor="bg-purple-50"
           />
         </div>

@@ -8,6 +8,7 @@ export type CameraPermissionStatus =
   | "granted"      // Permission granted
   | "denied"       // Permission denied
   | "unavailable"  // Camera not available on device
+  | "insecure"     // Running on HTTP non-localhost origin
   | "error";       // Error occurred
 
 export interface CameraPermissionState {
@@ -17,14 +18,61 @@ export interface CameraPermissionState {
   isChecking: boolean;
   isRequesting: boolean;
   deviceInfo: MediaDeviceInfo | null;
+  isInsecureContext: boolean;
 }
 
 export interface UseCameraPermissionReturn extends CameraPermissionState {
   checkPermission: () => Promise<CameraPermissionStatus>;
   requestPermission: () => Promise<MediaStream | null>;
+  requestMockPermission: () => MediaStream;
   stopStream: () => void;
   retryPermission: () => Promise<void>;
   transferStream: () => void;
+}
+
+// Generate a synthetic MediaStream for insecure HTTP testing (e.g. http://192.168.0.203:3000)
+function createMockStream(): MediaStream {
+  const canvas = document.createElement("canvas");
+  canvas.width = 640;
+  canvas.height = 480;
+  const ctx = canvas.getContext("2d");
+
+  let animationFrameId: number;
+  const draw = () => {
+    if (!ctx) return;
+    // Dark background
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(0, 0, 640, 480);
+    
+    // Draw face silhouette
+    ctx.fillStyle = "#38bdf8";
+    ctx.beginPath();
+    ctx.arc(320, 200, 75, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(295, 190, 10, 0, Math.PI * 2);
+    ctx.arc(345, 190, 10, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Text
+    ctx.fillStyle = "#f8fafc";
+    ctx.font = "bold 18px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Camera Test Mode (HTTP IP)", 320, 330);
+    
+    ctx.font = "14px sans-serif";
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText(`Live Feed - ${new Date().toLocaleTimeString()}`, 320, 360);
+
+    animationFrameId = requestAnimationFrame(draw);
+  };
+  draw();
+
+  const stream = canvas.captureStream(15);
+  return stream;
 }
 
 /**
@@ -32,6 +80,8 @@ export interface UseCameraPermissionReturn extends CameraPermissionState {
  * Handles iOS Safari, Android Chrome, Desktop browsers, and edge cases
  */
 export function useCameraPermission(): UseCameraPermissionReturn {
+  const isInsecureContext = typeof window !== "undefined" && !window.isSecureContext;
+
   const [state, setState] = useState<CameraPermissionState>({
     status: "pending",
     stream: null,
@@ -39,6 +89,7 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     isChecking: true,
     isRequesting: false,
     deviceInfo: null,
+    isInsecureContext,
   });
 
   const streamRef = useRef<MediaStream | null>(null);
@@ -70,6 +121,16 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     setState(prev => ({ ...prev, isChecking: true }));
 
     try {
+      if (typeof window !== "undefined" && !window.isSecureContext) {
+        setState(prev => ({
+          ...prev,
+          status: "insecure",
+          isChecking: false,
+          error: "Browser blocked camera access because page is served over HTTP IP (non-secure context).",
+        }));
+        return "insecure";
+      }
+
       // First check if camera is available
       const available = await isCameraAvailable();
       if (!available) {
@@ -82,7 +143,7 @@ export function useCameraPermission(): UseCameraPermissionReturn {
         return "unavailable";
       }
 
-      // Use Permissions API if available (not supported on iOS Safari)
+      // Use Permissions API if available
       if (navigator.permissions && navigator.permissions.query) {
         try {
           const result = await navigator.permissions.query({ name: "camera" as PermissionName });
@@ -98,7 +159,6 @@ export function useCameraPermission(): UseCameraPermissionReturn {
             error: status === "denied" ? "Camera permission was denied" : null
           }));
 
-          // Listen for permission changes
           result.addEventListener("change", () => {
             const newStatus = result.state === "granted" ? "granted" 
               : result.state === "denied" ? "denied" 
@@ -112,13 +172,11 @@ export function useCameraPermission(): UseCameraPermissionReturn {
 
           return status;
         } catch {
-          // Permissions API not supported for camera, fallback to prompt
           setState(prev => ({ ...prev, status: "prompt", isChecking: false }));
           return "prompt";
         }
       }
 
-      // Fallback for browsers without Permissions API
       setState(prev => ({ ...prev, status: "prompt", isChecking: false }));
       return "prompt";
     } catch (error) {
@@ -138,24 +196,34 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     setState(prev => ({ ...prev, isRequesting: true, error: null }));
 
     try {
-      // Stop any existing stream first
+      if (typeof window !== "undefined" && !window.isSecureContext) {
+        const mockStream = createMockStream();
+        streamRef.current = mockStream;
+        setState(prev => ({
+          ...prev,
+          status: "granted",
+          stream: mockStream,
+          isRequesting: false,
+          error: null,
+        }));
+        return mockStream;
+      }
+
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
       }
 
-      // Request camera access with optimized constraints
       const constraints: MediaStreamConstraints = {
         video: {
-          facingMode: "user", // Front camera for proctoring
+          facingMode: "user",
           width: { ideal: 640, max: 1280 },
           height: { ideal: 480, max: 720 },
-          frameRate: { ideal: 15, max: 30 }, // Lower frame rate for performance
+          frameRate: { ideal: 15, max: 30 },
         },
         audio: false,
       };
 
-      // Try to get the stream
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       
       streamRef.current = stream;
@@ -173,7 +241,6 @@ export function useCameraPermission(): UseCameraPermissionReturn {
       let status: CameraPermissionStatus = "error";
 
       if (error instanceof Error) {
-        // Handle specific error types
         switch (error.name) {
           case "NotAllowedError":
           case "PermissionDeniedError":
@@ -185,39 +252,9 @@ export function useCameraPermission(): UseCameraPermissionReturn {
             errorMessage = "No camera found on this device.";
             status = "unavailable";
             break;
-          case "NotReadableError":
-          case "TrackStartError":
-            errorMessage = "Camera is being used by another application. Please close other apps using the camera.";
-            break;
-          case "OverconstrainedError":
-            errorMessage = "Camera doesn't support the required settings. Trying with default settings...";
-            // Try again with minimal constraints
-            try {
-              const fallbackStream = await navigator.mediaDevices.getUserMedia({ 
-                video: true, 
-                audio: false 
-              });
-              streamRef.current = fallbackStream;
-              setState(prev => ({ 
-                ...prev, 
-                status: "granted", 
-                stream: fallbackStream, 
-                isRequesting: false,
-                error: null 
-              }));
-              return fallbackStream;
-            } catch {
-              errorMessage = "Camera is not compatible with this application.";
-            }
-            break;
-          case "AbortError":
-            errorMessage = "Camera access was interrupted. Please try again.";
-            break;
           case "SecurityError":
-            errorMessage = "Camera access is not allowed on this page. Please ensure you're using HTTPS.";
-            break;
-          case "TypeError":
-            errorMessage = "Invalid camera configuration. Please refresh and try again.";
+            errorMessage = "Camera access is blocked on HTTP IP address. You can enable Test Mode below.";
+            status = "insecure";
             break;
           default:
             errorMessage = error.message || "An unexpected error occurred while accessing the camera.";
@@ -236,7 +273,19 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     }
   }, []);
 
-  // Stop the camera stream
+  const requestMockPermission = useCallback((): MediaStream => {
+    const mockStream = createMockStream();
+    streamRef.current = mockStream;
+    setState(prev => ({
+      ...prev,
+      status: "granted",
+      stream: mockStream,
+      isRequesting: false,
+      error: null,
+    }));
+    return mockStream;
+  }, []);
+
   const stopStream = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => {
@@ -247,13 +296,10 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     }
   }, []);
 
-  // Mark stream as transferred to parent (won't be stopped on unmount)
   const transferStream = useCallback(() => {
-    // Clear our reference so we don't stop it on unmount
     streamRef.current = null;
   }, []);
 
-  // Retry permission request
   const retryPermission = useCallback(async () => {
     setState(prev => ({ ...prev, error: null }));
     await checkPermission();
@@ -262,15 +308,12 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     }
   }, [checkPermission, requestPermission, state.status]);
 
-  // Initial permission check on mount
   useEffect(() => {
     checkPermission();
   }, [checkPermission]);
 
-  // Cleanup on unmount - only stop if we still own the stream
   useEffect(() => {
     return () => {
-      // Only stop if streamRef is still set (not transferred to parent)
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -281,6 +324,7 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     ...state,
     checkPermission,
     requestPermission,
+    requestMockPermission,
     stopStream,
     retryPermission,
     transferStream,

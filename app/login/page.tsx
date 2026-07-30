@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
@@ -11,16 +11,30 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
 import { loginUser } from "@/lib/firebase/auth";
+import { useAuth } from "@/contexts/AuthContext";
 
 export default function LoginPage() {
   const router = useRouter();
   const { toast } = useToast();
+  const { user, loading: authLoading, initialized } = useAuth();
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [formData, setFormData] = useState({
     email: "",
     password: "",
   });
+
+  useEffect(() => {
+    if (initialized && !authLoading && user) {
+      if (user.role === "admin") {
+        router.replace("/dashboard/admin");
+      } else if (user.role === "teacher") {
+        router.replace(user.approved ? "/dashboard/teacher" : "/pending-approval");
+      } else {
+        router.replace("/dashboard/student");
+      }
+    }
+  }, [user, authLoading, initialized, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -75,7 +89,7 @@ export default function LoginPage() {
           router.push("/pending-approval");
         }
       } else {
-        router.push("/exam");
+        router.push("/dashboard/student");
       }
     } catch (error: any) {
       let message = error?.message || "Something went wrong";
