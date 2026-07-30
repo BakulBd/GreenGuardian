@@ -87,7 +87,11 @@ export async function loginUser(
 
     return { user: userData };
   } catch (error: any) {
-    return { user: null, error: error.message || "Login failed" };
+    let errorMessage = error.message || "Login failed";
+    if (error.code === 'auth/invalid-credential' || error.code === 'auth/wrong-password' || error.code === 'auth/user-not-found') {
+      errorMessage = "Invalid email or password.";
+    }
+    return { user: null, error: errorMessage };
   }
 }
 

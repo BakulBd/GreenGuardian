@@ -128,11 +128,37 @@ export const uploadFile = async (
 
     return await new Promise<UploadResult>((resolve, reject) => {
       let isDone = false;
+      let lastBytesTransferred = 0;
+
+      const doFallback = async (reason?: any) => {
+        if (isDone) return;
+        isDone = true;
+        try {
+          uploadTask.cancel(); // Abort Firebase retries to stop console error spam
+        } catch (e) {
+          // Ignore
+        }
+        try {
+          const fallbackResult = await resolveInlineFallback(reason);
+          resolve(fallbackResult);
+        } catch (e) {
+          reject(e);
+        }
+      };
+
+      // If absolutely no bytes are transferred in 6 seconds, assume CORS or Network failure
+      const timeoutId = setTimeout(() => {
+        if (lastBytesTransferred === 0) {
+          console.warn("Upload stalled (likely CORS or network block). Forcing fallback...");
+          doFallback(new Error("Upload timed out or blocked by CORS"));
+        }
+      }, 6000);
 
       uploadTask.on(
         "state_changed",
         (snapshot: UploadTaskSnapshot) => {
           if (isDone) return;
+          lastBytesTransferred = snapshot.bytesTransferred;
           const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
           if (onProgress) {
             onProgress({
@@ -143,16 +169,11 @@ export const uploadFile = async (
           }
         },
         async (error) => {
-          if (isDone) return;
-          isDone = true;
-          try {
-            const fallbackResult = await resolveInlineFallback(error);
-            resolve(fallbackResult);
-          } catch (e) {
-            reject(e);
-          }
+          clearTimeout(timeoutId);
+          doFallback(error);
         },
         async () => {
+          clearTimeout(timeoutId);
           if (isDone) return;
           isDone = true;
           try {

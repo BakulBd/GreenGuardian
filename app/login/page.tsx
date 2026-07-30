@@ -50,29 +50,12 @@ export default function LoginPage() {
 
     setLoading(true);
 
-    const MAX_RETRIES = 3;
-    let lastError: any = null;
-    async function retryLogin() {
-      for (let i = 0; i < MAX_RETRIES; i++) {
-        try {
-          const { user, error } = await loginUser(formData.email, formData.password);
-          if (error || !user) {
-            lastError = error || "Invalid credentials";
-            throw new Error(lastError);
-          }
-          return user;
-        } catch (err) {
-          lastError = err;
-          if (i < MAX_RETRIES - 1) {
-            await new Promise(res => setTimeout(res, 500 * (i + 1)));
-          }
-        }
-      }
-      throw lastError;
-    }
-
     try {
-      const user = await retryLogin();
+      const { user, error } = await loginUser(formData.email, formData.password);
+      
+      if (error || !user) {
+        throw new Error(error || "Invalid credentials");
+      }
 
       toast({
         title: "Login Successful",
