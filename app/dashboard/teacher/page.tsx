@@ -5,7 +5,7 @@ import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
-import { FileText, Users, Shield, Plus, TrendingUp } from "lucide-react";
+import { FileText, Users, Shield, Plus, TrendingUp, Camera } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher, getSessionsByExam } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
@@ -149,10 +149,16 @@ export default function TeacherDashboard() {
                     Create New Exam
                   </Button>
                 </Link>
-                <Link href="/dashboard/teacher/monitoring">
+<Link href="/dashboard/teacher/monitoring">
                   <Button variant="outline" className="w-full justify-start">
                     <Shield className="h-4 w-4 mr-2" />
                     Monitor Active Sessions
+                  </Button>
+                </Link>
+                <Link href="/dashboard/teacher/watch-live">
+                  <Button variant="outline" className="w-full justify-start">
+                    <Camera className="h-4 w-4 mr-2" />
+                    Watch Live
                   </Button>
                 </Link>
                 <Link href="/dashboard/teacher/students">
