@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Shield, User, Mail, Calendar, ArrowLeft, Save, Loader2 } from "lucide-react";
+import { Shield, User, Mail, Calendar, ArrowLeft, Save, Loader2, Camera } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,6 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { updateUserProfile } from "@/lib/firebase/auth";
+import { uploadFile } from "@/lib/firebase/storage";
 import Navbar from "@/components/Navbar";
 
 export default function ProfilePage() {
@@ -19,10 +20,14 @@ export default function ProfilePage() {
   const { toast } = useToast();
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState("");
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (user) {
       setName(user.name || "");
+      setAvatarUrl(user.avatarUrl || "");
     }
   }, [user]);
 
@@ -32,13 +37,47 @@ export default function ProfilePage() {
     }
   }, [initialized, authLoading, user, router]);
 
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+
+    if (!file.type.startsWith("image/")) {
+      toast({ title: "Invalid File", description: "Please select an image file (PNG, JPG, WebP)", variant: "destructive" });
+      return;
+    }
+
+    setUploadingAvatar(true);
+    try {
+      const timestamp = Date.now();
+      const path = `avatars/${user.id}/${timestamp}_${file.name.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
+      const res = await uploadFile(file, path);
+      
+      await updateUserProfile(user.id, { avatarUrl: res.url });
+      setAvatarUrl(res.url);
+      
+      toast({
+        title: "Profile Picture Updated",
+        description: "Your avatar has been saved successfully.",
+      });
+    } catch (error: any) {
+      console.error("Avatar upload failed:", error);
+      toast({
+        title: "Upload Failed",
+        description: error.message || "Failed to upload avatar",
+        variant: "destructive",
+      });
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
 
     setSaving(true);
     try {
-      await updateUserProfile(user.id, { name });
+      await updateUserProfile(user.id, { name, avatarUrl });
       toast({
         title: "Profile Updated",
         description: "Your profile has been updated successfully.",
@@ -105,8 +144,38 @@ export default function ProfilePage() {
             <Card>
               <CardHeader>
                 <div className="flex items-center space-x-4">
-                  <div className="w-16 h-16 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center text-white text-2xl font-bold">
-                    {user.name?.charAt(0).toUpperCase() || "U"}
+                  <div className="relative group">
+                    <input 
+                      type="file" 
+                      ref={fileInputRef} 
+                      onChange={handleAvatarChange} 
+                      accept="image/*" 
+                      className="hidden" 
+                    />
+                    {avatarUrl ? (
+                      <img 
+                        src={avatarUrl} 
+                        alt={user.name} 
+                        className="w-16 h-16 rounded-full object-cover border-2 border-emerald-500 shadow-sm" 
+                      />
+                    ) : (
+                      <div className="w-16 h-16 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center text-white text-2xl font-bold shadow-sm">
+                        {user.name?.charAt(0).toUpperCase() || "U"}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploadingAvatar}
+                      className="absolute bottom-0 right-0 p-1.5 bg-emerald-600 text-white rounded-full shadow-md hover:bg-emerald-700 transition-colors flex items-center justify-center"
+                      title="Change Profile Picture"
+                    >
+                      {uploadingAvatar ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Camera className="w-3.5 h-3.5" />
+                      )}
+                    </button>
                   </div>
                   <div>
                     <CardTitle className="text-2xl">{user.name}</CardTitle>

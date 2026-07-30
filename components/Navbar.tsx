@@ -128,9 +128,17 @@ function Navbar() {
                   onClick={() => setUserMenuOpen(!userMenuOpen)}
                   className="flex items-center space-x-2 px-2 lg:px-3 py-1.5 lg:py-2 rounded-lg hover:bg-gray-100 transition-colors"
                 >
-                  <div className="w-7 h-7 lg:w-8 lg:h-8 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center text-white text-xs lg:text-sm font-medium shadow-md">
-                    {user.name?.charAt(0).toUpperCase() || "U"}
-                  </div>
+                  {user.avatarUrl ? (
+                    <img 
+                      src={user.avatarUrl} 
+                      alt={user.name} 
+                      className="w-7 h-7 lg:w-8 lg:h-8 rounded-full object-cover border border-emerald-500 shadow-sm" 
+                    />
+                  ) : (
+                    <div className="w-7 h-7 lg:w-8 lg:h-8 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center text-white text-xs lg:text-sm font-medium shadow-md">
+                      {user.name?.charAt(0).toUpperCase() || "U"}
+                    </div>
+                  )}
                   <span className="text-sm font-medium text-gray-700 max-w-[100px] lg:max-w-[120px] truncate hidden lg:block">
                     {user.name}
                   </span>

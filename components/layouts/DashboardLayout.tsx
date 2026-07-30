@@ -209,8 +209,12 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
             <div className="flex items-center space-x-4">
               <span className="text-sm text-gray-600 hidden sm:inline">Welcome back, {user.name}!</span>
               <Link href="/profile">
-                <Button variant="outline" size="sm">
-                  <UserCheck className="h-4 w-4 mr-2" />
+                <Button variant="outline" size="sm" className="flex items-center gap-2">
+                  {user.avatarUrl ? (
+                    <img src={user.avatarUrl} alt={user.name} className="w-5 h-5 rounded-full object-cover border border-emerald-500" />
+                  ) : (
+                    <UserCheck className="h-4 w-4" />
+                  )}
                   Profile
                 </Button>
               </Link>

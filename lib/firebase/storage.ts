@@ -102,90 +102,82 @@ const waitForAuthenticatedUser = async (): Promise<FirebaseUser> => {
  * @param onProgress Optional callback for upload progress
  * @returns Promise with the download URL and file info
  */
-export const uploadFile = (
+export const uploadFile = async (
   file: File,
   path: string,
   onProgress?: (progress: UploadProgress) => void
 ): Promise<UploadResult> => {
-  return new Promise((resolve, reject) => {
-    waitForAuthenticatedUser()
-      .then(() => {
-        compressImageFile(file)
-          .then((uploadFileCandidate) => {
-            const storageRef = ref(storage, path);
-            const uploadTask = uploadBytesResumable(storageRef, uploadFileCandidate);
+  await waitForAuthenticatedUser().catch(() => {});
+  const uploadFileCandidate = await compressImageFile(file);
 
-            const resolveInlineFallback = async () => {
-              const dataUrl = await fileToDataUrl(uploadFileCandidate);
+  const resolveInlineFallback = async (reason?: any) => {
+    console.warn("Storage upload failed or CORS/Network blocked, activating resilient inline storage fallback:", reason);
+    const dataUrl = await fileToDataUrl(uploadFileCandidate);
+    return {
+      url: dataUrl,
+      path: `inline:${path}`,
+      name: file.name,
+      type: uploadFileCandidate.type,
+      size: uploadFileCandidate.size,
+    };
+  };
 
-              if (dataUrl.length > 900000) {
-                throw new Error(
-                  "Firebase Storage is full and this file is too large to store inline. Please use a smaller file or upgrade the Firebase Storage quota."
-                );
-              }
+  try {
+    const storageRef = ref(storage, path);
+    const uploadTask = uploadBytesResumable(storageRef, uploadFileCandidate);
 
-              resolve({
-                url: dataUrl,
-                path: `inline:${path}`,
-                name: file.name,
-                type: uploadFileCandidate.type,
-                size: uploadFileCandidate.size,
-              });
-            };
+    return await new Promise<UploadResult>((resolve, reject) => {
+      let isDone = false;
 
-            uploadTask.on(
-              "state_changed",
-              (snapshot: UploadTaskSnapshot) => {
-                const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-                if (onProgress) {
-                  onProgress({
-                    progress,
-                    bytesTransferred: snapshot.bytesTransferred,
-                    totalBytes: snapshot.totalBytes,
-                  });
-                }
-              },
-              (error) => {
-                console.error("Upload error:", error);
-                const code = (error as { code?: string }).code || "";
-                const message = (error as { message?: string }).message || "";
-                const isFallbackTrigger =
-                  code === "storage/quota-exceeded" ||
-                  code === "storage/unknown" ||
-                  code === "storage/retry-limit-exceeded" ||
-                  message.toLowerCase().includes("cors") ||
-                  message.toLowerCase().includes("quota") ||
-                  message.toLowerCase().includes("network") ||
-                  message.toLowerCase().includes("failed");
-
-                if (isFallbackTrigger) {
-                  console.warn("Storage upload encountered issue (CORS/Quota/Network), activating resilient inline fallback:", error);
-                  resolveInlineFallback().catch(reject);
-                  return;
-                }
-
-                reject(error);
-              },
-              async () => {
-                try {
-                  const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-                  resolve({
-                    url: downloadURL,
-                    path,
-                    name: file.name,
-                    type: uploadFileCandidate.type,
-                    size: uploadFileCandidate.size,
-                  });
-                } catch (error) {
-                  reject(error);
-                }
-              }
-            );
-          })
-          .catch(reject);
-      })
-      .catch(reject);
-  });
+      uploadTask.on(
+        "state_changed",
+        (snapshot: UploadTaskSnapshot) => {
+          if (isDone) return;
+          const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+          if (onProgress) {
+            onProgress({
+              progress,
+              bytesTransferred: snapshot.bytesTransferred,
+              totalBytes: snapshot.totalBytes,
+            });
+          }
+        },
+        async (error) => {
+          if (isDone) return;
+          isDone = true;
+          try {
+            const fallbackResult = await resolveInlineFallback(error);
+            resolve(fallbackResult);
+          } catch (e) {
+            reject(e);
+          }
+        },
+        async () => {
+          if (isDone) return;
+          isDone = true;
+          try {
+            const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+            resolve({
+              url: downloadURL,
+              path,
+              name: file.name,
+              type: uploadFileCandidate.type,
+              size: uploadFileCandidate.size,
+            });
+          } catch (error) {
+            try {
+              const fallbackResult = await resolveInlineFallback(error);
+              resolve(fallbackResult);
+            } catch (e) {
+              reject(e);
+            }
+          }
+        }
+      );
+    });
+  } catch (err) {
+    return await resolveInlineFallback(err);
+  }
 };
 
 /**
