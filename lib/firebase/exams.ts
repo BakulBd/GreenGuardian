@@ -23,6 +23,7 @@ export async function createExam(examData: Omit<Exam, "id" | "createdAt" | "upda
     updatedAt: serverTimestamp(),
   });
   return docRef.id;
+  
 }
 
 export async function getExam(examId: string): Promise<Exam | null> {
