@@ -137,6 +137,9 @@ export default function TeacherExamClient() {
         correctAnswer: newQuestion.correctAnswer,
         marks: newQuestion.marks,
         order: questions.length,
+        courseId: exam?.courseId || "",
+        batch: exam?.batch || "",
+        section: exam?.section || "",
       });
       await loadExamData();
       setShowNewQuestion(false);

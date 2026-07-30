@@ -28,6 +28,7 @@ import { db } from "@/lib/firebase/config";
 import Link from "next/link";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult } from "@/lib/firebase/storage";
+import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
 
 interface Question {
   id: string;
@@ -36,6 +37,9 @@ interface Question {
   options: string[];
   correctAnswer: string;
   marks: number;
+  courseId?: string;
+  batch?: string;
+  section?: string;
 }
 
 export default function CreateExamPage() {
@@ -44,6 +48,10 @@ export default function CreateExamPage() {
   const [examData, setExamData] = useState({
     title: "",
     description: "",
+    courseId: DEFAULT_COURSES[5].id, // Default DBMS (CSE 301)
+    courseName: DEFAULT_COURSES[5].name,
+    batch: DEFAULT_BATCHES[2].name, // Default 241
+    section: DEFAULT_SECTIONS[1].name, // Default D2
     duration: 60,
     totalMarks: 100,
     passingScore: 40,
@@ -164,7 +172,12 @@ export default function CreateExamPage() {
 
       // Add questions or exam papers based on mode
       if (examMode === "online") {
-        examDoc.questions = questions;
+        examDoc.questions = questions.map((q) => ({
+          ...q,
+          courseId: examData.courseId,
+          batch: examData.batch,
+          section: examData.section,
+        }));
       } else {
         examDoc.examPapers = examPapers;
         examDoc.allowAnswerUpload = true;
@@ -253,6 +266,64 @@ export default function CreateExamPage() {
                 placeholder="Enter exam description"
                 rows={3}
               />
+            </div>
+
+            {/* Academic Target Selection */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-emerald-50/50 p-4 rounded-lg border border-emerald-100">
+              <div className="space-y-2">
+                <Label htmlFor="course">Course *</Label>
+                <select
+                  id="course"
+                  className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  value={examData.courseId}
+                  onChange={(e) => {
+                    const selectedCourse = DEFAULT_COURSES.find((c) => c.id === e.target.value);
+                    setExamData({
+                      ...examData,
+                      courseId: e.target.value,
+                      courseName: selectedCourse ? selectedCourse.name : e.target.value,
+                    });
+                  }}
+                >
+                  {DEFAULT_COURSES.map((course) => (
+                    <option key={course.id} value={course.id}>
+                      {course.code} - {course.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="batch">Batch *</Label>
+                <select
+                  id="batch"
+                  className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  value={examData.batch}
+                  onChange={(e) => setExamData({ ...examData, batch: e.target.value })}
+                >
+                  {DEFAULT_BATCHES.map((batch) => (
+                    <option key={batch.id} value={batch.name}>
+                      Batch {batch.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="section">Section *</Label>
+                <select
+                  id="section"
+                  className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  value={examData.section}
+                  onChange={(e) => setExamData({ ...examData, section: e.target.value })}
+                >
+                  {DEFAULT_SECTIONS.map((section) => (
+                    <option key={section.id} value={section.name}>
+                      Section {section.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

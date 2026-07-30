@@ -23,6 +23,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { collection, query, where, getDocs, deleteDoc, doc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import Link from "next/link";
+import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
 
 interface Exam {
   id: string;
@@ -36,11 +37,18 @@ interface Exam {
   endDate?: string;
   questionCount?: number;
   attemptCount?: number;
+  courseId?: string;
+  courseName?: string;
+  batch?: string;
+  section?: string;
 }
 
 export default function TeacherExamsPage() {
   const [exams, setExams] = useState<Exam[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedCourse, setSelectedCourse] = useState<string>("all");
+  const [selectedBatch, setSelectedBatch] = useState<string>("all");
+  const [selectedSection, setSelectedSection] = useState<string>("all");
   const { user } = useAuth();
   const { toast } = useToast();
   const router = useRouter();
@@ -111,6 +119,13 @@ export default function TeacherExamsPage() {
     const { variant, label } = variants[status] || variants.draft;
     return <Badge variant={variant}>{label}</Badge>;
   };
+
+  const filteredExams = exams.filter((e) => {
+    const matchCourse = selectedCourse === "all" || e.courseId === selectedCourse || (!e.courseId && selectedCourse === "all");
+    const matchBatch = selectedBatch === "all" || e.batch === selectedBatch || (!e.batch && selectedBatch === "all");
+    const matchSection = selectedSection === "all" || e.section === selectedSection || (!e.section && selectedSection === "all");
+    return matchCourse && matchBatch && matchSection;
+  });
 
   if (loading) {
     return (
@@ -187,14 +202,78 @@ export default function TeacherExamsPage() {
           </Card>
         </div>
 
+        {/* Filter Controls */}
+        <Card className="bg-emerald-50/40 border-emerald-100 p-4">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+              <span>Filter Exams:</span>
+              {(selectedCourse !== "all" || selectedBatch !== "all" || selectedSection !== "all") && (
+                <button
+                  onClick={() => {
+                    setSelectedCourse("all");
+                    setSelectedBatch("all");
+                    setSelectedSection("all");
+                  }}
+                  className="text-xs text-emerald-700 underline font-medium hover:text-emerald-900"
+                >
+                  Reset Filters
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full md:w-auto">
+              {/* Course Filter */}
+              <select
+                className="h-9 px-3 rounded-md border border-gray-300 bg-white text-xs font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                value={selectedCourse}
+                onChange={(e) => setSelectedCourse(e.target.value)}
+              >
+                <option value="all">All Courses</option>
+                {DEFAULT_COURSES.map((course) => (
+                  <option key={course.id} value={course.id}>
+                    {course.code} - {course.name}
+                  </option>
+                ))}
+              </select>
+
+              {/* Batch Filter */}
+              <select
+                className="h-9 px-3 rounded-md border border-gray-300 bg-white text-xs font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                value={selectedBatch}
+                onChange={(e) => setSelectedBatch(e.target.value)}
+              >
+                <option value="all">All Batches</option>
+                {DEFAULT_BATCHES.map((batch) => (
+                  <option key={batch.id} value={batch.name}>
+                    Batch {batch.name}
+                  </option>
+                ))}
+              </select>
+
+              {/* Section Filter */}
+              <select
+                className="h-9 px-3 rounded-md border border-gray-300 bg-white text-xs font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                value={selectedSection}
+                onChange={(e) => setSelectedSection(e.target.value)}
+              >
+                <option value="all">All Sections</option>
+                {DEFAULT_SECTIONS.map((section) => (
+                  <option key={section.id} value={section.name}>
+                    Section {section.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </Card>
+
         {/* Exam List */}
-        {exams.length === 0 ? (
+        {filteredExams.length === 0 ? (
           <Card>
             <CardContent className="py-12">
               <div className="text-center">
                 <FileText className="mx-auto h-12 w-12 text-gray-400" />
-                <h3 className="mt-4 text-lg font-medium text-gray-900">No exams yet</h3>
-                <p className="mt-2 text-gray-500">Create your first exam to get started</p>
+                <h3 className="mt-4 text-lg font-medium text-gray-900">No matching exams found</h3>
+                <p className="mt-2 text-gray-500">Try selecting different course, batch, or section filters</p>
                 <Link href="/dashboard/teacher/exams/create">
                   <Button className="mt-4">
                     <Plus className="mr-2 h-4 w-4" />
@@ -206,14 +285,29 @@ export default function TeacherExamsPage() {
           </Card>
         ) : (
           <div className="grid gap-4">
-            {exams.map((exam) => (
+            {filteredExams.map((exam) => (
               <Card key={exam.id} className="hover:shadow-md transition-shadow">
                 <CardContent className="p-4 sm:p-6">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3 flex-wrap">
-                        <h3 className="font-semibold text-lg truncate">{exam.title}</h3>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-semibold text-lg text-gray-900">{exam.title}</h3>
                         {getStatusBadge(exam.status)}
+                        {exam.courseName && (
+                          <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-300 text-xs">
+                            {exam.courseName}
+                          </Badge>
+                        )}
+                        {exam.batch && (
+                          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-300 text-xs">
+                            Batch {exam.batch}
+                          </Badge>
+                        )}
+                        {exam.section && (
+                          <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-300 text-xs">
+                            Section {exam.section}
+                          </Badge>
+                        )}
                       </div>
                       <p className="text-gray-600 text-sm mt-1 line-clamp-2">{exam.description}</p>
                       <div className="flex flex-wrap gap-4 mt-3 text-sm text-gray-500">

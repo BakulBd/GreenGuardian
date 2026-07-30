@@ -17,6 +17,7 @@ import {
   X,
   Loader2,
   Camera,
+  BookOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
@@ -111,6 +112,7 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
 
   const adminMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/admin" },
+    { icon: BookOpen, label: "Academics", href: "/dashboard/admin/academics" },
     { icon: UserCheck, label: "Teachers", href: "/dashboard/admin/teachers" },
     { icon: Users, label: "Students", href: "/dashboard/admin/students" },
     { icon: FileText, label: "Exams", href: "/dashboard/admin/exams" },
@@ -118,8 +120,9 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
     { icon: User, label: "My Profile", href: "/profile" },
   ];
 
-const teacherMenuItems = [
+  const teacherMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/teacher" },
+    { icon: BookOpen, label: "My Courses", href: "/dashboard/teacher/courses" },
     { icon: FileText, label: "My Exams", href: "/dashboard/teacher/exams" },
     { icon: FileText, label: "Submissions & OCR", href: "/dashboard/teacher/answers" },
     { icon: Camera, label: "Watch Live", href: "/dashboard/teacher/watch-live" },

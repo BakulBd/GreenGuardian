@@ -14,27 +14,13 @@ export interface User {
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
   avatarUrl?: string;
-}
-
-export interface Exam {
-  id: string;
-  title: string;
-  description: string;
-  teacherId: string;
-  teacherName?: string;
-  duration: number; // in minutes
-  totalMarks: number;
-  passingMarks?: number;
-  instructions?: string;
-  questionCount?: number;
-  startTime?: FirestoreDate;
-  endTime?: FirestoreDate;
-  startDate?: any;
-  endDate?: any;
-  settings: ExamSettings;
-  status: "draft" | "published" | "active" | "completed" | "archived";
-  createdAt: FirestoreDate;
-  updatedAt: FirestoreDate;
+  // Academic fields
+  studentCode?: string; // Student ID e.g. 0182220005101001
+  department?: string; // e.g. "CSE"
+  batch?: string; // e.g. "241"
+  section?: string; // e.g. "D2"
+  sections?: string[]; // e.g. ["D1", "D2", "D3", "D4", "D5"]
+  courses?: string[]; // Assigned course IDs or names
 }
 
 export interface ExamSettings {
@@ -56,6 +42,32 @@ export interface ExamSettings {
   };
 }
 
+export interface Exam {
+  id: string;
+  title: string;
+  description: string;
+  teacherId: string;
+  teacherName?: string;
+  duration: number; // in minutes
+  totalMarks: number;
+  passingMarks?: number;
+  instructions?: string;
+  questionCount?: number;
+  startTime?: FirestoreDate;
+  endTime?: FirestoreDate;
+  startDate?: any;
+  endDate?: any;
+  settings: ExamSettings;
+  status: "draft" | "published" | "active" | "completed" | "archived";
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+  // Academic fields
+  courseId?: string;
+  courseName?: string;
+  batch?: string;
+  section?: string;
+}
+
 export type QuestionType = "mcq" | "short" | "long" | "code" | "multiple-choice" | "short-answer" | "essay" | "true-false";
 
 export interface Question {
@@ -70,6 +82,10 @@ export interface Question {
   codeLanguage?: string; // for code type
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
+  // Academic fields
+  courseId?: string;
+  batch?: string;
+  section?: string;
 }
 
 export interface ExamSession {
@@ -171,6 +187,7 @@ export interface DashboardStats {
   activeExams: number;
   pendingApprovals: number;
   flaggedSessions: number;
+  totalCourses?: number;
 }
 
 export interface PlagiarismMatch {

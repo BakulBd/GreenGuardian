@@ -32,10 +32,27 @@ export default function ExamPage() {
   const loadExams = async () => {
     try {
       const allExams = await getAllExams();
-      // Filter for published/active exams
-      const availableExams = allExams.filter(
-        (e) => e.status === "published" || e.status === "active"
-      );
+      // Filter for published/active exams matching student batch & section
+      const availableExams = allExams.filter((e) => {
+        if (e.status !== "published" && e.status !== "active") return false;
+
+        if (user) {
+          const studentBatch = user.batch;
+          const studentSections = user.sections || (user.section ? [user.section] : null);
+
+          // If exam specifies batch and student has batch, must match
+          if (e.batch && studentBatch && e.batch !== studentBatch) {
+            return false;
+          }
+
+          // If exam specifies section and student has section list, must match
+          if (e.section && studentSections && !studentSections.includes(e.section)) {
+            return false;
+          }
+        }
+
+        return true;
+      });
       setExams(availableExams);
     } catch (error) {
       console.error("Error loading exams:", error);
@@ -101,8 +118,25 @@ export default function ExamPage() {
                   <CardHeader>
                     <div className="flex items-start justify-between">
                       <div>
-                        <CardTitle className="text-xl">{exam.title}</CardTitle>
-                        <CardDescription className="mt-2">{exam.description}</CardDescription>
+                        <div className="flex items-center gap-2 flex-wrap mb-1">
+                          <CardTitle className="text-xl">{exam.title}</CardTitle>
+                          {exam.courseName && (
+                            <span className="bg-emerald-100 text-emerald-800 text-xs font-medium px-2.5 py-0.5 rounded">
+                              {exam.courseName}
+                            </span>
+                          )}
+                          {exam.batch && (
+                            <span className="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded">
+                              Batch {exam.batch}
+                            </span>
+                          )}
+                          {exam.section && (
+                            <span className="bg-purple-100 text-purple-800 text-xs font-medium px-2.5 py-0.5 rounded">
+                              Section {exam.section}
+                            </span>
+                          )}
+                        </div>
+                        <CardDescription className="mt-1">{exam.description}</CardDescription>
                       </div>
                       <span
                         className={`px-3 py-1 rounded-full text-xs font-medium ${
