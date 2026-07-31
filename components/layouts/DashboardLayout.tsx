@@ -18,6 +18,7 @@ import {
   Loader2,
   Camera,
   BookOpen,
+  Award,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
@@ -134,6 +135,7 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
   const studentMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/student" },
     { icon: FileText, label: "Available Exams", href: "/exam" },
+    { icon: Award, label: "My Results", href: "/dashboard/student/results" },
     { icon: User, label: "My Profile", href: "/profile" },
   ];
 

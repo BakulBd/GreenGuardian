@@ -201,3 +201,88 @@ export interface PlagiarismMatch {
   similarityScore: number;
   matchedText: string;
 }
+
+// ============ Results Module ============
+
+export interface ResultSubject {
+  id?: string;
+  subjectName: string;
+  subjectCode?: string;
+  totalMarks: number;
+  obtainedMarks: number;
+  passMarks?: number;
+  isPassed: boolean;
+  grade?: string;
+  gradePoint?: number;
+}
+
+export interface Result {
+  id: string;
+  studentId: string;
+  studentName?: string;
+  studentCode?: string;
+  // Academic Information
+  courseId?: string;
+  courseName: string;
+  courseCode?: string;
+  batchName: string;
+  sectionName: string;
+  semester?: string;
+  academicYear: string;
+  examName: string; // Mid, Final, Quiz, Assignment, etc.
+  examDate: FirestoreDate;
+  resultPublishedDate: FirestoreDate;
+  // Result Information
+  subjects: ResultSubject[];
+  totalMarks: number;
+  obtainedMarks: number;
+  percentage: number;
+  grade: string;
+  gpa?: number;
+  isPassed: boolean;
+  isPublished: boolean;
+  position?: number; // optional rank
+  passFailStatus: "Pass" | "Fail";
+  // Metadata
+  createdBy?: string;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
+export type WarningType =
+  | "attendance"
+  | "academic"
+  | "low_gpa"
+  | "failed_subject"
+  | "due_payment"
+  | "custom";
+
+export type WarningStatus = "active" | "resolved";
+
+export interface StudentWarning {
+  id: string;
+  studentId: string;
+  studentName?: string;
+  warningType: WarningType;
+  title: string;
+  description: string;
+  dateIssued: FirestoreDate;
+  issuedBy: string;
+  issuedByName?: string;
+  status: WarningStatus;
+  relatedResultId?: string;
+  relatedExamId?: string;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
+export interface ResultFilters {
+  courseId?: string;
+  courseName?: string;
+  batchName?: string;
+  sectionName?: string;
+  semester?: string;
+  academicYear?: string;
+  examName?: string;
+  searchQuery?: string;
+}
