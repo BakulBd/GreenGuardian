@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { createNotice, getTargetedStudentIds, publishNotice } from "@/lib/firebase/notices";
+import { createNotice, getTargetedStudentIds, publishNoticeWithNotifications } from "@/lib/firebase/notices";
 import { uploadFile } from "@/lib/firebase/storage";
 import { Notice, NoticeTargetType } from "@/lib/types";
 import {
@@ -140,31 +140,42 @@ export default function CreateNoticePage() {
         attachmentType: attachmentType || undefined,
       };
 
-      const noticeId = await createNotice(noticeData);
+const noticeId = await createNotice(noticeData);
 
       if (status === "published") {
         // Get targeted students and send notifications
         const fullNotice = { ...noticeData, id: noticeId } as Notice;
         const targetedStudentIds = await getTargetedStudentIds(fullNotice);
-        await publishNotice(noticeId, targetedStudentIds);
 
-        toast({
-          title: "Notice Published",
-          description: `Notice sent to ${targetedStudentIds.length} student(s).`,
-        });
+        if (targetedStudentIds.length > 0) {
+          const result = await publishNoticeWithNotifications(noticeId, targetedStudentIds);
+          toast({
+            title: "✅ Notice Published",
+            description: `Notice sent to ${result.notificationCount} student(s) successfully.`,
+          });
+        } else {
+          // No students found, but still publish the notice
+          await publishNoticeWithNotifications(noticeId, []);
+          toast({
+            title: "✅ Notice Published",
+            description: "Notice published, but no targeted students found.",
+          });
+        }
       } else {
         toast({
-          title: "Notice Saved",
+          title: "✅ Notice Saved",
           description: "Your notice has been saved as a draft.",
         });
       }
 
       router.push("/dashboard/teacher/notices");
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error saving notice:", error);
+      // Show specific error message from the service layer
+      const errorMessage = error?.message || "Failed to save notice. Please try again.";
       toast({
         title: "Error",
-        description: "Failed to save notice. Please try again.",
+        description: errorMessage,
         variant: "destructive",
       });
     } finally {

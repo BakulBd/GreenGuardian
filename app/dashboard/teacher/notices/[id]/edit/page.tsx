@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { getNotice, updateNotice, getTargetedStudentIds, publishNotice } from "@/lib/firebase/notices";
+import { getNotice, updateNotice, getTargetedStudentIds, publishNoticeWithNotifications } from "@/lib/firebase/notices";
 import { uploadFile } from "@/lib/firebase/storage";
 import { Notice, NoticeTargetType } from "@/lib/types";
 import {
@@ -165,19 +165,25 @@ export default function EditNoticePage() {
 
       await updateNotice(noticeId, updateData);
 
-      if (newStatus === "published") {
+if (newStatus === "published") {
         const fullNotice = { ...updateData, id: noticeId } as Notice;
         const targetedStudentIds = await getTargetedStudentIds(fullNotice);
-        await publishNotice(noticeId, targetedStudentIds);
-        toast({ title: "Notice Published", description: `Notice sent to ${targetedStudentIds.length} student(s).` });
+        if (targetedStudentIds.length > 0) {
+          const result = await publishNoticeWithNotifications(noticeId, targetedStudentIds);
+          toast({ title: "✅ Notice Published", description: `Notice sent to ${result.notificationCount} student(s) successfully.` });
+        } else {
+          await publishNoticeWithNotifications(noticeId, []);
+          toast({ title: "✅ Notice Published", description: "Notice published, but no targeted students found." });
+        }
       } else {
-        toast({ title: "Notice Updated", description: "Your notice has been updated." });
+        toast({ title: "✅ Notice Updated", description: "Your notice has been updated." });
       }
 
       router.push("/dashboard/teacher/notices");
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error updating notice:", error);
-      toast({ title: "Error", description: "Failed to update notice.", variant: "destructive" });
+      const errorMessage = error?.message || "Failed to update notice.";
+      toast({ title: "Error", description: errorMessage, variant: "destructive" });
     } finally {
       setSaving(false);
     }

@@ -315,13 +315,17 @@ service cloud.firestore {
       allow create: if isStudent() && request.resource.data.studentId == request.auth.uid;
     }
 
-    // Notifications collection
+// Notifications collection
     match /notifications/{notificationId} {
       // Users can read their own notifications
       allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
       // Admins can read all
       allow read: if isAdmin();
-      // System creates notifications via serverTimestamp (no direct create by client for security)
+      // Teachers can create notifications when publishing notices
+      allow create: if isTeacher() && 
+                       request.resource.data.type == 'notice' &&
+                       request.resource.data.userId != null &&
+                       request.resource.data.noticeId != null;
       // Users can update their own notifications (mark as read)
       allow update: if isAuthenticated() && resource.data.userId == request.auth.uid &&
                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
