@@ -28,64 +28,118 @@ export async function getStudentResults(
   studentId: string,
   filters?: ResultFilters
 ): Promise<Result[]> {
-  const constraints: any[] = [
-    where("studentId", "==", studentId),
-    where("isPublished", "==", true),
-  ];
+  const combinedResults: Result[] = [];
+  const processedExamIds = new Set<string>();
+
+  // 1. Fetch from 'results' collection
+  try {
+    const q = query(
+      collection(db, "results"),
+      where("studentId", "==", studentId),
+      where("isPublished", "==", true)
+    );
+    const snapshot = await getDocs(q);
+    snapshot.docs.forEach((docSnap) => {
+      const r = { id: docSnap.id, ...docSnap.data() } as Result;
+      combinedResults.push(r);
+      if (r.examId) processedExamIds.add(r.examId);
+    });
+  } catch (error) {
+    console.warn("Error fetching from results collection:", error);
+  }
+
+  // 2. Fetch completed examSessions for student (so submitted online exams show automatically)
+  try {
+    const sQuery = query(
+      collection(db, "examSessions"),
+      where("studentId", "==", studentId),
+      where("submitted", "==", true)
+    );
+    const sSnapshot = await getDocs(sQuery);
+
+    for (const docSnap of sSnapshot.docs) {
+      const sData = docSnap.data();
+
+      // Avoid duplicate if already present in results collection
+      if (sData.examId && processedExamIds.has(sData.examId)) {
+        continue;
+      }
+
+      const obtained = sData.score ?? 0;
+      const total = sData.totalMarks || 100;
+      const percentage = total > 0 ? (obtained / total) * 100 : 0;
+      const gradeInfo = calculateGrade(percentage);
+
+      combinedResults.push({
+        id: docSnap.id,
+        studentId: sData.studentId,
+        studentName: sData.studentName || "Student",
+        examName: sData.examTitle || "Online Exam",
+        courseName: sData.courseName || sData.courseId || "CSE Course",
+        batchName: sData.batch || "N/A",
+        sectionName: sData.section || "N/A",
+        totalMarks: total,
+        obtainedMarks: obtained,
+        percentage: percentage,
+        grade: gradeInfo.grade,
+        gpa: gradeInfo.gpa,
+        passFailStatus: gradeInfo.isPassed ? "Pass" : "Fail",
+        isPublished: true,
+        resultPublishedDate: sData.completedAt || sData.createdAt || new Date(),
+        academicYear: new Date().getFullYear().toString(),
+        examId: sData.examId,
+      } as Result);
+    }
+  } catch (error) {
+    console.warn("Error fetching from examSessions fallback:", error);
+  }
+
+  // 3. Client-side Filter Application
+  let filtered = combinedResults;
 
   if (filters?.courseName) {
-    constraints.push(where("courseName", "==", filters.courseName));
+    filtered = filtered.filter((r) => r.courseName === filters.courseName);
   }
   if (filters?.batchName) {
-    constraints.push(where("batchName", "==", filters.batchName));
+    filtered = filtered.filter((r) => r.batchName === filters.batchName);
   }
   if (filters?.sectionName) {
-    constraints.push(where("sectionName", "==", filters.sectionName));
+    filtered = filtered.filter((r) => r.sectionName === filters.sectionName);
   }
   if (filters?.semester) {
-    constraints.push(where("semester", "==", filters.semester));
+    filtered = filtered.filter((r) => r.semester === filters.semester);
   }
   if (filters?.academicYear) {
-    constraints.push(where("academicYear", "==", filters.academicYear));
+    filtered = filtered.filter((r) => r.academicYear === filters.academicYear);
   }
   if (filters?.examName) {
-    constraints.push(where("examName", "==", filters.examName));
+    filtered = filtered.filter((r) => r.examName === filters.examName);
   }
-
-  constraints.push(orderBy("resultPublishedDate", "desc"));
-
-  const q = query(collection(db, "results"), ...constraints);
-  const snapshot = await getDocs(q);
-  let results = snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as Result));
-
-  // Client-side search filter (for exam name search)
   if (filters?.searchQuery) {
-    const query = filters.searchQuery.toLowerCase();
-    results = results.filter(
+    const qTerm = filters.searchQuery.toLowerCase();
+    filtered = filtered.filter(
       (r) =>
-        r.examName?.toLowerCase().includes(query) ||
-        r.courseName?.toLowerCase().includes(query)
+        r.examName?.toLowerCase().includes(qTerm) ||
+        r.courseName?.toLowerCase().includes(qTerm)
     );
   }
 
-  return results;
+  // Sort descending by date
+  filtered.sort((a, b) => {
+    const dateA = (a.resultPublishedDate as any)?.toDate ? (a.resultPublishedDate as any).toDate().getTime() : new Date(a.resultPublishedDate as any || 0).getTime();
+    const dateB = (b.resultPublishedDate as any)?.toDate ? (b.resultPublishedDate as any).toDate().getTime() : new Date(b.resultPublishedDate as any || 0).getTime();
+    return dateB - dateA;
+  });
+
+  return filtered;
 }
 
 /**
  * Get the latest published result for a student.
  */
 export async function getLatestResult(studentId: string): Promise<Result | null> {
-  const q = query(
-    collection(db, "results"),
-    where("studentId", "==", studentId),
-    where("isPublished", "==", true),
-    orderBy("resultPublishedDate", "desc"),
-    limit(1)
-  );
-  const snapshot = await getDocs(q);
-  if (snapshot.empty) return null;
-  const doc = snapshot.docs[0];
-  return { ...doc.data(), id: doc.id } as Result;
+  const results = await getStudentResults(studentId);
+  return results.length > 0 ? results[0] : null;
 }
 
 /**
@@ -99,9 +153,64 @@ export async function getResultHistory(studentId: string): Promise<Result[]> {
  * Get full details of a single result by ID.
  */
 export async function getResultDetails(resultId: string): Promise<Result | null> {
-  const resultDoc = await getDoc(doc(db, "results", resultId));
-  if (!resultDoc.exists()) return null;
-  return { ...resultDoc.data(), id: resultDoc.id } as Result;
+  try {
+    const resultDoc = await getDoc(doc(db, "results", resultId));
+    if (resultDoc.exists()) {
+      return { ...resultDoc.data(), id: resultDoc.id } as Result;
+    }
+
+    // Fallback: Check if resultId is an examSession ID
+    const sessionDoc = await getDoc(doc(db, "examSessions", resultId));
+    if (sessionDoc.exists()) {
+      const sData = sessionDoc.data();
+      const obtained = sData.score ?? 0;
+      const total = sData.totalMarks || 100;
+      const percentage = total > 0 ? (obtained / total) * 100 : 0;
+      const gradeInfo = calculateGrade(percentage);
+
+      let examTitle = sData.examTitle || "Online Exam";
+      let courseName = sData.courseName || "Course Exam";
+      let courseCode = sData.courseCode || "";
+
+      if (sData.examId) {
+        try {
+          const eDoc = await getDoc(doc(db, "exams", sData.examId));
+          if (eDoc.exists()) {
+            const eData = eDoc.data();
+            examTitle = eData.title || examTitle;
+            courseName = eData.courseName || courseName;
+            courseCode = eData.courseId || courseCode;
+          }
+        } catch (e) {}
+      }
+
+      return {
+        id: sessionDoc.id,
+        studentId: sData.studentId,
+        studentName: sData.studentName || "Student",
+        examName: examTitle,
+        courseName: courseName,
+        courseCode: courseCode,
+        batchName: sData.batch || "N/A",
+        sectionName: sData.section || "N/A",
+        totalMarks: total,
+        obtainedMarks: obtained,
+        percentage: percentage,
+        grade: gradeInfo.grade,
+        gpa: gradeInfo.gpa,
+        passFailStatus: gradeInfo.isPassed ? "Pass" : "Fail",
+        isPublished: true,
+        resultPublishedDate: sData.completedAt || sData.createdAt || new Date(),
+        academicYear: new Date().getFullYear().toString(),
+        examId: sData.examId,
+      } as Result;
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Error fetching result details:", error);
+    return null;
+  }
 }
 
 /**

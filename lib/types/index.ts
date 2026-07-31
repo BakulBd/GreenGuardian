@@ -218,6 +218,7 @@ export interface ResultSubject {
 
 export interface Result {
   id: string;
+  examId?: string;
   studentId: string;
   studentName?: string;
   studentCode?: string;
