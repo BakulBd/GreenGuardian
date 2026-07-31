@@ -21,6 +21,7 @@ import {
   Award,
   Bell,
   Megaphone,
+  GraduationCap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
@@ -128,6 +129,7 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
   const adminMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/admin" },
     { icon: BookOpen, label: "Academics", href: "/dashboard/admin/academics" },
+    { icon: GraduationCap, label: "Courses", href: "/dashboard/admin/courses" },
     { icon: UserCheck, label: "Teachers", href: "/dashboard/admin/teachers" },
     { icon: Users, label: "Students", href: "/dashboard/admin/students" },
     { icon: FileText, label: "Exams", href: "/dashboard/admin/exams" },

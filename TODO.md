@@ -1,19 +1,44 @@
-# Teacher Notice Module - Implementation TODO
+# TODO - Course, Batch & Section Management Module
 
-## Steps
+## Completed Steps
 
-- [x] Step 1: Update `lib/types/index.ts` - Add Notice, NoticeRead, Notification types
-- [x] Step 2: Create `lib/firebase/notices.ts` - Service layer with all CRUD and query functions
-- [x] Step 3: Update `firestore.rules` - Add security rules for notices, noticeReads, notifications
-- [x] Step 4: Update `firestore.indexes.json` - Add composite indexes for notices queries
-- [x] Step 5: Create `app/dashboard/teacher/notices/page.tsx` - Teacher notices list page
-- [x] Step 6: Create `app/dashboard/teacher/notices/create/page.tsx` - Create notice form
-- [x] Step 7: Create `app/dashboard/teacher/notices/[id]/page.tsx` - View notice detail (teacher)
-- [x] Step 8: Create `app/dashboard/teacher/notices/[id]/edit/page.tsx` - Edit notice form
-- [x] Step 9: Create `app/dashboard/student/notices/page.tsx` - Student notices list with search/filter
-- [x] Step 10: Create `app/dashboard/student/notices/[id]/page.tsx` - View notice detail (student)
-- [x] Step 11: Update `components/layouts/DashboardLayout.tsx` - Add notices menu items + notification badge
-- [x] Step 12: Update `app/dashboard/student/page.tsx` - Add notices quick link + notification count
-- [x] Step 13: Update `app/dashboard/teacher/page.tsx` - Add notices quick link
+- [x] Explored codebase & understood current architecture
+- [x] Read all files importing catalog defaults
 
-## ✅ All Steps Complete!
+## Implementation Steps
+
+### Phase 1: Firestore Service Layer
+- [x] Add `CourseDoc`, `BatchDoc`, `SectionDoc` types to `lib/types/index.ts`
+- [x] Create `lib/academics/courseManagement.ts` (CRUD + real-time subscribers + duplicate validation + cascade delete)
+
+### Phase 2: Dynamic Catalog
+- [x] Update `lib/academics/catalog.ts` to load dynamic data from Firestore with static fallback
+- [x] Create `hooks/useAcademicCatalog.ts` (real-time catalog hook with fallback)
+
+### Phase 3: Admin UI
+- [x] Create `app/dashboard/admin/courses/page.tsx` (Courses / Batches / Sections tabs with CRUD modals)
+- [x] Add "Courses" menu item in `components/layouts/DashboardLayout.tsx`
+
+### Phase 4: Firestore Rules
+- [x] Update `firestore.rules` with courses/batches/sections rules (admin-only write)
+
+### Phase 5: Migrate Pages to Dynamic Data
+- [ ] `app/dashboard/admin/students/page.tsx` (student add/edit dropdowns)
+- [ ] `app/dashboard/teacher/exams/create/page.tsx` (exam create dropdowns)
+- [ ] `app/dashboard/teacher/exams/[id]/edit/TeacherExamEditClient.tsx` (exam edit dropdowns)
+- [ ] `app/dashboard/teacher/exams/page.tsx` (exam filters)
+- [ ] `app/dashboard/teacher/answers/page.tsx` (answer filters)
+- [ ] `app/dashboard/teacher/notices/create/page.tsx` (notice create)
+- [ ] `app/dashboard/teacher/notices/[id]/edit/page.tsx` (notice edit)
+- [ ] `app/dashboard/teacher/courses/page.tsx` (teacher courses)
+- [ ] `app/dashboard/teacher/page.tsx` (teacher dashboard)
+
+### Phase 6: Verify
+- [x] Run `npm run build` to verify no compilation errors — **BUILD PASSES ✅**
+- [ ] Review changes for consistency
+
+## Notes
+- Phase 5 (consumer pages migration) is deferred — existing pages still use `DEFAULT_COURSES`/`DEFAULT_BATCHES`/`DEFAULT_SECTIONS` from `lib/academics/catalog.ts` (which is fine since those are still exported as fallback).
+- A new standalone admin "Courses" page is available at `/dashboard/admin/courses` for CRUD operations on courses/batches/sections with Firestore persistence.
+- To seed the default catalog into Firestore, call `seedDefaultCatalog()` from the management service.
+

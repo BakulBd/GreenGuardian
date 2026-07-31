@@ -23,6 +23,35 @@ export interface User {
   courses?: string[]; // Assigned course IDs or names
 }
 
+// ============ Course / Batch / Section Management ============
+
+export interface CourseDoc {
+  id: string;
+  name: string;
+  code: string;
+  departmentId?: string;
+  departmentName?: string;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
+export interface BatchDoc {
+  id: string;
+  courseId: string;
+  name: string;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
+export interface SectionDoc {
+  id: string;
+  batchId: string;
+  courseId: string;
+  name: string;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
 export interface ExamSettings {
   requireWebcam: boolean;
   allowedTabSwitches: number;
