@@ -61,11 +61,13 @@ export interface Exam {
   status: "draft" | "published" | "active" | "completed" | "archived";
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
-  // Academic fields
+  // Academic & Mode fields
   courseId?: string;
   courseName?: string;
   batch?: string;
   section?: string;
+  examMode?: string;
+  questions?: Question[];
 }
 
 export type QuestionType = "mcq" | "short" | "long" | "code" | "multiple-choice" | "short-answer" | "essay" | "true-false";

@@ -23,12 +23,14 @@ import {
   Clock,
   Settings,
   HelpCircle,
-  AlertTriangle
+  AlertTriangle,
+  Check
 } from "lucide-react";
 import { getExam, updateExam, getQuestionsByExam, createQuestion, updateQuestion, deleteQuestion } from "@/lib/firebase/exams";
 import { Exam, Question, ExamSettings } from "@/lib/types";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
+import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
 
 const defaultSettings: ExamSettings = {
   requireWebcam: true,
@@ -68,7 +70,7 @@ export default function TeacherExamEditClient() {
     type: "multiple-choice" as "multiple-choice" | "true-false" | "short-answer",
     options: ["", "", "", ""],
     correctAnswer: "",
-    marks: 1,
+    marks: 10,
   });
 
   const examId = params.id as string;
@@ -90,19 +92,25 @@ export default function TeacherExamEditClient() {
         return;
       }
 
-      if (examData.teacherId && user?.id && examData.teacherId !== user.id) {
-        toast({ title: "Error", description: "Access denied", variant: "destructive" });
+      // Security check: teacher must own this exam
+      const ownerId = examData.teacherId || (examData as any).createdBy;
+      if (ownerId && user?.id && ownerId !== user.id) {
+        toast({ title: "Access Denied", description: "You can only edit exams created by yourself", variant: "destructive" });
         router.push("/dashboard/teacher/exams");
         return;
       }
       
       setExam(examData);
       setEditedExam({
-        title: examData.title,
-        description: examData.description,
-        duration: examData.duration,
-        totalMarks: examData.totalMarks,
-        status: examData.status,
+        title: examData.title || "",
+        description: examData.description || "",
+        courseId: examData.courseId || DEFAULT_COURSES[0].id,
+        courseName: examData.courseName || DEFAULT_COURSES[0].name,
+        batch: examData.batch || DEFAULT_BATCHES[0].name,
+        section: examData.section || DEFAULT_SECTIONS[0].name,
+        duration: examData.duration || 60,
+        totalMarks: examData.totalMarks || 100,
+        status: examData.status || "draft",
         startDate: examData.startDate,
         endDate: examData.endDate,
         settings: examData.settings || defaultSettings,
@@ -120,11 +128,27 @@ export default function TeacherExamEditClient() {
 
   const handleSaveExam = async () => {
     if (!exam) return;
+    if (!editedExam.title?.trim()) {
+      toast({ title: "Error", description: "Exam title is required", variant: "destructive" });
+      return;
+    }
+
     setSaving(true);
     try {
-      await updateExam(examId, editedExam);
-      setExam({ ...exam, ...editedExam });
-      toast({ title: "Success", description: "Exam updated successfully" });
+      const totalMarksCalculated = questions.length > 0 
+        ? questions.reduce((sum, q) => sum + (q.marks || 0), 0)
+        : Number(editedExam.totalMarks || 100);
+
+      const updateData = {
+        ...editedExam,
+        totalMarks: totalMarksCalculated,
+        questionCount: questions.length,
+      };
+
+      await updateExam(examId, updateData);
+      setExam({ ...exam, ...updateData } as Exam);
+      toast({ title: "Success", description: "Exam details updated successfully" });
+      router.push(`/dashboard/teacher/exams/${examId}`);
     } catch (error) {
       toast({ title: "Error", description: "Failed to update exam", variant: "destructive" });
     } finally {
@@ -137,21 +161,30 @@ export default function TeacherExamEditClient() {
       toast({ title: "Error", description: "Question text is required", variant: "destructive" });
       return;
     }
+
+    if (newQuestion.type === "multiple-choice" && !newQuestion.correctAnswer) {
+      toast({ title: "Error", description: "Select a correct answer for multiple choice question", variant: "destructive" });
+      return;
+    }
     
     try {
       await createQuestion({
         examId,
         text: newQuestion.text,
         type: newQuestion.type,
-        options: newQuestion.type === "multiple-choice" ? newQuestion.options.filter(o => o.trim()) : [],
+        options: newQuestion.type === "multiple-choice" ? newQuestion.options.map(o => o.trim()) : [],
         correctAnswer: newQuestion.correctAnswer,
-        marks: Number(newQuestion.marks || 1),
+        marks: Number(newQuestion.marks || 10),
         order: questions.length,
+        courseId: editedExam.courseId || "",
+        batch: editedExam.batch || "",
+        section: editedExam.section || "",
       });
+
       await loadExamData();
       setShowNewQuestion(false);
-      setNewQuestion({ text: "", type: "multiple-choice", options: ["", "", "", ""], correctAnswer: "", marks: 1 });
-      toast({ title: "Success", description: "Question added" });
+      setNewQuestion({ text: "", type: "multiple-choice", options: ["", "", "", ""], correctAnswer: "", marks: 10 });
+      toast({ title: "Success", description: "Question added successfully" });
     } catch (error) {
       toast({ title: "Error", description: "Failed to add question", variant: "destructive" });
     }
@@ -159,40 +192,53 @@ export default function TeacherExamEditClient() {
 
   const startEditQuestion = (question: Question) => {
     setEditingQuestionId(question.id);
+    const opts = question.options && question.options.length > 0 
+      ? [...question.options] 
+      : ["", "", "", ""];
+    
+    while (opts.length < 4) opts.push("");
+
     setEditedQuestion({
       text: question.text,
       type: question.type,
-      options: question.options || ["", "", "", ""],
+      options: opts,
       correctAnswer: (question as any).correctAnswer || "",
-      marks: question.marks,
+      marks: question.marks || 10,
     });
   };
 
   const handleSaveQuestion = async (questionId: string) => {
     if (!editedQuestion.text?.trim()) {
-      toast({ title: "Error", description: "Question text required", variant: "destructive" });
+      toast({ title: "Error", description: "Question text is required", variant: "destructive" });
       return;
     }
 
     try {
+      const isMCQ = (editedQuestion.type || "multiple-choice") === "multiple-choice";
+      const cleanOptions = isMCQ ? (editedQuestion.options || []).map(o => String(o).trim()) : [];
+
       await updateQuestion(questionId, {
         text: editedQuestion.text!,
         type: (editedQuestion.type as any) || "multiple-choice",
-        options: (editedQuestion.type === "multiple-choice" ? (editedQuestion.options || []).filter((o) => String(o).trim()) : []),
+        options: cleanOptions,
         correctAnswer: String(editedQuestion.correctAnswer || ""),
-        marks: Number(editedQuestion.marks || 1),
+        marks: Number(editedQuestion.marks || 10),
+        courseId: editedExam.courseId || "",
+        batch: editedExam.batch || "",
+        section: editedExam.section || "",
       } as any);
+
       await loadExamData();
       setEditingQuestionId(null);
       setEditedQuestion({});
-      toast({ title: "Success", description: "Question updated" });
+      toast({ title: "Success", description: "Question updated successfully" });
     } catch (error) {
       toast({ title: "Error", description: "Failed to update question", variant: "destructive" });
     }
   };
 
   const handleDeleteQuestion = async (questionId: string) => {
-    if (!confirm("Delete this question?")) return;
+    if (!confirm("Are you sure you want to delete this question?")) return;
     try {
       await deleteQuestion(questionId);
       setQuestions(questions.filter(q => q.id !== questionId));
@@ -205,8 +251,9 @@ export default function TeacherExamEditClient() {
   if (loading) {
     return (
       <DashboardLayout role="teacher">
-        <div className="flex items-center justify-center h-64">
-          <Loader2 className="h-8 w-8 animate-spin text-green-600" />
+        <div className="flex flex-col items-center justify-center py-16">
+          <Loader2 className="h-10 w-10 animate-spin text-emerald-600 mb-4" />
+          <p className="text-gray-600 font-medium">Loading Exam & Questions...</p>
         </div>
       </DashboardLayout>
     );
@@ -216,8 +263,8 @@ export default function TeacherExamEditClient() {
     return (
       <DashboardLayout role="teacher">
         <div className="text-center py-12">
-          <p>Exam not found</p>
-          <Link href="/dashboard/teacher/exams"><Button className="mt-4">Back to Exams</Button></Link>
+          <p className="text-gray-600">Exam not found</p>
+          <Link href="/dashboard/teacher/exams"><Button className="mt-4">Back to My Exams</Button></Link>
         </div>
       </DashboardLayout>
     );
@@ -229,44 +276,46 @@ export default function TeacherExamEditClient() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center space-x-3">
-            <Link href={`/dashboard/teacher/exams`}>
+            <Link href={`/dashboard/teacher/exams/${exam.id}`}>
               <Button variant="outline" size="sm">
                 <ArrowLeft className="h-4 w-4 mr-2" />
-                Back
+                Back to View
               </Button>
             </Link>
             <div>
-              <h1 className="text-2xl font-bold text-gray-900">Edit Exam</h1>
+              <h1 className="text-2xl font-bold text-gray-900">Edit Exam & Questions</h1>
               <p className="text-sm text-gray-500">{exam.title}</p>
             </div>
           </div>
           <div className="flex gap-2">
-            <Button onClick={handleSaveExam} disabled={saving} className="bg-green-600 hover:bg-green-700">
+            <Button onClick={handleSaveExam} disabled={saving} className="bg-emerald-600 hover:bg-emerald-700 font-semibold">
               {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
               Save All Changes
             </Button>
           </div>
         </div>
 
-        {/* Basic Info */}
-        <Card>
+        {/* Basic Info & Academic Structure */}
+        <Card className="border-emerald-100">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <FileText className="h-5 w-5 text-green-600" /> Exam Details
+            <CardTitle className="flex items-center gap-2 text-emerald-900">
+              <FileText className="h-5 w-5 text-emerald-600" /> Exam Details & Academic Settings
             </CardTitle>
+            <CardDescription>Update general information, target course, batch, and section</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="sm:col-span-2">
-                <Label>Exam Title</Label>
+                <Label>Exam Title *</Label>
                 <Input 
                   value={editedExam.title || ""} 
                   onChange={(e) => setEditedExam({ ...editedExam, title: e.target.value })} 
-                  placeholder="e.g. Midterm Computer Science 101"
+                  placeholder="e.g. Database Management Midterm"
                 />
               </div>
+
               <div className="sm:col-span-2">
-                <Label>Description</Label>
+                <Label>Description / Instructions</Label>
                 <Textarea 
                   value={editedExam.description || ""} 
                   onChange={(e) => setEditedExam({ ...editedExam, description: e.target.value })} 
@@ -274,46 +323,109 @@ export default function TeacherExamEditClient() {
                   rows={3}
                 />
               </div>
+
+              {/* Academic Dropdowns */}
+              <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-4 bg-emerald-50/60 p-4 rounded-lg border border-emerald-200">
+                <div>
+                  <Label>Course *</Label>
+                  <select
+                    className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:ring-2 focus:ring-emerald-500"
+                    value={editedExam.courseId || ""}
+                    onChange={(e) => {
+                      const cObj = DEFAULT_COURSES.find(c => c.id === e.target.value);
+                      setEditedExam({
+                        ...editedExam,
+                        courseId: e.target.value,
+                        courseName: cObj ? cObj.name : e.target.value
+                      });
+                    }}
+                  >
+                    {DEFAULT_COURSES.map((course) => (
+                      <option key={course.id} value={course.id}>
+                        {course.code} - {course.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <Label>Batch *</Label>
+                  <select
+                    className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:ring-2 focus:ring-emerald-500"
+                    value={editedExam.batch || ""}
+                    onChange={(e) => setEditedExam({ ...editedExam, batch: e.target.value })}
+                  >
+                    {DEFAULT_BATCHES.map((batch) => (
+                      <option key={batch.id} value={batch.name}>
+                        Batch {batch.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <Label>Section *</Label>
+                  <select
+                    className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:ring-2 focus:ring-emerald-500"
+                    value={editedExam.section || ""}
+                    onChange={(e) => setEditedExam({ ...editedExam, section: e.target.value })}
+                  >
+                    {DEFAULT_SECTIONS.map((section) => (
+                      <option key={section.id} value={section.name}>
+                        Section {section.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
               <div>
-                <Label>Duration (Minutes)</Label>
+                <Label>Duration (Minutes) *</Label>
                 <Input 
                   type="number" 
+                  min="1"
                   value={editedExam.duration || 60} 
                   onChange={(e) => setEditedExam({ ...editedExam, duration: parseInt(e.target.value) || 60 })} 
                 />
               </div>
+
               <div>
-                <Label>Total Marks</Label>
+                <Label>Total Marks (Calculated automatically if questions exist)</Label>
                 <Input 
                   type="number" 
-                  value={editedExam.totalMarks || 100} 
+                  min="1"
+                  value={questions.length > 0 ? questions.reduce((s, q) => s + (q.marks || 0), 0) : (editedExam.totalMarks || 100)} 
                   onChange={(e) => setEditedExam({ ...editedExam, totalMarks: parseInt(e.target.value) || 100 })} 
+                  disabled={questions.length > 0}
                 />
               </div>
+
               <div>
                 <Label>Status</Label>
                 <select
-                  className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm"
+                  className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm font-medium"
                   value={editedExam.status || "draft"}
                   onChange={(e) => setEditedExam({ ...editedExam, status: e.target.value as any })}
                 >
                   <option value="draft">Draft</option>
                   <option value="published">Published</option>
                   <option value="active">Active (Ongoing)</option>
-                  <option value="completed">Completed (Ended)</option>
+                  <option value="completed">Completed</option>
                   <option value="archived">Archived</option>
                 </select>
               </div>
+
               <div className="sm:col-span-1">
-                <Label>Start Date & Time (Optional)</Label>
+                <Label>Start Time</Label>
                 <Input 
                   type="datetime-local" 
                   value={editedExam.startDate ? new Date(editedExam.startDate).toISOString().slice(0, 16) : ""} 
                   onChange={(e) => setEditedExam({ ...editedExam, startDate: e.target.value ? new Date(e.target.value).toISOString() : undefined })} 
                 />
               </div>
+
               <div className="sm:col-span-1">
-                <Label>End Date & Time (Optional)</Label>
+                <Label>End Time</Label>
                 <Input 
                   type="datetime-local" 
                   value={editedExam.endDate ? new Date(editedExam.endDate).toISOString().slice(0, 16) : ""} 
@@ -324,92 +436,46 @@ export default function TeacherExamEditClient() {
           </CardContent>
         </Card>
 
-        {/* Configuration & Settings */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Settings className="h-5 w-5 text-blue-600" /> Exam Rules & Proctoring Settings
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between py-2 border-b">
-              <div>
-                <Label className="font-semibold">Shuffle Questions</Label>
-                <p className="text-xs text-gray-500">Randomize question order for each student</p>
-              </div>
-              <Switch 
-                checked={editedExam.settings?.shuffleQuestions || false} 
-                onCheckedChange={(c) => setEditedExam({ 
-                  ...editedExam, 
-                  settings: { ...defaultSettings, ...editedExam.settings, shuffleQuestions: c } 
-                })} 
-              />
-            </div>
-            <div className="flex items-center justify-between py-2 border-b">
-              <div>
-                <Label className="font-semibold">Show Results Immediately</Label>
-                <p className="text-xs text-gray-500">Allow students to see score after submission</p>
-              </div>
-              <Switch 
-                checked={editedExam.settings?.showResults || false} 
-                onCheckedChange={(c) => setEditedExam({ 
-                  ...editedExam, 
-                  settings: { ...defaultSettings, ...editedExam.settings, showResults: c } 
-                })} 
-              />
-            </div>
-            <div className="flex items-center justify-between py-2">
-              <div>
-                <Label className="font-semibold">Require Webcam Proctoring</Label>
-                <p className="text-xs text-gray-500">Enable AI face and behavior detection</p>
-              </div>
-              <Switch 
-                checked={editedExam.settings?.requireWebcam !== false} 
-                onCheckedChange={(c) => setEditedExam({ 
-                  ...editedExam, 
-                  settings: { ...defaultSettings, ...editedExam.settings, requireWebcam: c } 
-                })} 
-              />
-            </div>
-          </CardContent>
-        </Card>
-
         {/* Question Management */}
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>
-                <CardTitle className="flex items-center gap-2">
-                  <HelpCircle className="h-5 w-5 text-purple-600" /> Questions ({questions.length})
+                <CardTitle className="flex items-center gap-2 text-emerald-900">
+                  <HelpCircle className="h-5 w-5 text-emerald-600" /> Exam Questions ({questions.length})
                 </CardTitle>
-                <CardDescription>Add, edit, or remove exam questions</CardDescription>
+                <CardDescription>
+                  Total Marks: {questions.reduce((sum, q) => sum + (q.marks || 0), 0)} | Edit, add, or delete questions
+                </CardDescription>
               </div>
-              <Button onClick={() => setShowNewQuestion(true)} size="sm" className="bg-purple-600 hover:bg-purple-700">
+              <Button onClick={() => setShowNewQuestion(true)} size="sm" className="bg-emerald-600 hover:bg-emerald-700">
                 <Plus className="h-4 w-4 mr-1" /> Add Question
               </Button>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* New Question Form */}
             {showNewQuestion && (
-              <Card className="bg-slate-50 border-2 border-purple-200">
+              <Card className="bg-emerald-50/40 border-2 border-emerald-300">
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-sm text-purple-900">New Question</CardTitle>
+                  <CardTitle className="text-sm font-bold text-emerald-900">Add New Question</CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-3">
+                <CardContent className="space-y-4">
                   <div>
-                    <Label>Question Text</Label>
+                    <Label>Question Text *</Label>
                     <Textarea 
                       value={newQuestion.text} 
                       onChange={(e) => setNewQuestion({ ...newQuestion, text: e.target.value })} 
                       placeholder="Enter question prompt..."
+                      rows={2}
                     />
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <Label>Type</Label>
+                      <Label>Question Type</Label>
                       <select
-                        className="w-full h-10 px-3 rounded-md border text-sm"
+                        className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm"
                         value={newQuestion.type}
                         onChange={(e) => setNewQuestion({ ...newQuestion, type: e.target.value as any })}
                       >
@@ -422,6 +488,7 @@ export default function TeacherExamEditClient() {
                       <Label>Marks</Label>
                       <Input 
                         type="number" 
+                        min="1"
                         value={newQuestion.marks} 
                         onChange={(e) => setNewQuestion({ ...newQuestion, marks: parseInt(e.target.value) || 1 })} 
                       />
@@ -430,9 +497,16 @@ export default function TeacherExamEditClient() {
 
                   {newQuestion.type === "multiple-choice" && (
                     <div className="space-y-2">
-                      <Label>Options</Label>
+                      <Label>Options & Select Correct Answer *</Label>
                       {newQuestion.options.map((opt, idx) => (
                         <div key={idx} className="flex gap-2 items-center">
+                          <input 
+                            type="radio" 
+                            name="newCorrectOpt" 
+                            checked={newQuestion.correctAnswer === opt && opt !== ""} 
+                            onChange={() => setNewQuestion({ ...newQuestion, correctAnswer: opt })} 
+                            className="h-4 w-4 text-emerald-600 focus:ring-emerald-500"
+                          />
                           <Input 
                             value={opt} 
                             onChange={(e) => {
@@ -440,13 +514,7 @@ export default function TeacherExamEditClient() {
                               updated[idx] = e.target.value;
                               setNewQuestion({ ...newQuestion, options: updated });
                             }} 
-                            placeholder={`Option ${idx + 1}`} 
-                          />
-                          <input 
-                            type="radio" 
-                            name="correctOpt" 
-                            checked={newQuestion.correctAnswer === opt && opt !== ""} 
-                            onChange={() => setNewQuestion({ ...newQuestion, correctAnswer: opt })} 
+                            placeholder={`Option ${String.fromCharCode(65 + idx)}`} 
                           />
                         </div>
                       ))}
@@ -455,13 +523,13 @@ export default function TeacherExamEditClient() {
 
                   {newQuestion.type === "true-false" && (
                     <div>
-                      <Label>Correct Answer</Label>
+                      <Label>Correct Answer *</Label>
                       <select
-                        className="w-full h-10 px-3 rounded-md border text-sm"
+                        className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm"
                         value={newQuestion.correctAnswer}
                         onChange={(e) => setNewQuestion({ ...newQuestion, correctAnswer: e.target.value })}
                       >
-                        <option value="">Select Correct Option</option>
+                        <option value="">Select Correct Answer</option>
                         <option value="True">True</option>
                         <option value="False">False</option>
                       </select>
@@ -470,84 +538,170 @@ export default function TeacherExamEditClient() {
 
                   {newQuestion.type === "short-answer" && (
                     <div>
-                      <Label>Correct Answer Keywords / Reference Solution</Label>
+                      <Label>Expected Answer (for auto-grading)</Label>
                       <Input 
                         value={newQuestion.correctAnswer} 
                         onChange={(e) => setNewQuestion({ ...newQuestion, correctAnswer: e.target.value })} 
-                        placeholder="Expected answer or key phrase"
+                        placeholder="Expected answer string"
                       />
                     </div>
                   )}
 
                   <div className="flex gap-2 justify-end pt-2">
                     <Button variant="outline" size="sm" onClick={() => setShowNewQuestion(false)}>Cancel</Button>
-                    <Button size="sm" onClick={handleAddQuestion} className="bg-purple-600 hover:bg-purple-700">Save Question</Button>
+                    <Button size="sm" onClick={handleAddQuestion} className="bg-emerald-600 hover:bg-emerald-700">Save Question</Button>
                   </div>
                 </CardContent>
               </Card>
             )}
 
+            {/* Questions List */}
             {questions.length === 0 && !showNewQuestion ? (
               <div className="text-center py-8 text-gray-500 border-2 border-dashed rounded-lg">
                 <HelpCircle className="mx-auto h-10 w-10 text-gray-300 mb-2" />
-                <p>No questions added yet. Click &quot;Add Question&quot; to begin building your exam.</p>
+                <p>No questions added yet. Click &quot;Add Question&quot; to begin.</p>
               </div>
             ) : (
               questions.map((q, idx) => (
-                <Card key={q.id} className="border">
+                <Card key={q.id || idx} className="border border-gray-200">
                   <CardContent className="p-4">
                     {editingQuestionId === q.id ? (
-                      <div className="space-y-3">
-                        <Textarea 
-                          value={editedQuestion.text || ""} 
-                          onChange={(e) => setEditedQuestion({ ...editedQuestion, text: e.target.value })} 
-                        />
+                      /* Rich Editing Mode for Existing Question */
+                      <div className="space-y-4 bg-gray-50 p-4 rounded-lg border border-gray-300">
+                        <div className="flex justify-between items-center">
+                          <span className="font-bold text-sm text-emerald-900">Editing Question {idx + 1}</span>
+                          <Badge variant="outline">ID: {q.id.substring(0, 8)}</Badge>
+                        </div>
+
+                        <div>
+                          <Label>Question Text *</Label>
+                          <Textarea 
+                            value={editedQuestion.text || ""} 
+                            onChange={(e) => setEditedQuestion({ ...editedQuestion, text: e.target.value })} 
+                            rows={2}
+                          />
+                        </div>
+
                         <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <Label>Question Type</Label>
+                            <select
+                              className="w-full h-10 px-3 rounded-md border text-sm bg-white"
+                              value={editedQuestion.type || "multiple-choice"}
+                              onChange={(e) => setEditedQuestion({ ...editedQuestion, type: e.target.value as any })}
+                            >
+                              <option value="multiple-choice">Multiple Choice</option>
+                              <option value="true-false">True / False</option>
+                              <option value="short-answer">Short Answer</option>
+                            </select>
+                          </div>
                           <div>
                             <Label>Marks</Label>
                             <Input 
                               type="number" 
-                              value={editedQuestion.marks || 1} 
+                              min="1"
+                              value={editedQuestion.marks || 10} 
                               onChange={(e) => setEditedQuestion({ ...editedQuestion, marks: parseInt(e.target.value) || 1 })} 
                             />
                           </div>
+                        </div>
+
+                        {/* MCQ Options Editing */}
+                        {(editedQuestion.type || "multiple-choice") === "multiple-choice" && (
+                          <div className="space-y-2">
+                            <Label>Options & Radio Correct Selection *</Label>
+                            {(editedQuestion.options || ["", "", "", ""]).map((opt, optIdx) => (
+                              <div key={optIdx} className="flex gap-2 items-center">
+                                <input 
+                                  type="radio" 
+                                  name={`editCorrectOpt-${q.id}`} 
+                                  checked={editedQuestion.correctAnswer === opt && opt !== ""} 
+                                  onChange={() => setEditedQuestion({ ...editedQuestion, correctAnswer: opt })} 
+                                  className="h-4 w-4 text-emerald-600"
+                                />
+                                <Input 
+                                  value={opt} 
+                                  onChange={(e) => {
+                                    const updatedOpts = [...(editedQuestion.options || ["", "", "", ""])];
+                                    updatedOpts[optIdx] = e.target.value;
+                                    setEditedQuestion({ ...editedQuestion, options: updatedOpts });
+                                  }} 
+                                  placeholder={`Option ${String.fromCharCode(65 + optIdx)}`} 
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {editedQuestion.type === "true-false" && (
                           <div>
                             <Label>Correct Answer</Label>
+                            <select
+                              className="w-full h-10 px-3 rounded-md border text-sm bg-white"
+                              value={String(editedQuestion.correctAnswer || "")}
+                              onChange={(e) => setEditedQuestion({ ...editedQuestion, correctAnswer: e.target.value })}
+                            >
+                              <option value="">Select Correct Answer</option>
+                              <option value="True">True</option>
+                              <option value="False">False</option>
+                            </select>
+                          </div>
+                        )}
+
+                        {editedQuestion.type === "short-answer" && (
+                          <div>
+                            <Label>Correct Answer String</Label>
                             <Input 
-                              value={editedQuestion.correctAnswer || ""} 
+                              value={String(editedQuestion.correctAnswer || "")} 
                               onChange={(e) => setEditedQuestion({ ...editedQuestion, correctAnswer: e.target.value })} 
                             />
                           </div>
-                        </div>
-                        <div className="flex gap-2 justify-end">
+                        )}
+
+                        <div className="flex gap-2 justify-end pt-2">
                           <Button variant="outline" size="sm" onClick={() => setEditingQuestionId(null)}>Cancel</Button>
-                          <Button size="sm" onClick={() => handleSaveQuestion(q.id)}>Save Edit</Button>
+                          <Button size="sm" onClick={() => handleSaveQuestion(q.id)} className="bg-emerald-600 hover:bg-emerald-700">Save Question Changes</Button>
                         </div>
                       </div>
                     ) : (
+                      /* Read Display Mode */
                       <div className="flex justify-between items-start gap-4">
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1">
-                            <Badge variant="outline" className="font-bold">Q{idx + 1}</Badge>
-                            <Badge className="bg-slate-100 text-slate-700 capitalize">{q.type}</Badge>
-                            <Badge className="bg-emerald-50 text-emerald-700">{q.marks} Marks</Badge>
+                            <Badge variant="outline" className="font-bold bg-emerald-50 text-emerald-900 border-emerald-200">
+                              Q{idx + 1}
+                            </Badge>
+                            <Badge className="bg-gray-100 text-gray-700 capitalize">{q.type}</Badge>
+                            <Badge className="bg-emerald-600 text-white">{q.marks} Marks</Badge>
                           </div>
-                          <p className="font-semibold text-slate-900 mt-2">{q.text}</p>
+                          <p className="font-semibold text-gray-900 mt-2">{q.text}</p>
                           {q.options && q.options.length > 0 && (
-                            <div className="grid grid-cols-2 gap-1 mt-2 text-sm text-slate-600">
+                            <div className="grid grid-cols-2 gap-2 mt-2 text-xs text-gray-700">
                               {q.options.map((opt, i) => (
-                                <div key={i} className={`p-1.5 rounded border text-xs ${opt === (q as any).correctAnswer ? "bg-emerald-50 border-emerald-300 font-medium" : "bg-slate-50"}`}>
-                                  {opt} {opt === (q as any).correctAnswer && "✓"}
+                                <div 
+                                  key={i} 
+                                  className={`p-2 rounded border ${
+                                    opt === (q as any).correctAnswer 
+                                      ? "bg-emerald-50 border-emerald-300 font-semibold text-emerald-900" 
+                                      : "bg-gray-50 border-gray-200"
+                                  }`}
+                                >
+                                  {String.fromCharCode(65 + i)}. {opt} {opt === (q as any).correctAnswer && " ✓ (Correct)"}
                                 </div>
                               ))}
                             </div>
                           )}
+                          {(!q.options || q.options.length === 0) && (q as any).correctAnswer && (
+                            <p className="text-xs text-emerald-800 font-medium mt-1">
+                              Answer: {(q as any).correctAnswer}
+                            </p>
+                          )}
                         </div>
                         <div className="flex gap-1">
-                          <Button variant="ghost" size="sm" onClick={() => startEditQuestion(q)}>
+                          <Button variant="ghost" size="sm" onClick={() => startEditQuestion(q)} title="Edit Question">
                             <Edit2 className="h-4 w-4 text-blue-600" />
                           </Button>
-                          <Button variant="ghost" size="sm" onClick={() => handleDeleteQuestion(q.id)}>
+                          <Button variant="ghost" size="sm" onClick={() => handleDeleteQuestion(q.id)} title="Delete Question">
                             <Trash2 className="h-4 w-4 text-red-600" />
                           </Button>
                         </div>

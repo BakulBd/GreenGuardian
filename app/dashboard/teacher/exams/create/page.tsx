@@ -185,6 +185,23 @@ export default function CreateExamPage() {
 
       const examRef = await addDoc(collection(db, "exams"), examDoc);
 
+      // Save each question into questions collection with examId
+      if (examMode === "online" && questions.length > 0) {
+        for (let i = 0; i < questions.length; i++) {
+          const q = questions[i];
+          await addDoc(collection(db, "questions"), {
+            ...q,
+            examId: examRef.id,
+            order: i,
+            courseId: examData.courseId,
+            batch: examData.batch,
+            section: examData.section,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
       toast({
         title: "Success",
         description: status === "draft" ? "Exam saved as draft" : "Exam published successfully",

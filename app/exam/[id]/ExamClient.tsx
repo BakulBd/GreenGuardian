@@ -1026,12 +1026,20 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         };
       }
 
-      // Save answers with behavior score
+      // Save answers with behavior score and academic details
       const answerData: any = {
         sessionId,
         examSessionId: sessionId, // Required by Firestore rules
         examId: exam.id,
+        examTitle: exam.title || "",
         studentId: user.id,
+        studentName: user.name || "",
+        studentCode: (user as any).studentCode || "",
+        studentEmail: user.email || "",
+        courseId: (exam as any).courseId || "",
+        courseName: (exam as any).courseName || "",
+        batch: (exam as any).batch || (user as any).batch || "",
+        section: (exam as any).section || (user as any).section || "",
         submittedAt: serverTimestamp(),
         autoSubmitted: auto,
         behaviorScore, // Include behavior score (0-100)
@@ -1089,6 +1097,13 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         status: sessionStatus,
         submitted: true,
         completedAt: serverTimestamp(),
+        studentName: user.name || "",
+        studentCode: (user as any).studentCode || "",
+        courseId: (exam as any).courseId || "",
+        courseName: (exam as any).courseName || "",
+        batch: (exam as any).batch || (user as any).batch || "",
+        section: (exam as any).section || (user as any).section || "",
+        examTitle: exam.title || "",
         warnings,
         behaviorScore,
         violationCounts,

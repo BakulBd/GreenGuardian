@@ -24,6 +24,7 @@ import { collection, query, where, getDocs, deleteDoc, doc } from "firebase/fire
 import { db } from "@/lib/firebase/config";
 import Link from "next/link";
 import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
+import { getExamsByTeacher, deleteExam } from "@/lib/firebase/exams";
 
 interface Exam {
   id: string;
@@ -63,21 +64,8 @@ export default function TeacherExamsPage() {
     if (!user) return;
     
     try {
-      const examsQuery = query(
-        collection(db, "exams"),
-        where("createdBy", "==", user.id)
-      );
-      const snapshot = await getDocs(examsQuery);
-      const examsList = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Exam[];
-      
-      setExams(examsList.sort((a, b) => {
-        const dateA = a.createdAt?.toDate?.() || new Date(0);
-        const dateB = b.createdAt?.toDate?.() || new Date(0);
-        return dateB.getTime() - dateA.getTime();
-      }));
+      const examsList = await getExamsByTeacher(user.id);
+      setExams(examsList as any[]);
     } catch (error) {
       console.error("Error loading exams:", error);
       toast({
@@ -94,7 +82,7 @@ export default function TeacherExamsPage() {
     if (!confirm("Are you sure you want to delete this exam?")) return;
 
     try {
-      await deleteDoc(doc(db, "exams", examId));
+      await deleteExam(examId);
       setExams(exams.filter(e => e.id !== examId));
       toast({
         title: "Exam Deleted",
