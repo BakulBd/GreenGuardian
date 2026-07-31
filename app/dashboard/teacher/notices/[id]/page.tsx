@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { getNotice, deleteNotice, publishNotice, getTargetedStudentIds, formatNoticeDate } from "@/lib/firebase/notices";
+import { getNotice, deleteNotice, publishNoticeWithNotifications, getTargetedStudentIds, formatNoticeDate } from "@/lib/firebase/notices";
 import { Notice } from "@/lib/types";
 import {
   Loader2,
@@ -94,7 +94,7 @@ export default function TeacherNoticeDetailPage() {
     setPublishing(true);
     try {
       const targetedStudentIds = await getTargetedStudentIds(notice);
-      await publishNotice(noticeId, targetedStudentIds);
+      await publishNoticeWithNotifications(noticeId, targetedStudentIds);
       setNotice({ ...notice, status: "published", publishedAt: new Date() });
       toast({
         title: "Notice Published",
