@@ -278,5 +278,56 @@ service cloud.firestore {
       allow create: if isTeacherOrAdmin();
       allow delete: if isAdmin();
     }
+
+    // ============ Notice Module ============
+
+    // Notices collection
+    match /notices/{noticeId} {
+      // Students can read published notices
+      allow read: if isStudent() && resource.data.status == 'published';
+      // Teachers can read their own notices (draft or published)
+      allow read: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      // Admins can read all notices
+      allow read: if isAdmin();
+      // Teachers can create notices
+      allow create: if isTeacher() && 
+                       request.resource.data.teacherId == request.auth.uid &&
+                       request.resource.data.status in ['draft', 'published'];
+      // Teachers can update their own notices
+      allow update: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      // Admins can update any notice
+      allow update: if isAdmin();
+      // Teachers can delete their own notices
+      allow delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      // Admins can delete any notice
+      allow delete: if isAdmin();
+    }
+
+    // Notice Reads collection
+    match /noticeReads/{readId} {
+      // Students can read their own read status
+      allow read: if isStudent() && resource.data.studentId == request.auth.uid;
+      // Teachers can read read status for their notices
+      allow read: if isTeacher();
+      // Admins can read all
+      allow read: if isAdmin();
+      // Students can mark notices as read
+      allow create: if isStudent() && request.resource.data.studentId == request.auth.uid;
+    }
+
+    // Notifications collection
+    match /notifications/{notificationId} {
+      // Users can read their own notifications
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      // Admins can read all
+      allow read: if isAdmin();
+      // System creates notifications via serverTimestamp (no direct create by client for security)
+      // Users can update their own notifications (mark as read)
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      // Admin can manage
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
   }
 }

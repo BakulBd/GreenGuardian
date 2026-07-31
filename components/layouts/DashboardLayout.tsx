@@ -19,11 +19,14 @@ import {
   Camera,
   BookOpen,
   Award,
+  Bell,
+  Megaphone,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
 import { signOut } from "@/lib/firebase/auth";
 import { auth } from "@/lib/firebase/config";
+import { subscribeToUnreadCount } from "@/lib/firebase/notices";
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -35,12 +38,23 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
   const [loading, setLoading] = useState(!initialized || authLoading);
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [notificationCount, setNotificationCount] = useState(0);
 
   useEffect(() => {
     if (initialized && !authLoading) {
       setLoading(false);
     }
   }, [initialized, authLoading]);
+
+// Subscribe to notification count for students
+  useEffect(() => {
+    if (user && user.role === "student") {
+      const unsub = subscribeToUnreadCount(user.id, (count) => {
+        setNotificationCount(count);
+      });
+      return () => unsub();
+    }
+  }, [user]);
 
   useEffect(() => {
     // Only check auth after fully initialized and not loading
@@ -121,10 +135,11 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
     { icon: User, label: "My Profile", href: "/profile" },
   ];
 
-  const teacherMenuItems = [
+const teacherMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/teacher" },
     { icon: BookOpen, label: "My Courses", href: "/dashboard/teacher/courses" },
     { icon: FileText, label: "My Exams", href: "/dashboard/teacher/exams" },
+    { icon: Megaphone, label: "Notices", href: "/dashboard/teacher/notices" },
     { icon: FileText, label: "Submissions & OCR", href: "/dashboard/teacher/answers" },
     { icon: Camera, label: "Watch Live", href: "/dashboard/teacher/watch-live" },
     { icon: Shield, label: "Live Monitoring", href: "/dashboard/teacher/monitoring" },
@@ -136,6 +151,7 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/student" },
     { icon: FileText, label: "Available Exams", href: "/exam" },
     { icon: Award, label: "My Results", href: "/dashboard/student/results" },
+    { icon: Megaphone, label: "Notices", href: "/dashboard/student/notices" },
     { icon: User, label: "My Profile", href: "/profile" },
   ];
 
@@ -173,15 +189,20 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
           </div>
 
           {/* Menu Items */}
-          <nav className="flex-1 px-4 py-4 space-y-1 overflow-y-auto" aria-label="Dashboard navigation">
+<nav className="flex-1 px-4 py-4 space-y-1 overflow-y-auto" aria-label="Dashboard navigation">
             {menuItems.map((item) => (
               <Link key={item.href} href={item.href}>
                 <motion.div
                   whileHover={{ x: 4 }}
-                  className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-primary-50 text-gray-700 hover:text-primary-700 transition-colors"
+                  className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-primary-50 text-gray-700 hover:text-primary-700 transition-colors relative"
                 >
                   <item.icon className="h-5 w-5" />
                   <span className="text-sm font-medium">{item.label}</span>
+                  {item.label === "Notices" && role === "student" && notificationCount > 0 && (
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 bg-red-500 text-white text-xs font-bold rounded-full h-5 min-w-[20px] flex items-center justify-center px-1">
+                      {notificationCount > 99 ? "99+" : notificationCount}
+                    </span>
+                  )}
                 </motion.div>
               </Link>
             ))}
@@ -213,8 +234,20 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
             >
               <Menu className="h-5 w-5" />
             </button>
-            <div className="flex items-center space-x-4">
+<div className="flex items-center space-x-4">
               <span className="text-sm text-gray-600 hidden sm:inline">Welcome back, {user.name}!</span>
+              {role === "student" && (
+                <Link href="/dashboard/student/notices">
+                  <Button variant="ghost" size="sm" className="relative">
+                    <Bell className="h-5 w-5" />
+                    {notificationCount > 0 && (
+                      <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs font-bold rounded-full h-4 min-w-[16px] flex items-center justify-center px-1">
+                        {notificationCount > 9 ? "9+" : notificationCount}
+                      </span>
+                    )}
+                  </Button>
+                </Link>
+              )}
               <Link href="/profile">
                 <Button variant="outline" size="sm" className="flex items-center gap-2">
                   {user.avatarUrl ? (

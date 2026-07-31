@@ -16,7 +16,8 @@ import {
   TrendingUp,
   Loader2,
   PlayCircle,
-  Eye
+  Eye,
+  Megaphone
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
@@ -220,7 +221,20 @@ export default function StudentDashboardPage() {
         </div>
 
 {/* Quick Links */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <Link href="/dashboard/student/notices">
+            <Card className="hover:shadow-md transition-shadow cursor-pointer border-2 border-transparent hover:border-purple-400 group">
+              <CardContent className="p-6 flex items-center gap-4">
+                <div className="p-3 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
+                  <Megaphone className="h-8 w-8 text-purple-600" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-900">Notices</h3>
+                  <p className="text-sm text-gray-500">View important announcements from your teachers</p>
+                </div>
+              </CardContent>
+            </Card>
+          </Link>
           <Link href="/dashboard/student/results">
             <Card className="hover:shadow-md transition-shadow cursor-pointer border-2 border-transparent hover:border-green-400 group">
               <CardContent className="p-6 flex items-center gap-4">
