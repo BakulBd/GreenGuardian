@@ -219,6 +219,36 @@ export default function StudentDashboardPage() {
           </Card>
         </div>
 
+{/* Quick Links */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Link href="/dashboard/student/results">
+            <Card className="hover:shadow-md transition-shadow cursor-pointer border-2 border-transparent hover:border-green-400 group">
+              <CardContent className="p-6 flex items-center gap-4">
+                <div className="p-3 bg-green-100 rounded-lg group-hover:bg-green-200 transition-colors">
+                  <Award className="h-8 w-8 text-green-600" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-900">View My Results</h3>
+                  <p className="text-sm text-gray-500">Check your published exam results, grades, and performance</p>
+                </div>
+              </CardContent>
+            </Card>
+          </Link>
+          <Link href="/exam">
+            <Card className="hover:shadow-md transition-shadow cursor-pointer border-2 border-transparent hover:border-blue-400 group">
+              <CardContent className="p-6 flex items-center gap-4">
+                <div className="p-3 bg-blue-100 rounded-lg group-hover:bg-blue-200 transition-colors">
+                  <FileText className="h-8 w-8 text-blue-600" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-gray-900">Available Exams</h3>
+                  <p className="text-sm text-gray-500">Browse and start your pending exams</p>
+                </div>
+              </CardContent>
+            </Card>
+          </Link>
+        </div>
+
         {/* Available Exams */}
         <Card>
           <CardHeader>

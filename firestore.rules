@@ -237,5 +237,46 @@ service cloud.firestore {
       allow update: if isAdmin();
       allow delete: if isAdmin();
     }
+
+    // ============ Results Module ============
+
+    // Results collection
+    match /results/{resultId} {
+      // Students can only read their own published results
+      allow read: if isStudent() && resource.data.studentId == request.auth.uid && resource.data.isPublished == true;
+      // Teachers can read results for courses they teach (via batch/section filtering)
+      allow read: if isTeacher();
+      // Admins can read all results
+      allow read: if isAdmin();
+      // Only teachers and admins can create results
+      allow create: if isTeacherOrAdmin() && request.resource.data.studentId != null;
+      // Only teachers and admins can update results
+      allow update: if isTeacherOrAdmin();
+      // Only admins can delete results
+      allow delete: if isAdmin();
+    }
+
+    // Student Warnings collection
+    match /studentWarnings/{warningId} {
+      // Students can only read their own warnings
+      allow read: if isStudent() && resource.data.studentId == request.auth.uid;
+      // Teachers can read warnings for their students
+      allow read: if isTeacher();
+      // Admins can read all warnings
+      allow read: if isAdmin();
+      // Only teachers and admins can create warnings
+      allow create: if isTeacherOrAdmin() && request.resource.data.studentId != null;
+      // Only teachers and admins can update warnings
+      allow update: if isTeacherOrAdmin();
+      // Only admins can delete warnings
+      allow delete: if isAdmin();
+    }
+
+    // Result Notifications collection (for real-time update signaling)
+    match /resultNotifications/{notificationId} {
+      allow read: if isAuthenticated();
+      allow create: if isTeacherOrAdmin();
+      allow delete: if isAdmin();
+    }
   }
 }
