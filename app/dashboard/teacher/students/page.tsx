@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -9,166 +9,167 @@ import { Input } from "@/components/ui/input";
 import { 
   Users, 
   Mail, 
-  Calendar, 
   Search,
-  FileText,
-  Award,
-  TrendingUp,
-  Clock,
-  Eye,
-  BarChart,
-  AlertTriangle
+  BookOpen,
+  Layers,
+  Loader2,
+  RefreshCw,
+  GraduationCap,
+  UserCheck,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
-import { useAuth } from "@/hooks/useAuth";
-import { getExamsByTeacher, getSessionsByExam } from "@/lib/firebase/exams";
-import { Exam, ExamSession } from "@/lib/types";
-import { formatDate } from "@/lib/utils/helpers";
-import { collection, query, where, getDocs } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
+import { useAuth } from "@/contexts/AuthContext";
+import {
+  getAssignedStudents,
+  subscribeToAssignedStudents,
+  getAssignmentsByTeacher,
+} from "@/lib/firebase/assignments";
+import { TeacherStudentMapping, TeacherAssignment } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils/helpers";
 
-interface StudentData {
+interface StudentInfo {
   id: string;
   name: string;
   email: string;
-  examsCompleted: number;
-  avgScore: number;
-  avgAccuracy: number;
-  lastExamDate?: Date;
-  totalWarnings: number;
-  flaggedCount: number;
-  sessions: ExamSession[];
+  studentCode?: string;
+  batch?: string;
+  section?: string;
+  courses: { courseId: string; courseName: string }[];
 }
 
 export default function TeacherStudentsPage() {
   const { user } = useAuth();
   const { toast } = useToast();
   
-  const [students, setStudents] = useState<StudentData[]>([]);
+  const [students, setStudents] = useState<StudentInfo[]>([]);
+  const [mappings, setMappings] = useState<TeacherStudentMapping[]>([]);
+  const [assignments, setAssignments] = useState<TeacherAssignment[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedStudent, setSelectedStudent] = useState<StudentData | null>(null);
 
   useEffect(() => {
-    if (user) {
-      loadStudents();
-    }
+    if (!user) return;
+
+    // Load assignments
+    getAssignmentsByTeacher(user.id).then(setAssignments).catch(() => {});
+
+    // Real-time subscription to assigned students
+    const unsubscribe = subscribeToAssignedStudents(user.id, (data) => {
+      setMappings(data);
+      buildStudentList(data, assignments);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
   }, [user]);
 
-  const loadStudents = async () => {
-    try {
-      // Get teacher's exams
-      const teacherExams = await getExamsByTeacher(user!.id);
-      
-      // Get all sessions for these exams
-      const allSessions: ExamSession[] = [];
-      for (const exam of teacherExams) {
-        const sessions = await getSessionsByExam(exam.id);
-        sessions.forEach(s => {
-          (s as any).examTitle = exam.title;
+  // Rebuild student list when mappings or assignments change
+  const buildStudentList = useCallback(async (mappingsData: TeacherStudentMapping[], assignmentsData?: TeacherAssignment[]) => {
+    const assign = assignmentsData || assignments;
+    const studentMap = new Map<string, StudentInfo>();
+
+    for (const mapping of mappingsData) {
+      const sid = mapping.studentId;
+      if (!studentMap.has(sid)) {
+        // Try to get student name from mapping or from users collection
+        let studentName = mapping.studentName || `Student ${sid.slice(0, 8)}`;
+        let studentCode = mapping.studentCode;
+        let email = "";
+
+        // We store the mapping info directly
+        studentMap.set(sid, {
+          id: sid,
+          name: studentName,
+          email: email,
+          studentCode,
+          batch: mapping.batchName,
+          section: mapping.sectionName,
+          courses: [],
         });
-        allSessions.push(...sessions);
       }
-      
-      // Group sessions by student
-      const studentMap = new Map<string, StudentData>();
-      
-      for (const session of allSessions) {
-        const studentId = session.studentId;
-        
-        if (!studentMap.has(studentId)) {
-          // Try to get student info
-          const studentInfo = await getStudentInfo(studentId);
-          studentMap.set(studentId, {
-            id: studentId,
-            name: studentInfo?.name || session.studentName || `Student ${studentId.slice(0, 8)}`,
-            email: studentInfo?.email || "Unknown",
-            examsCompleted: 0,
-            avgScore: 0,
-            avgAccuracy: 0,
-            totalWarnings: 0,
-            flaggedCount: 0,
-            sessions: [],
-          });
-        }
-        
-        const student = studentMap.get(studentId)!;
-        student.sessions.push(session);
-        
-        if (session.status === "submitted" || session.status === "auto-submitted") {
-          student.examsCompleted++;
-          if (session.score !== undefined) {
-            student.avgScore = (student.avgScore * (student.examsCompleted - 1) + session.score) / student.examsCompleted;
-          }
-          const accuracy = (session as any).accuracy;
-          if (accuracy !== undefined) {
-            student.avgAccuracy = (student.avgAccuracy * (student.examsCompleted - 1) + accuracy) / student.examsCompleted;
-          }
-        }
-        
-        student.totalWarnings += session.proctoring?.suspiciousEvents || 0;
-        if ((session as any).flagged) {
-          student.flaggedCount += 1;
-        }
-        
-        const sessionDate = session.endTime ? 
-          (session.endTime instanceof Date ? session.endTime : (session.endTime as any)?.toDate?.()) : 
-          (session.startTime instanceof Date ? session.startTime : (session.startTime as any)?.toDate?.());
-        if (sessionDate && (!student.lastExamDate || sessionDate > student.lastExamDate)) {
-          student.lastExamDate = sessionDate;
-        }
+      const student = studentMap.get(sid)!;
+      // Add course if not already present
+      if (mapping.courseName && !student.courses.some((c) => c.courseId === mapping.courseId)) {
+        student.courses.push({
+          courseId: mapping.courseId,
+          courseName: mapping.courseName || mapping.courseId,
+        });
       }
-      
-      setStudents(Array.from(studentMap.values()));
+    }
+
+    setStudents(Array.from(studentMap.values()));
+  }, [assignments]);
+
+  // Refresh data
+  const handleRefresh = async () => {
+    if (!user) return;
+    setLoading(true);
+    try {
+      const [mappingsData, assign] = await Promise.all([
+        getAssignedStudents(user.id),
+        getAssignmentsByTeacher(user.id),
+      ]);
+      setMappings(mappingsData);
+      setAssignments(assign);
+      buildStudentList(mappingsData, assign);
     } catch (error) {
-      console.error("Error loading students:", error);
-      toast({ title: "Error", description: "Failed to load students", variant: "destructive" });
+      console.error("Error refreshing students:", error);
+      toast({ title: "Error", description: "Failed to refresh students", variant: "destructive" });
     } finally {
       setLoading(false);
     }
   };
 
-  const getStudentInfo = async (userId: string) => {
-    try {
-      const q = query(collection(db, "users"), where("__name__", "==", userId));
-      const snapshot = await getDocs(q);
-      if (!snapshot.empty) {
-        return snapshot.docs[0].data() as { name: string; email: string };
-      }
-    } catch (error) {
-      console.error("Error getting student info:", error);
-    }
-    return null;
-  };
-
-  const filteredStudents = students.filter(student =>
-    student.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    student.email.toLowerCase().includes(searchQuery.toLowerCase())
+  // Get unique courses for filter
+  const courseOptions = Array.from(
+    new Map(
+      assignments.map((a) => [a.courseId, { id: a.courseId, name: a.courseName || a.courseId }])
+    ).values()
   );
 
-  const totalStats = {
-    students: students.length,
-    totalExams: students.reduce((acc, s) => acc + s.examsCompleted, 0),
-    avgScore: students.length > 0 
-      ? students.reduce((acc, s) => acc + s.avgScore, 0) / students.length 
-      : 0,
-    totalWarnings: students.reduce((acc, s) => acc + s.totalWarnings, 0),
-    flagged: students.reduce((acc, s) => acc + s.flaggedCount, 0),
-  };
+  // Get unique batches for filter
+  const batchOptions = Array.from(
+    new Map(
+      assignments.map((a) => [a.batchId, a.batchName || a.batchId])
+    ).values()
+  );
+
+  const filteredStudents = students.filter((student) => {
+    if (!searchQuery) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      student.name.toLowerCase().includes(q) ||
+      (student.studentCode || "").toLowerCase().includes(q) ||
+      (student.batch || "").toLowerCase().includes(q) ||
+      (student.section || "").toLowerCase().includes(q) ||
+      student.courses.some((c) => c.courseName.toLowerCase().includes(q))
+    );
+  });
+
+  // Stats
+  const totalStudents = students.length;
+  const totalCourses = courseOptions.length;
+  const totalBatches = batchOptions.length;
 
   return (
     <DashboardLayout role="teacher">
       <div className="space-y-6">
         {/* Header */}
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">My Students</h1>
-          <p className="text-gray-600 mt-2">
-            View students who have taken your exams
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">My Students</h1>
+            <p className="text-gray-600 mt-2">
+              Students assigned to you by the administrator
+            </p>
+          </div>
+          <Button variant="outline" onClick={handleRefresh} disabled={loading}>
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
         </div>
 
         {/* Stats Overview */}
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center">
@@ -176,8 +177,8 @@ export default function TeacherStudentsPage() {
                   <Users className="h-6 w-6 text-blue-600" />
                 </div>
                 <div className="ml-4">
-                  <p className="text-sm text-gray-600">Total Students</p>
-                  <p className="text-2xl font-bold">{totalStats.students}</p>
+                  <p className="text-sm text-gray-600">Assigned Students</p>
+                  <p className="text-2xl font-bold">{totalStudents}</p>
                 </div>
               </div>
             </CardContent>
@@ -185,12 +186,12 @@ export default function TeacherStudentsPage() {
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center">
-                <div className="p-3 bg-green-100 rounded-lg">
-                  <FileText className="h-6 w-6 text-green-600" />
+                <div className="p-3 bg-emerald-100 rounded-lg">
+                  <BookOpen className="h-6 w-6 text-emerald-600" />
                 </div>
                 <div className="ml-4">
-                  <p className="text-sm text-gray-600">Exams Completed</p>
-                  <p className="text-2xl font-bold">{totalStats.totalExams}</p>
+                  <p className="text-sm text-gray-600">Assigned Courses</p>
+                  <p className="text-2xl font-bold">{totalCourses}</p>
                 </div>
               </div>
             </CardContent>
@@ -199,37 +200,11 @@ export default function TeacherStudentsPage() {
             <CardContent className="pt-6">
               <div className="flex items-center">
                 <div className="p-3 bg-purple-100 rounded-lg">
-                  <Award className="h-6 w-6 text-purple-600" />
+                  <Layers className="h-6 w-6 text-purple-600" />
                 </div>
                 <div className="ml-4">
-                  <p className="text-sm text-gray-600">Average Score</p>
-                  <p className="text-2xl font-bold">{totalStats.avgScore.toFixed(1)}%</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center">
-                <div className="p-3 bg-yellow-100 rounded-lg">
-                  <TrendingUp className="h-6 w-6 text-yellow-600" />
-                </div>
-                <div className="ml-4">
-                  <p className="text-sm text-gray-600">Total Warnings</p>
-                  <p className="text-2xl font-bold">{totalStats.totalWarnings}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center">
-                <div className="p-3 bg-red-100 rounded-lg">
-                  <AlertTriangle className="h-6 w-6 text-red-600" />
-                </div>
-                <div className="ml-4">
-                  <p className="text-sm text-gray-600">Flagged</p>
-                  <p className="text-2xl font-bold">{totalStats.flagged}</p>
+                  <p className="text-sm text-gray-600">Active Batches</p>
+                  <p className="text-2xl font-bold">{totalBatches}</p>
                 </div>
               </div>
             </CardContent>
@@ -239,16 +214,14 @@ export default function TeacherStudentsPage() {
         {/* Search */}
         <Card>
           <CardContent className="pt-6">
-            <div className="flex items-center space-x-4">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
-                <Input
-                  placeholder="Search students by name or email..."
-                  className="pl-10"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
+              <Input
+                placeholder="Search students by name, ID, batch, section, or course..."
+                className="pl-10"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
             </div>
           </CardContent>
         </Card>
@@ -258,22 +231,22 @@ export default function TeacherStudentsPage() {
           <CardHeader>
             <CardTitle>Students</CardTitle>
             <CardDescription>
-              Students who have attempted your exams
+              Students assigned to you ({filteredStudents.length} of {totalStudents})
             </CardDescription>
           </CardHeader>
           <CardContent>
             {loading ? (
               <div className="text-center py-8">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto"></div>
+                <Loader2 className="h-8 w-8 text-emerald-600 animate-spin mx-auto" />
               </div>
             ) : filteredStudents.length === 0 ? (
               <div className="text-center py-12">
                 <Users className="h-16 w-16 text-gray-400 mx-auto mb-4" />
                 <h3 className="text-lg font-medium text-gray-900 mb-2">No Students Found</h3>
                 <p className="text-gray-600">
-                  {searchQuery 
-                    ? "No students match your search criteria" 
-                    : "No students have taken your exams yet"}
+                  {searchQuery
+                    ? "No students match your search criteria"
+                    : "No students have been assigned to you yet. Contact the administrator."}
                 </p>
               </div>
             ) : (
@@ -282,11 +255,10 @@ export default function TeacherStudentsPage() {
                   <thead>
                     <tr className="border-b">
                       <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Student</th>
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Exams</th>
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Avg Score</th>
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Warnings</th>
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Last Exam</th>
-                      <th className="text-right py-3 px-4 text-sm font-medium text-gray-700">Actions</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">ID</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Batch</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Section</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Courses</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -301,47 +273,33 @@ export default function TeacherStudentsPage() {
                             </div>
                             <div>
                               <p className="font-medium text-gray-900">{student.name}</p>
-                              <p className="text-sm text-gray-600">{student.email}</p>
+                              <p className="text-sm text-gray-500">{student.email || "Email not available"}</p>
                             </div>
                           </div>
                         </td>
                         <td className="py-3 px-4">
-                          <Badge variant="secondary">
-                            {student.examsCompleted} completed
-                          </Badge>
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className={`font-medium ${
-                            student.avgScore >= 70 ? "text-green-600" :
-                            student.avgScore >= 50 ? "text-yellow-600" :
-                            "text-red-600"
-                          }`}>
-                            {student.avgScore.toFixed(1)}%
+                          <span className="text-sm font-mono text-gray-700">
+                            {student.studentCode || student.id.slice(0, 10)}
                           </span>
                         </td>
                         <td className="py-3 px-4">
-                          <Badge className={
-                            student.totalWarnings >= 10 ? "bg-red-100 text-red-700" :
-                            student.totalWarnings >= 5 ? "bg-yellow-100 text-yellow-700" :
-                            "bg-green-100 text-green-700"
-                          }>
-                            {student.totalWarnings}
+                          <Badge variant="outline" className="bg-blue-50 text-blue-800 border-blue-200">
+                            Batch {student.batch || "N/A"}
                           </Badge>
                         </td>
-                        <td className="py-3 px-4 text-sm text-gray-600">
-                          {student.lastExamDate 
-                            ? formatDate(student.lastExamDate)
-                            : "-"}
+                        <td className="py-3 px-4">
+                          <Badge variant="outline" className="bg-purple-50 text-purple-800 border-purple-200">
+                            Section {student.section || "N/A"}
+                          </Badge>
                         </td>
-                        <td className="py-3 px-4 text-right">
-                          <Button 
-                            variant="ghost" 
-                            size="sm"
-                            onClick={() => setSelectedStudent(student)}
-                          >
-                            <Eye className="h-4 w-4 mr-2" />
-                            View Details
-                          </Button>
+                        <td className="py-3 px-4">
+                          <div className="flex flex-wrap gap-1">
+                            {student.courses.map((c) => (
+                              <Badge key={c.courseId} className="bg-emerald-100 text-emerald-800 border-emerald-200 text-xs">
+                                {c.courseName}
+                              </Badge>
+                            ))}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -351,97 +309,8 @@ export default function TeacherStudentsPage() {
             )}
           </CardContent>
         </Card>
-
-        {/* Student Details Modal/Card */}
-        {selectedStudent && (
-          <Card className="border-primary-200 shadow-xl">
-            <CardHeader className="bg-gradient-to-r from-slate-50 to-white border-b">
-              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                <div>
-                  <CardTitle className="text-2xl">{selectedStudent.name}</CardTitle>
-                  <CardDescription className="text-base">{selectedStudent.email}</CardDescription>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Badge variant="secondary">{selectedStudent.examsCompleted} exams</Badge>
-                    <Badge className="bg-green-100 text-green-700">Avg Score {selectedStudent.avgScore.toFixed(1)}%</Badge>
-                    <Badge className="bg-indigo-100 text-indigo-700">Avg Accuracy {selectedStudent.avgAccuracy.toFixed(1)}%</Badge>
-                    <Badge className="bg-orange-100 text-orange-700">Warnings {selectedStudent.totalWarnings}</Badge>
-                    <Badge className="bg-red-100 text-red-700">Flagged {selectedStudent.flaggedCount}</Badge>
-                  </div>
-                </div>
-                <Button variant="ghost" onClick={() => setSelectedStudent(null)}>
-                  Close
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-6 pt-6">
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <Card>
-                  <CardContent className="pt-6">
-                    <p className="text-sm text-gray-500">Average Score</p>
-                    <p className="text-2xl font-bold text-green-600">{selectedStudent.avgScore.toFixed(1)}%</p>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardContent className="pt-6">
-                    <p className="text-sm text-gray-500">Average Accuracy</p>
-                    <p className="text-2xl font-bold text-indigo-600">{selectedStudent.avgAccuracy.toFixed(1)}%</p>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardContent className="pt-6">
-                    <p className="text-sm text-gray-500">Warnings</p>
-                    <p className="text-2xl font-bold text-orange-600">{selectedStudent.totalWarnings}</p>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardContent className="pt-6">
-                    <p className="text-sm text-gray-500">Flagged Sessions</p>
-                    <p className="text-2xl font-bold text-red-600">{selectedStudent.flaggedCount}</p>
-                  </CardContent>
-                </Card>
-              </div>
-
-              <div>
-                <h4 className="font-semibold text-gray-900 mb-3">Exam History</h4>
-                <div className="space-y-3">
-                  {selectedStudent.sessions.map((session) => (
-                    <div key={session.id} className="rounded-xl border bg-white p-4 shadow-sm">
-                      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-                        <div className="min-w-0">
-                          <p className="font-semibold text-gray-900 truncate">{(session as any).examTitle || "Exam"}</p>
-                          <p className="text-sm text-gray-500 mt-1">
-                            {session.startTime instanceof Date ? session.startTime.toLocaleDateString() : 
-                              (session.startTime as any)?.toDate?.()?.toLocaleDateString() || "Unknown date"}
-                          </p>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge className={
-                            (session.status === "submitted" || session.status === "auto-submitted") ? "bg-green-100 text-green-700" :
-                            session.status === "in-progress" ? "bg-blue-100 text-blue-700" :
-                            "bg-gray-100 text-gray-700"
-                          }>
-                            {session.status}
-                          </Badge>
-                          <Badge variant="outline">Behavior {(session as any).behaviorScore ?? 0}%</Badge>
-                          <Badge variant="outline">Accuracy {(session as any).accuracy ?? 0}%</Badge>
-                          <Badge variant="outline">Score {(session as any).score ?? 0}</Badge>
-                          <Badge variant="outline">Warnings {((session as any).warnings ?? session.proctoring?.suspiciousEvents) || 0}</Badge>
-                          {(session as any).flagged && <Badge className="bg-red-100 text-red-700">Flagged</Badge>}
-                        </div>
-                      </div>
-                      {(session as any).flagReasons?.length > 0 && (
-                        <div className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">
-                          {(session as any).flagReasons.join(", ")}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
       </div>
     </DashboardLayout>
   );
 }
+

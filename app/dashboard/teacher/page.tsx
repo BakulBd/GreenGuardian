@@ -8,42 +8,47 @@ import Link from "next/link";
 import { FileText, Users, Shield, Plus, TrendingUp, Camera, BookOpen, Megaphone } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher, getSessionsByExam } from "@/lib/firebase/exams";
-import { getTeacherAssignments } from "@/lib/academics/catalog";
 import { getUsersByRole } from "@/lib/firebase/firestore";
 import { Exam } from "@/lib/types";
+import {
+  getAssignmentsByTeacher,
+  getAssignedStudents,
+} from "@/lib/firebase/assignments";
 
 export default function TeacherDashboard() {
   const { user } = useAuth();
   const [exams, setExams] = useState<Exam[]>([]);
-  const [totalStudentsCount, setTotalStudentsCount] = useState(0);
+  const [assignedStudentsCount, setAssignedStudentsCount] = useState(0);
   const [assignedCoursesCount, setAssignedCoursesCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (user) {
-      loadExams();
+      loadDashboardData();
     }
   }, [user]);
 
-  const loadExams = async () => {
+  const loadDashboardData = async () => {
     try {
       if (!user) return;
-      const [teacherExams, assignments, allStudents] = await Promise.all([
+
+      const [teacherExams, assignments, students] = await Promise.all([
         getExamsByTeacher(user.id),
-        getTeacherAssignments(user.id),
-        getUsersByRole("student"),
+        getAssignmentsByTeacher(user.id).catch(() => []),
+        getAssignedStudents(user.id).catch(() => []),
       ]);
 
       setExams(teacherExams);
 
-      // Compute unique assigned courses
+      // Compute unique assigned courses from assignments
       const uniqueCourses = new Set(assignments.map((a) => a.courseId));
       setAssignedCoursesCount(uniqueCourses.size);
 
-      // Total students in system
-      setTotalStudentsCount(allStudents.length);
+      // Count unique assigned students
+      const uniqueStudents = new Set(students.map((s) => s.studentId));
+      setAssignedStudentsCount(uniqueStudents.size);
     } catch (error) {
-      console.error("Error loading exams:", error);
+      console.error("Error loading dashboard data:", error);
     } finally {
       setLoading(false);
     }
@@ -57,7 +62,9 @@ export default function TeacherDashboard() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-3xl font-bold text-gray-900">Teacher Dashboard</h1>
-            <p className="text-gray-600 mt-2">Manage your academic courses, exams, and proctored sessions</p>
+            <p className="text-gray-600 mt-2">
+              Manage your assigned courses, students, exams, and proctored sessions
+            </p>
           </div>
           <Link href="/dashboard/teacher/exams/create">
             <Button>
@@ -70,14 +77,14 @@ export default function TeacherDashboard() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <StatCard
             icon={<BookOpen className="h-6 w-6 text-emerald-600" />}
-            title="My Courses"
-            value={assignedCoursesCount || 11}
+            title="Assigned Courses"
+            value={assignedCoursesCount}
             bgColor="bg-emerald-50"
           />
           <StatCard
             icon={<Users className="h-6 w-6 text-purple-600" />}
-            title="Total Students"
-            value={totalStudentsCount}
+            title="Assigned Students"
+            value={assignedStudentsCount}
             bgColor="bg-purple-50"
           />
           <StatCard
@@ -148,7 +155,7 @@ export default function TeacherDashboard() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-<Link href="/dashboard/teacher/notices">
+                <Link href="/dashboard/teacher/notices">
                   <Button variant="outline" className="w-full justify-start text-purple-700 bg-purple-50/50 border-purple-200 hover:bg-purple-100">
                     <Megaphone className="h-4 w-4 mr-2" />
                     Manage Notices
@@ -166,7 +173,7 @@ export default function TeacherDashboard() {
                     Create New Exam
                   </Button>
                 </Link>
-<Link href="/dashboard/teacher/monitoring">
+                <Link href="/dashboard/teacher/monitoring">
                   <Button variant="outline" className="w-full justify-start">
                     <Shield className="h-4 w-4 mr-2" />
                     Monitor Active Sessions
@@ -181,7 +188,7 @@ export default function TeacherDashboard() {
                 <Link href="/dashboard/teacher/students">
                   <Button variant="outline" className="w-full justify-start">
                     <Users className="h-4 w-4 mr-2" />
-                    View Students
+                    View My Students
                   </Button>
                 </Link>
               </div>
@@ -196,21 +203,23 @@ export default function TeacherDashboard() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Proctoring</span>
-                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">
-                    Active
-                  </span>
+                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">Active</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Plagiarism Detection</span>
-                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">
-                    Active
-                  </span>
+                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">Active</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Face Detection</span>
-                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">
-                    Active
-                  </span>
+                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">Active</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-600">Assigned Courses</span>
+                  <span className="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-700">{assignedCoursesCount}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-600">Assigned Students</span>
+                  <span className="text-xs px-2 py-1 rounded-full bg-purple-100 text-purple-700">{assignedStudentsCount}</span>
                 </div>
               </div>
             </CardContent>
@@ -246,3 +255,4 @@ function StatCard({
     </Card>
   );
 }
+
