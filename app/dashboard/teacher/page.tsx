@@ -5,7 +5,7 @@ import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
-import { FileText, Users, Shield, Plus, TrendingUp, Camera, BookOpen } from "lucide-react";
+import { FileText, Users, Shield, Plus, TrendingUp, Camera, BookOpen, Megaphone } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher, getSessionsByExam } from "@/lib/firebase/exams";
 import { getTeacherAssignments } from "@/lib/academics/catalog";
@@ -148,6 +148,12 @@ export default function TeacherDashboard() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
+<Link href="/dashboard/teacher/notices">
+                  <Button variant="outline" className="w-full justify-start text-purple-700 bg-purple-50/50 border-purple-200 hover:bg-purple-100">
+                    <Megaphone className="h-4 w-4 mr-2" />
+                    Manage Notices
+                  </Button>
+                </Link>
                 <Link href="/dashboard/teacher/courses">
                   <Button variant="outline" className="w-full justify-start text-emerald-700 bg-emerald-50/50 border-emerald-200 hover:bg-emerald-100">
                     <BookOpen className="h-4 w-4 mr-2" />

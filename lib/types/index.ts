@@ -287,3 +287,71 @@ export interface ResultFilters {
   examName?: string;
   searchQuery?: string;
 }
+
+// ============ Notice Module ============
+
+export type NoticeTargetType = "all" | "course" | "batch" | "section" | "semester" | "individual";
+
+export type NoticeStatus = "draft" | "published";
+
+export interface Notice {
+  id: string;
+  title: string;
+  description: string;
+  // Optional attachment
+  attachmentUrl?: string;
+  attachmentName?: string;
+  attachmentType?: string;
+  // Optional external link
+  externalLink?: string;
+  // Teacher metadata
+  teacherId: string;
+  teacherName: string;
+  // Status
+  status: NoticeStatus;
+  // Targeting
+  targetType: NoticeTargetType;
+  targetCourseId?: string;
+  targetCourseName?: string;
+  targetBatch?: string;
+  targetSection?: string;
+  targetSemester?: string;
+  targetStudentIds?: string[];
+  // Timestamps
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+  publishedAt?: FirestoreDate;
+}
+
+export interface NoticeRead {
+  id: string;
+  noticeId: string;
+  studentId: string;
+  readAt: FirestoreDate;
+}
+
+export type NotificationType = "notice" | "result" | "warning" | "exam" | "general";
+
+export interface Notification {
+  id: string;
+  userId: string;
+  type: NotificationType;
+  title: string;
+  message: string;
+  // Link to related entity
+  noticeId?: string;
+  resultId?: string;
+  examId?: string;
+  warningId?: string;
+  // Read status
+  read: boolean;
+  createdAt: FirestoreDate;
+}
+
+export interface NoticeFilters {
+  searchQuery?: string;
+  status?: NoticeStatus;
+  targetType?: NoticeTargetType;
+  dateFrom?: string;
+  dateTo?: string;
+}
