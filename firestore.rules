@@ -365,5 +365,31 @@ service cloud.firestore {
       allow update: if isAdmin();
       allow delete: if isAdmin();
     }
+
+    // ============ Teacher Assignment Module ============
+
+    // teacher_assignments collection
+    match /teacher_assignments/{assignmentId} {
+      // Teachers can read their own assignments
+      allow read: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      // Admins can read all assignments
+      allow read: if isAdmin();
+      // Only admins can create/update/delete assignments
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // teacher_student_mapping collection
+    match /teacher_student_mapping/{mappingId} {
+      // Teachers can read mappings where they are the teacher
+      allow read: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      // Admins can read all mappings
+      allow read: if isAdmin();
+      // Only admins can create/update/delete mappings
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
   }
 }

@@ -384,3 +384,73 @@ export interface NoticeFilters {
   dateFrom?: string;
   dateTo?: string;
 }
+
+// ============ Teacher Assignment Module ============
+
+/**
+ * A teacher assignment groups a Course + Batch + Section (optionally individual students)
+ * and assigns them to one teacher.
+ */
+export interface TeacherAssignment {
+  id: string;
+  teacherId: string;
+  teacherName?: string;
+  courseId: string;
+  courseName?: string;
+  courseCode?: string;
+  batchId: string;
+  batchName?: string;
+  sectionId: string;
+  sectionName?: string;
+  // Optional individual student override. When empty, ALL students in the
+  // course+batch+section group are assigned. When present, only these students
+  // are assigned (must be a subset of the group).
+  studentIds?: string[];
+  createdByAdmin?: string;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
+/**
+ * Denormalized student mapping derived from a TeacherAssignment.
+ * One record per teacher↔student link so teacher queries are fast and revocable.
+ */
+export interface TeacherStudentMapping {
+  id: string;
+  teacherId: string;
+  studentId: string;
+  studentName?: string;
+  studentCode?: string;
+  courseId: string;
+  courseName?: string;
+  batchId: string;
+  batchName?: string;
+  sectionId: string;
+  sectionName?: string;
+  assignmentId: string;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
+export type AssignmentAction = "created" | "updated" | "removed";
+
+/**
+ * Immutable audit trail entry for every teacher assignment change.
+ */
+export interface AssignmentHistory {
+  id: string;
+  assignmentId?: string; // the affected assignment (may be deleted on remove)
+  teacherId: string;
+  teacherName?: string;
+  courseId: string;
+  courseName?: string;
+  batchName?: string;
+  sectionName?: string;
+  action: AssignmentAction;
+  studentIds?: string[];
+  studentCount?: number;
+  changedByAdminId?: string;
+  changedByAdminName?: string;
+  notes?: string;
+  timestamp: FirestoreDate;
+}

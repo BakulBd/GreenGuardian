@@ -20,8 +20,9 @@ import {
   BookOpen,
   Award,
   Bell,
-  Megaphone,
+Megaphone,
   GraduationCap,
+  UserCog,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
@@ -132,6 +133,7 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
     { icon: GraduationCap, label: "Courses", href: "/dashboard/admin/courses" },
     { icon: UserCheck, label: "Teachers", href: "/dashboard/admin/teachers" },
     { icon: Users, label: "Students", href: "/dashboard/admin/students" },
+    { icon: UserCog, label: "Assignments", href: "/dashboard/admin/assignments" },
     { icon: FileText, label: "Exams", href: "/dashboard/admin/exams" },
     { icon: Settings, label: "Settings", href: "/dashboard/admin/settings" },
     { icon: User, label: "My Profile", href: "/profile" },
