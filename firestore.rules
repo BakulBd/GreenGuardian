@@ -229,6 +229,38 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow write: if isAdmin();
     }
+
+    // ============ Course / Batch / Section Management ============
+
+    // Courses collection
+    match /courses/{courseId} {
+      // Any authenticated user can read courses (needed for forms across teacher/student panels)
+      allow read: if isAuthenticated();
+      // Only admins can create/update/delete courses
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Batches collection
+    match /batches/{batchId} {
+      // Any authenticated user can read batches
+      allow read: if isAuthenticated();
+      // Only admins can create/update/delete batches
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Sections collection
+    match /sections/{sectionId} {
+      // Any authenticated user can read sections
+      allow read: if isAuthenticated();
+      // Only admins can create/update/delete sections
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
     
     // Teacher Applications collection (optional)
     match /teacherApplications/{applicationId} {
