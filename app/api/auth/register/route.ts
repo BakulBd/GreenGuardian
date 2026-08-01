@@ -1,0 +1,219 @@
+import { NextRequest, NextResponse } from "next/server";
+import {
+  generateOtp,
+  hashOtp,
+  encryptSecret,
+  generateVerificationToken,
+  OTP_TTL_MS,
+  OTP_RESEND_COOLDOWN_MS,
+  OTP_MAX_SENDS,
+} from "@/lib/otp";
+import { sendEmail } from "@/lib/email/send";
+import { renderOtpEmail } from "@/lib/email/templates/otp";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isEmailRegistered, hasCompleteProfile } from "@/lib/firebase/user-lookup";
+import { getPending, upsertPending, deletePending } from "@/lib/registration-store";
+
+export const dynamic = "force-dynamic";
+
+interface RegisterBody {
+  name?: string;
+  email?: string;
+  password?: string;
+  role?: string;
+}
+
+export async function POST(req: NextRequest) {
+  // 1. IP-based rate limit to prevent spam/abuse.
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`register:${ip}`, 10, 10 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    return NextResponse.json(
+      {
+        error: "Too many registration attempts from this IP. Please try again later.",
+      },
+      { status: 429 }
+    );
+  }
+
+  let body: RegisterBody;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+
+  const name = (body.name || "").trim();
+  const email = (body.email || "").trim().toLowerCase();
+  const password = body.password || "";
+  const role = body.role;
+
+  // 2. Validate input.
+  if (!name || name.length < 2 || name.length > 100) {
+    return NextResponse.json(
+      { error: "Please provide a valid full name (2-100 characters)." },
+      { status: 400 }
+    );
+  }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return NextResponse.json(
+      { error: "Please provide a valid email address." },
+      { status: 400 }
+    );
+  }
+  if (!password || password.length < 6) {
+    return NextResponse.json(
+      { error: "Password must be at least 6 characters." },
+      { status: 400 }
+    );
+  }
+  if (password.length > 72) {
+    return NextResponse.json(
+      { error: "Password must be 72 characters or fewer." },
+      { status: 400 }
+    );
+  }
+  if (role !== "student" && role !== "teacher") {
+    return NextResponse.json(
+      { error: "Role must be either 'student' or 'teacher'." },
+      { status: 400 }
+    );
+  }
+
+  // 3. Check if the email is already registered. Uses the Admin SDK when
+  // configured, otherwise falls back to the Firebase Auth REST endpoint
+  // (public API key only, no service account required).
+  try {
+    const alreadyRegistered = await isEmailRegistered(email);
+    if (alreadyRegistered) {
+      // Only block if the account is *fully* registered (has a Firestore
+      // profile). An Auth user whose profile write failed earlier (orphaned
+      // account) can be re-registered — the verify step will complete it.
+      const complete = await hasCompleteProfile(email);
+      if (complete) {
+        return NextResponse.json(
+          { error: "An account with this email already exists. Please login instead." },
+          { status: 409 }
+        );
+      }
+    }
+  } catch (err: any) {
+    console.error("Error checking existing user:", err);
+    return NextResponse.json(
+      { error: "Something went wrong. Please try again." },
+      { status: 500 }
+    );
+  }
+
+  // 4. Check existing pending registration for this email (60s cooldown).
+  const existingPending = await getPending(email);
+  if (existingPending) {
+    const lastSentAt = existingPending.lastSentAt || 0;
+    const remaining = OTP_RESEND_COOLDOWN_MS - (Date.now() - lastSentAt);
+    if (remaining > 0) {
+      return NextResponse.json(
+        {
+          error: `A verification code was just sent. Please wait ${Math.ceil(
+            remaining / 1000
+          )} seconds before requesting another.`,
+          retryAfterSeconds: Math.ceil(remaining / 1000),
+        },
+        { status: 429 }
+      );
+    }
+  }
+
+  // 5. Check per-email total send cap.
+  if ((existingPending?.sendCount || 0) >= OTP_MAX_SENDS) {
+    return NextResponse.json(
+      {
+        error: "Too many verification codes sent. Please try again later.",
+      },
+      { status: 429 }
+    );
+  }
+
+  // 6. Generate OTP + store pending registration (hashed OTP, encrypted password).
+  const otp = generateOtp();
+  const otpHash = hashOtp(otp);
+  const token = generateVerificationToken();
+  const expiresAt = Date.now() + OTP_TTL_MS;
+
+  let encryptedPassword: string;
+  try {
+    encryptedPassword = encryptSecret(password);
+  } catch (err: any) {
+    console.error("Encryption key not configured:", err);
+    return NextResponse.json(
+      {
+        error: "Registration service is misconfigured (encryption key missing). Please contact support.",
+      },
+      { status: 500 }
+    );
+  }
+
+  try {
+    await upsertPending({
+      email,
+      name,
+      password: encryptedPassword,
+      role,
+      otpHash,
+      verificationToken: token,
+      expiresAt,
+      sendCount: (existingPending?.sendCount || 0) + 1,
+      attempts: 0,
+      lastSentAt: Date.now(),
+      createdAt: existingPending?.createdAt || Date.now(),
+      updatedAt: Date.now(),
+    });
+  } catch (err: any) {
+    console.error("[register] Failed to store pending registration:", err?.message || err);
+    return NextResponse.json(
+      {
+        error: "We couldn't start your registration. Please try again.",
+        detail: process.env.NODE_ENV === "development" ? err?.message : undefined,
+      },
+      { status: 500 }
+    );
+  }
+
+  // 7. Send the OTP email.
+  let mailResult: Awaited<ReturnType<typeof sendEmail>>;
+  try {
+    mailResult = await sendEmail({
+      to: email,
+      subject: "Your GreenGuardian Verification Code",
+      html: renderOtpEmail({
+        name,
+        otp,
+        expiryMinutes: OTP_TTL_MS / 60000,
+      }),
+    });
+  } catch (err: any) {
+    console.error("[register] sendEmail threw:", err?.message || err);
+    await deletePending(email).catch(() => {});
+    return NextResponse.json(
+      { error: "We couldn't send the verification email. Please try again." },
+      { status: 500 }
+    );
+  }
+
+  if (!mailResult.ok) {
+    // Clean up the pending record so the user can retry cleanly.
+    await deletePending(email).catch(() => {});
+    return NextResponse.json(
+      { error: "We couldn't send the verification email. Please try again." },
+      { status: 500 }
+    );
+  }
+
+  return NextResponse.json({
+    success: true,
+    verificationToken: token,
+    expiresInSeconds: OTP_TTL_MS / 1000,
+    resendCooldownSeconds: OTP_RESEND_COOLDOWN_MS / 1000,
+    emailMode: mailResult.mode,
+  });
+}
+

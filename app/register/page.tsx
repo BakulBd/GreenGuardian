@@ -10,7 +10,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
-import { registerUser } from "@/lib/firebase/auth";
 import { UserRole } from "@/lib/types";
 
 export default function RegisterPage() {
@@ -51,37 +50,62 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      const { user, error } = await registerUser(
-        formData.email,
-        formData.password,
-        formData.name,
-        formData.role
-      );
+      // Call the server-side registration API. The account is NOT created here —
+      // the user must verify their email OTP first.
+      const res = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: formData.name,
+          email: formData.email,
+          password: formData.password,
+          role: formData.role,
+        }),
+      });
 
-      if (error) {
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        // Surface the exact server error. In development, include the config
+        // detail so a missing-credential failure is instantly understandable.
+        const detail = data.detail;
+        const message = data.error || "Something went wrong";
+        console.error("[register] API error:", res.status, message, detail || "");
         toast({
           title: "Registration Failed",
-          description: error,
+          description:
+            detail && process.env.NODE_ENV === "development"
+              ? `${message} (${detail})`
+              : message,
           variant: "destructive",
         });
         setLoading(false);
         return;
       }
 
+      // Save the registration session so the verify-email page can complete it.
+      const session = {
+        email: formData.email,
+        verificationToken: data.verificationToken,
+        role: formData.role,
+        name: formData.name,
+        expiresAt: Date.now() + (data.expiresInSeconds || 600) * 1000,
+        resendCooldown: data.resendCooldownSeconds || 60,
+        sendCount: 1,
+      };
+      try {
+        sessionStorage.setItem("greenguardian_registration_session", JSON.stringify(session));
+      } catch (e) {
+        console.warn("Could not store registration session:", e);
+      }
+
       toast({
-        title: "Registration Successful",
-        description:
-          formData.role === "teacher"
-            ? "Your account is pending approval. You'll receive access once an admin approves your request."
-            : "Welcome to GreenGuardian!",
+        title: "Verification Code Sent",
+        description: `We sent a 6-digit code to ${formData.email}. Please verify to complete registration.`,
       });
 
-      // Redirect based on role
-      if (formData.role === "student") {
-        router.push("/exam");
-      } else if (formData.role === "teacher") {
-        router.push("/pending-approval");
-      }
+      // Redirect to the email verification page.
+      router.push(`/verify-email?email=${encodeURIComponent(formData.email)}`);
     } catch (error: any) {
       toast({
         title: "Error",
@@ -306,10 +330,10 @@ export default function RegisterPage() {
                   {loading ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Creating account...
+                      Sending verification code...
                     </>
                   ) : (
-                    "Create Account"
+                    "Continue"
                   )}
                 </Button>
               </form>

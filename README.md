@@ -399,21 +399,33 @@ npm start
 
 ## 🔐 Authentication Flow
 
+### Shared registration flow (Email OTP verification)
+1. Register with name, email, password, and role
+2. A 6-digit OTP is emailed to the address (expires in **10 minutes**, single-use)
+3. Enter the OTP on `/verify-email`
+4. Only **after** successful verification is the account created server-side (via Firebase Admin SDK)
+5. Resend button available with a **60-second cooldown** (each resend invalidates the previous OTP)
+6. Invalid/expired/used OTPs show a clear error and cannot be reused
+
 ### Student Registration
 1. Register with email, password, name
 2. Select "Student" role
-3. Immediate access to exam list
+3. Verify email via OTP
+4. Account created with `approved: true`
+5. Redirected to the student dashboard
 
-### Teacher Registration
+### Teacher Registration (Admin approval preserved)
 1. Register with email, password, name
 2. Select "Teacher" role
-3. Account created with `approved: false`
-4. Redirected to `/pending-approval`
-5. Admin must approve in `/dashboard/admin/teachers`
-6. Once approved, teacher gets full dashboard access
+3. Verify email via OTP
+4. Account created with `approved: false`
+5. Redirected to `/pending-approval`
+6. Admin must approve in `/dashboard/admin/teachers`
+7. Once approved, teacher gets full dashboard access
+8. Login is blocked until approval completes — the existing approval workflow is unchanged
 
 ### Admin Access
-1. Manually created in Firestore
+1. Manually created in Firestore (or via `scripts/bootstrap-admin.mjs`)
 2. Full system access upon login
 
 ## 📊 Data Structure
@@ -598,6 +610,22 @@ To test the application:
 - Verify API keys in `.env.local`
 - Check Firestore security rules
 - Ensure Firebase project is properly configured
+
+### "Registration Failed" after clicking Create Account
+The new email-verification flow requires **server-side Firebase Admin SDK credentials**. Without them, the registration API cannot look up existing users or create the account after OTP verification. This failure used to surface as a vague "Registration failed" — it now returns the exact reason.
+
+Diagnose quickly with: `GET /api/auth/config-check`
+
+Fix by providing Admin SDK credentials in one of these ways:
+1. **`FIREBASE_SERVICE_ACCOUNT`** env var — the full service-account JSON as a single line
+   (Firebase Console → Project Settings → Service accounts → Generate new private key)
+2. **`serviceAccountKey.json`** in the project root (already gitignored)
+3. **`GOOGLE_APPLICATION_CREDENTIALS`** env var pointing to the JSON file
+4. **Local emulator only:** run `npm run emulators` and set `USE_FIREBASE_EMULATOR=true`
+
+Also make sure these are set in `.env.local`:
+- `REGISTRATION_ENC_KEY` — a strong random key (generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`)
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` — for real email delivery (without SMTP the OTP is printed to the server console, which is fine for local testing)
 
 ### Build errors
 - Clear `.next` folder: `rm -rf .next`
