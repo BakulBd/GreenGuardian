@@ -11,6 +11,7 @@ export interface User {
   role: UserRole;
   approved: boolean;
   rejected?: boolean;
+  emailVerified?: boolean;
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
   avatarUrl?: string;

@@ -60,6 +60,14 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
     
+    // Pending Registrations collection (email-verification flow)
+    // This collection is written ONLY by the Firebase Admin SDK (server-side
+    // API routes) using server credentials, which bypass security rules.
+    // Clients must never read or write these sensitive records.
+    match /pendingRegistrations/{registrationId} {
+      allow read, write: if false;
+    }
+    
     // Exams collection
     match /exams/{examId} {
       // Students can read published/active exams

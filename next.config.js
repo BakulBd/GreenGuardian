@@ -21,6 +21,8 @@ const nextConfig = {
     }
     return config;
   },
+  // Keep node-only packages external to the server bundle (route handlers).
+  serverExternalPackages: ["nodemailer", "firebase-admin"],
 };
 
 module.exports = nextConfig;

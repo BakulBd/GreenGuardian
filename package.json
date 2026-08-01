@@ -13,7 +13,8 @@
     "firebase:deploy:hosting": "firebase deploy --only hosting",
     "firebase:deploy:all": "firebase deploy --only firestore:rules,firestore:indexes,storage,hosting",
     "emulators": "firebase emulators:start --only firestore,auth,storage",
-    "bootstrap:admin": "node scripts/bootstrap-admin.mjs",
+    "bootstrap:admin":"node scripts/bootstrap-admin.mjs",
+    "setup:email":"node scripts/setup-email-verification.mjs",
     "seed:defaults": "node scripts/seed-defaults.mjs",
     "seed:all": "node scripts/seed-all.mjs"
   },
@@ -51,6 +52,7 @@
     "lucide-react": "^0.379.0",
     "natural": "^6.10.0",
     "next": "^16.2.12",
+    "nodemailer": "^9.0.3",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-hook-form": "^7.51.0",
@@ -64,6 +66,7 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@types/nodemailer": "^8.0.1",
     "@types/string-similarity": "^4.0.2",
     "autoprefixer": "^10.4.0",
     "eslint": "^8.57.0",
