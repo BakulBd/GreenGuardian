@@ -38,6 +38,7 @@ import {
 } from "@/lib/utils/helpers";
 import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
 import { performSimilarityCheck } from "@/lib/utils/similarity";
+import { startStudentVideoBroadcast, startLocalLiveVideoBroadcaster } from "@/lib/services/webrtcSignaling";
 import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
@@ -269,6 +270,28 @@ export default function ExamClient() {
     
     return () => clearTimeout(timeoutId);
   }, [examStep, cameraStream, safePlayVideo]);
+
+  // Start WebRTC live video broadcast for Zoom-style teacher monitoring
+  useEffect(() => {
+    if (!examStarted || !sessionId || !cameraStream) return;
+    let cleanupFunc: (() => void) | null = null;
+    startStudentVideoBroadcast(sessionId, cameraStream).then((cleanup) => {
+      cleanupFunc = cleanup;
+    });
+
+    return () => {
+      if (cleanupFunc) cleanupFunc();
+    };
+  }, [examStarted, sessionId, cameraStream]);
+
+  // Start local BroadcastChannel live video stream for zero-latency local PC monitoring
+  useEffect(() => {
+    if (!examStarted || !sessionId || !videoRef.current) return;
+    const stopBroadcaster = startLocalLiveVideoBroadcaster(sessionId, videoRef.current);
+    return () => {
+      stopBroadcaster();
+    };
+  }, [examStarted, sessionId]);
 
   // Keep camera stream alive during exam with periodic checks and auto-reconnect
   useEffect(() => {
@@ -832,12 +855,12 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
           }
         }, DETECTION_CONFIG.DETECTION_INTERVAL_MS);
         
-        // Snapshot interval - send snapshot to Firebase every 30 seconds for teacher live view
+        // Snapshot interval - send live snapshot to Firebase every 5 seconds for Spark free plan efficiency
         if (proctoringAvailable) {
           snapshotIntervalRef.current = setInterval(async () => {
             if (videoRef.current && sessionId && user && exam) {
               try {
-                const thumbnail = proctoringModule.captureVideoFrame(videoRef.current, 160, 120, 0.6);
+                const thumbnail = proctoringModule.captureVideoFrame(videoRef.current, 240, 180, 0.5);
                 
                 if (thumbnail) {
                   await proctoringModule.sendProctoringSnapshot({
@@ -859,10 +882,10 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
                   });
                 }
               } catch (error) {
-                console.error("Failed to send snapshot:", error);
+                console.error("Failed to send proctoring snapshot:", error);
               }
             }
-          }, 5000); // Every 5 seconds for near-live teacher monitoring
+          }, 5000);
         }
       } catch (error) {
         console.error("Failed to initialize detection modules:", error);
@@ -1063,14 +1086,21 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
       if (exam.examMode === "online" || !exam.examMode) {
         answerData.answers = answers;
       } else {
-        // For upload mode, include answer files and run OCR analysis
+        // For upload mode, include answer files and mark background OCR status
         answerData.answerFiles = answerFiles;
-        if (answerFiles.length > 0) {
+        answerData.ocrStatus = "pending_background";
+      }
+
+      // Save answer document immediately so student submission is never delayed
+      const addedDoc = await retryAsync(() => addDoc(collection(db, "answers"), answerData), "addDoc(answers)");
+
+      // Non-blocking background process for OCR & similarity checking
+      if (addedDoc?.id && exam.examMode === "upload" && answerFiles.length > 0) {
+        (async () => {
           try {
-            // Process ALL uploaded files via Gemini 2.5 Flash
             const analysis = await analyzeSubmittedAnswer(answerFiles);
             const ocrErrors = analysis.errors?.filter(Boolean) ?? [];
-            answerData.ocrAnalysis = {
+            const ocrAnalysisData = {
               extractedText: analysis.extractedText,
               wordCount: analysis.wordCount,
               modelUsed: analysis.modelUsed || "gemini-2.5-flash",
@@ -1079,25 +1109,31 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
               analyzedAt: new Date().toISOString(),
               ...(ocrErrors.length > 0 ? { errors: ocrErrors } : {}),
             };
-            answerData.ocrText = analysis.extractedText;
-          } catch (ocrError) {
-            console.error("OCR analysis error (non-blocking):", ocrError);
-            answerData.ocrAnalysis = {
-              error: "Analysis failed - will be processed later",
-            };
+
+            await updateDoc(doc(db, "answers", addedDoc.id), {
+              ocrAnalysis: ocrAnalysisData,
+              ocrText: analysis.extractedText,
+              ocrStatus: "completed",
+            });
+
+            if (analysis.extractedText && analysis.extractedText.trim().length > 20) {
+              await performSimilarityCheck(addedDoc.id, exam.id, user.id, analysis.extractedText);
+            }
+          } catch (bgErr: any) {
+            console.error("Background OCR processing error:", bgErr);
+            await updateDoc(doc(db, "answers", addedDoc.id), {
+              ocrStatus: "failed",
+              "ocrAnalysis.error": bgErr?.message || "Background analysis failed - can be re-run by teacher",
+            }).catch(() => {});
           }
+        })();
+      } else if (addedDoc?.id && typeof answers === "object") {
+        const textForSimCheck = Object.values(answers).join(" ");
+        if (textForSimCheck.trim().length > 20) {
+          performSimilarityCheck(addedDoc.id, exam.id, user.id, textForSimCheck).catch((err) => {
+            console.warn("Background similarity check error:", err);
+          });
         }
-      }
-
-      // Retry Firestore writes for reliability
-      const addedDoc = await retryAsync(() => addDoc(collection(db, "answers"), answerData), "addDoc(answers)");
-
-      // Asynchronously trigger cross-student similarity check & AI pattern match
-      const textForSimCheck = answerData.ocrText || (typeof answers === "object" ? Object.values(answers).join(" ") : "");
-      if (addedDoc?.id && textForSimCheck.trim().length > 20) {
-        performSimilarityCheck(addedDoc.id, exam.id, user.id, textForSimCheck).catch((err) => {
-          console.warn("Background similarity check error:", err);
-        });
       }
       await retryAsync(() => updateDoc(doc(db, "examSessions", sessionId), {
         status: sessionStatus,

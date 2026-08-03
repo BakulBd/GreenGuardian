@@ -21,7 +21,7 @@ service cloud.firestore {
     }
     
     function isTeacher() {
-      return isAuthenticated() && getUserData().role == 'teacher' && getUserData().approved == true;
+      return isAuthenticated() && getUserData().role == 'teacher';
     }
     
     function isStudent() {
@@ -34,11 +34,8 @@ service cloud.firestore {
     
     // Users collection
     match /users/{userId} {
-      // Anyone authenticated can read their own user document
-      allow read: if isUser(userId);
-      
-      // Admins can read all users
-      allow read: if isAdmin();
+      // Authenticated users (students, teachers, admins) can read user profiles
+      allow read: if isAuthenticated();
       
       // Users can only create their own document during registration
       allow create: if isUser(userId) && 
@@ -112,13 +109,8 @@ service cloud.firestore {
       // Students can read their own sessions
       allow read: if isUser(resource.data.studentId);
       
-      // Teachers can read sessions for their exams
-      allow read: if isTeacher() && 
-                     exists(/databases/$(database)/documents/exams/$(resource.data.examId)) &&
-                     get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid;
-      
-      // Admins can read all sessions
-      allow read: if isAdmin();
+      // Teachers and admins can read sessions for monitoring and evaluation
+      allow read: if isTeacherOrAdmin();
       
       // Students can create their own sessions
       allow create: if isAuthenticated() &&
@@ -131,105 +123,59 @@ service cloud.firestore {
       // Teachers and admins can update sessions for monitoring
       allow update: if isTeacherOrAdmin();
     }
-    
+
     // Answers collection
     match /answers/{answerId} {
       // Students can read their own answers
       allow read: if isUser(resource.data.studentId);
       
-      // Teachers can read answers for their exams
-      allow read: if isTeacher() && 
-                     exists(/databases/$(database)/documents/examSessions/$(resource.data.examSessionId)) &&
-                     get(/databases/$(database)/documents/examSessions/$(resource.data.examSessionId)).data.studentId != request.auth.uid;
-      
-      // Admins can read all answers
-      allow read: if isAdmin();
+      // Teachers and admins can read answers
+      allow read: if isTeacherOrAdmin();
       
       // Students can create/update their own answers
       allow create, update: if isAuthenticated() &&
                request.resource.data.studentId == request.auth.uid &&
                exists(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)) &&
                get(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)).data.studentId == request.auth.uid;
+
+      // Teachers and admins can update answers (for grading, OCR analysis & similarity reports)
+      allow update: if isTeacherOrAdmin();
+    }
+
+    // Similarity Reports collection
+    match /similarityReports/{reportId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+      allow delete: if isTeacherOrAdmin();
+    }
+
+    // Live Video Signaling collection (WebRTC P2P for Zoom-style monitoring)
+    match /liveVideoSignaling/{signalingId}/{allPaths=**} {
+      allow read, write: if isAuthenticated();
     }
     
     // Exam Logs collection
     match /examLogs/{logId} {
-      // Students can read their own logs
-      allow read: if isUser(resource.data.studentId);
-      
-      // Teachers can read logs for their exams
-      allow read: if isTeacher() && 
-                     exists(/databases/$(database)/documents/examSessions/$(resource.data.examSessionId));
-      
-      // Admins can read all logs
-      allow read: if isAdmin();
-      
-      // Anyone authenticated can create logs (for proctoring)
-      allow create: if isAuthenticated() && 
-                       request.resource.data.studentId == request.auth.uid;
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
     }
 
     // Proctoring Events collection
     match /proctoringEvents/{eventId} {
-      // Students can read their own events
-      allow read: if isUser(resource.data.studentId);
-
-      // Teachers can read events for their exams (via examId or sessionId)
-      allow read: if isTeacher() && (
-        (resource.data.examId != null && exists(/databases/$(database)/documents/exams/$(resource.data.examId)) && get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid) ||
-        (resource.data.sessionId != null && exists(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)) && exists(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)) && get(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)).data.teacherId == request.auth.uid)
-      );
-
-      // Admins can read all events
-      allow read: if isAdmin();
-
-      // Students can create their own events during a session
-      allow create: if isAuthenticated() &&
-                       request.resource.data.studentId == request.auth.uid &&
-                       exists(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)) &&
-                       get(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)).data.studentId == request.auth.uid;
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
     }
 
     // Proctoring Snapshots collection
     match /proctoringSnapshots/{snapshotId} {
-      // Students can read their own snapshots
-      allow read: if isUser(resource.data.studentId);
-
-      // Teachers can read snapshots for their exams (via examId or sessionId)
-      allow read: if isTeacher() && (
-        (resource.data.examId != null && exists(/databases/$(database)/documents/exams/$(resource.data.examId)) && get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid) ||
-        (resource.data.sessionId != null && exists(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)) && exists(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)) && get(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)).data.teacherId == request.auth.uid)
-      );
-
-      // Admins can read all snapshots
-      allow read: if isAdmin();
-
-      // Students can create their own snapshots during a session
-      allow create: if isAuthenticated() &&
-                       request.resource.data.studentId == request.auth.uid &&
-                       exists(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)) &&
-                       get(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)).data.studentId == request.auth.uid;
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
     }
     
     // Warning Screenshots collection
     match /warningScreenshots/{screenshotId} {
-      // Students can read their own warning screenshots
-      allow read: if isUser(resource.data.studentId);
-
-      // Teachers can read warning screenshots for their exams
-      allow read: if isTeacher() && (
-        (resource.data.examId != null && exists(/databases/$(database)/documents/exams/$(resource.data.examId)) && get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.teacherId == request.auth.uid) ||
-        (resource.data.sessionId != null && exists(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)) && exists(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)) && get(/databases/$(database)/documents/exams/$(get(/databases/$(database)/documents/examSessions/$(resource.data.sessionId)).data.examId)).data.teacherId == request.auth.uid)
-      );
-
-      // Admins can read all warning screenshots
-      allow read: if isAdmin();
-
-      // Students can create their own warning screenshots during a session
-      allow create: if isAuthenticated() &&
-                       request.resource.data.studentId == request.auth.uid &&
-                       exists(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)) &&
-                       get(/databases/$(database)/documents/examSessions/$(request.resource.data.sessionId)).data.studentId == request.auth.uid;
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
     }
 
     // Settings collection (admin only)

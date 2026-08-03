@@ -40,37 +40,28 @@ service firebase.storage {
     }
     
     // Exam answer uploads
-    match /answers/{examId}/{sessionId}/{fileName} {
+    match /answers/{allPaths=**} {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isValidFileType() && isValidSize();
     }
     
-    // Proctoring snapshots
-    match /proctoring/{sessionId}/{fileName} {
+    // Proctoring snapshots & screenshots
+    match /proctoring/{allPaths=**} {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isValidFileType() && isValidSize();
     }
     
-    // Warning screenshots (permanent, one per warning, never overwritten)
-    match /warningScreenshots/{sessionId}/{fileName} {
+    // Warning screenshots
+    match /warningScreenshots/{allPaths=**} {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isImage() && isValidSize();
-      allow delete: if false; // Never allow deletion - screenshots are permanent evidence
     }
     
-    // Exam materials (teacher uploads)
-    match /exams/{examId}/materials/{fileName} {
+    // Exam papers and materials
+    match /exams/{allPaths=**} {
       allow read: if isAuthenticated();
-      // Only teachers can upload exam materials
       allow write: if isAuthenticated() && isValidFileType() && isValidSize();
-    }
-    
-    // Teacher exam paper uploads
-    match /exams/{teacherId}/papers/{fileName} {
-      allow read: if isAuthenticated();
-      // Teachers can upload exam papers
-      allow write: if isAuthenticated() && isUser(teacherId) && isValidFileType() && isValidSize();
-      allow delete: if isUser(teacherId);
+      allow delete: if isAuthenticated();
     }
     
     // General uploads

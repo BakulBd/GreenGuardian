@@ -37,31 +37,31 @@ interface EyeGazeResult {
 
 // Detection configuration - Optimized for practical real-world usage
 export const DETECTION_CONFIG = {
-  // Timing configuration - Longer intervals reduce CPU usage and false positives
-  DETECTION_INTERVAL_MS: 8000,          // 8 seconds between checks (very relaxed)
-  DETECTION_COOLDOWN_MS: 30000,         // 30 seconds min between same warning type
+  // Timing configuration - 3 seconds between detection cycles for responsive, realistic proctoring
+  DETECTION_INTERVAL_MS: 3000,          // 3 seconds per check cycle
+  DETECTION_COOLDOWN_MS: 15000,         // 15 seconds min between same warning type
   
-  // Face position thresholds - More lenient to allow natural movement
-  LOOKING_AWAY_THRESHOLD: 0.40,         // 40% from center (allow head movement)
-  LOOKING_AWAY_MOBILE_THRESHOLD: 0.50,  // 50% for mobile (very lenient for small screens)
+  // Face position thresholds - Lenient to allow natural movement and writing on paper
+  LOOKING_AWAY_THRESHOLD: 0.45,         // 45% from center
+  LOOKING_AWAY_MOBILE_THRESHOLD: 0.55,  // 55% for mobile
   
-  // Face size thresholds (percentage of video frame) - Practical ranges
-  MIN_FACE_SIZE: 1.5,                   // Face too small (allow more distance)
-  MAX_FACE_SIZE: 80,                    // Face too close (more forgiving)
-  IDEAL_MIN_FACE_SIZE: 4,               // Ideal minimum
-  IDEAL_MAX_FACE_SIZE: 55,              // Ideal maximum
+  // Face size thresholds (percentage of video frame) - Allow sitting far back from screen
+  MIN_FACE_SIZE: 0.5,                   // Face small (allow sitting far away)
+  MAX_FACE_SIZE: 90,                    // Face close (more forgiving)
+  IDEAL_MIN_FACE_SIZE: 3,               // Ideal minimum
+  IDEAL_MAX_FACE_SIZE: 65,              // Ideal maximum
   
-  // Detection confidence - Lower to reduce false "no face" warnings
-  MIN_FACE_CONFIDENCE: 0.45,            // 45% confidence (more lenient)
+  // Detection confidence - Lower threshold to work in dim/low lighting and with glasses
+  MIN_FACE_CONFIDENCE: 0.30,            // 30% confidence (works in low light & sunglasses)
   
-  // Eye gaze (using landmarks) - More tolerant of natural eye movement
-  EYE_CENTER_TOLERANCE: 0.30,           // 30% tolerance for eye offset
+  // Eye gaze (using landmarks) - Tolerant of glasses/sunglasses and natural eye movement
+  EYE_CENTER_TOLERANCE: 0.40,           // 40% tolerance for eye offset
   
   // Consecutive detection required before warning (prevents single-frame false positives)
-  CONSECUTIVE_DETECTIONS_REQUIRED: 3,   // Must detect issue 3 times in a row
+  CONSECUTIVE_DETECTIONS_REQUIRED: 2,   // Must persist for 2 consecutive cycles (6 secs)
   
-  // Grace count for no face - allow brief absences before warning
-  NO_FACE_GRACE_COUNT: 3,               // Allow 3 additional misses (total 4 cycles = 32 secs)
+  // Grace count for no face - allow brief absences (e.g. picking up pen or dim light)
+  NO_FACE_GRACE_COUNT: 3,               // 3 grace misses (total 5 cycles = 15 secs)
   
   // Mobile detection
   IS_MOBILE: typeof window !== 'undefined' && 
@@ -175,7 +175,7 @@ export async function detectFaces(
   }
 
   // Check if video is ready
-  if (videoElement.readyState < 2) {
+  if (videoElement.readyState < 1 && !videoElement.videoWidth) {
     return {
       numFaces: 0,
       predictions: [],
@@ -225,7 +225,7 @@ export async function detectFaces(
 /**
  * Check if the person is looking away from the screen
  * Uses face position and landmarks for better accuracy
- * Supports both desktop and mobile with different thresholds
+ * Supports glasses/sunglasses and dim lighting
  */
 export function isLookingAway(
   prediction: FacePrediction | null,
@@ -234,12 +234,7 @@ export function isLookingAway(
   threshold?: number
 ): boolean {
   if (!prediction?.topLeft || !prediction?.bottomRight) {
-    return true; // No face = looking away
-  }
-
-  // Check face probability/confidence if available
-  if (prediction.probability && prediction.probability[0] < DETECTION_CONFIG.MIN_FACE_CONFIDENCE) {
-    return true; // Low confidence = unreliable detection
+    return false; // Let no_face handler deal with missing prediction
   }
 
   // Use mobile-friendly threshold if on mobile device
@@ -258,14 +253,17 @@ export function isLookingAway(
   const xDiff = Math.abs(position.centerX - videoCenterX) / videoWidth;
   const yDiff = Math.abs(position.centerY - videoCenterY) / videoHeight;
 
-  // Check if face is beyond threshold from center
+  // Check if face position is significantly off-center
   const isPositionAway = xDiff > effectiveThreshold || yDiff > effectiveThreshold;
 
-  // If landmarks available, use them for eye gaze estimation
+  // If landmarks available, evaluate head pose and eye gaze
   if (prediction.landmarks && prediction.landmarks.length >= 4) {
     const eyeGaze = estimateEyeGaze(prediction, videoWidth, videoHeight);
-    // Combine position and eye gaze (both must indicate looking away)
-    return isPositionAway || eyeGaze.isLookingAway;
+    // Ignore eye gaze distortion caused by sunglasses if head position is centered!
+    if (!isPositionAway && Math.abs(eyeGaze.details.faceRotation) < 25) {
+      return false;
+    }
+    return isPositionAway || (eyeGaze.isLookingAway && Math.abs(eyeGaze.details.faceRotation) > 30);
   }
 
   return isPositionAway;

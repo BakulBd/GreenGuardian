@@ -205,7 +205,7 @@ export async function sendProctoringSnapshot(
   snapshot: Omit<ProctoringSnapshot, 'timestamp'>
 ): Promise<void> {
   try {
-    // Update session document with latest proctoring data
+    // Update session document with latest proctoring snapshot data (single updateDoc to save Spark quota)
     await updateDoc(doc(db, "examSessions", snapshot.sessionId), {
       "proctoring.lastSnapshot": {
         ...snapshot,
@@ -214,12 +214,6 @@ export async function sendProctoringSnapshot(
       "proctoring.isOnline": snapshot.isOnline,
       "proctoring.behaviorScore": snapshot.behaviorScore,
       updatedAt: serverTimestamp(),
-    });
-    
-    // Store snapshot in snapshots collection for history
-    await addDoc(collection(db, "proctoringSnapshots"), {
-      ...snapshot,
-      timestamp: serverTimestamp(),
     });
   } catch (error) {
     console.error("Failed to send proctoring snapshot:", error);
@@ -326,10 +320,9 @@ export function subscribeToLiveSessions(
   examId: string,
   onUpdate: (sessions: LiveStudentSession[]) => void
 ): () => void {
-  const sessionsQuery = query(
-    collection(db, "examSessions"),
-    where("examId", "==", examId)
-  );
+  const sessionsQuery = (examId && examId !== "all")
+    ? query(collection(db, "examSessions"), where("examId", "==", examId))
+    : query(collection(db, "examSessions"));
   
   const unsubscribe = onSnapshot(sessionsQuery, async (snapshot) => {
     const activeDocs = snapshot.docs.filter((doc) => {
@@ -498,7 +491,7 @@ export async function captureAndUploadWarningScreenshot(
   warningMessage: string
 ): Promise<WarningScreenshot | null> {
   try {
-    if (!videoElement || videoElement.readyState < 2) {
+    if (!videoElement || (videoElement.readyState < 1 && !videoElement.videoWidth)) {
       console.warn("Video element not ready for screenshot capture");
       return null;
     }
@@ -514,7 +507,9 @@ export async function captureAndUploadWarningScreenshot(
     // Use higher resolution for permanent screenshot storage
     const targetWidth = 640;
     const targetHeight = 480;
-    const aspectRatio = videoElement.videoWidth / videoElement.videoHeight;
+    const aspectRatio = (videoElement.videoWidth && videoElement.videoHeight) 
+      ? (videoElement.videoWidth / videoElement.videoHeight)
+      : (4 / 3);
     
     let width = targetWidth;
     let height = targetWidth / aspectRatio;
@@ -538,12 +533,17 @@ export async function captureAndUploadWarningScreenshot(
     const fileName = `${timestamp}_${randomSuffix}.jpg`;
     const storagePath = `warningScreenshots/${sessionId}/${fileName}`;
     
-    // Upload to Firebase Storage
-    const storageRef = ref(storage, storagePath);
-    await uploadString(storageRef, base64Data, 'data_url', {
-      contentType: 'image/jpeg',
-    });
-    const screenshotUrl = await getDownloadURL(storageRef);
+    let screenshotUrl = base64Data;
+    try {
+      // Upload to Firebase Storage
+      const storageRef = ref(storage, storagePath);
+      await uploadString(storageRef, base64Data, 'data_url', {
+        contentType: 'image/jpeg',
+      });
+      screenshotUrl = await getDownloadURL(storageRef);
+    } catch (storageError) {
+      console.warn("Firebase Storage upload fallback to inline base64:", storageError);
+    }
     
     // Create document in Firestore warningScreenshots collection
     const docRef = await addDoc(collection(db, "warningScreenshots"), {
@@ -589,20 +589,32 @@ export async function getWarningScreenshots(
   sessionId: string
 ): Promise<WarningScreenshot[]> {
   try {
-    const screenshotsQuery = query(
-      collection(db, "warningScreenshots"),
-      where("sessionId", "==", sessionId),
-      orderBy("timestamp", "desc")
-    );
-    
-    const snapshot = await getDocs(screenshotsQuery);
-    return snapshot.docs.map(doc => ({
+    let snapshot;
+    try {
+      const screenshotsQuery = query(
+        collection(db, "warningScreenshots"),
+        where("sessionId", "==", sessionId),
+        orderBy("timestamp", "desc")
+      );
+      snapshot = await getDocs(screenshotsQuery);
+    } catch (indexError) {
+      const simpleQuery = query(
+        collection(db, "warningScreenshots"),
+        where("sessionId", "==", sessionId)
+      );
+      snapshot = await getDocs(simpleQuery);
+    }
+
+    const items = snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
       timestamp: doc.data().timestamp?.toDate?.() || new Date(),
     })) as WarningScreenshot[];
+
+    items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return items;
   } catch (error) {
-    console.error("Failed to get warning screenshots:", error);
+    console.warn("Failed to get warning screenshots:", error);
     return [];
   }
 }

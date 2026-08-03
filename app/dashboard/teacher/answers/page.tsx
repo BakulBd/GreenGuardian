@@ -89,6 +89,7 @@ interface Answer {
     error?: string;
     analyzedAt?: string;
   };
+  ocrText?: string;
   answers?: Record<string, string>;
   similarityScore?: number;
   similarityMatches?: Array<{
@@ -819,10 +820,11 @@ function AnswerReviewContent() {
                   </div>
                 </div>
 
-                {/* Tabs for Overview, Answers, and OCR Analysis */}
+                {/* Tabs for Overview, Answers, OCR Analysis, and Plagiarism Check */}
                 <Tabs defaultValue="ocr" className="w-full">
-                  <TabsList className="grid grid-cols-2 w-full">
+                  <TabsList className="grid grid-cols-3 w-full">
                     <TabsTrigger value="ocr">OCR & File Evaluation</TabsTrigger>
+                    <TabsTrigger value="plagiarism">Plagiarism & Cross-Student Match</TabsTrigger>
                     <TabsTrigger value="answers">Submitted Online Answers</TabsTrigger>
                   </TabsList>
 
@@ -868,6 +870,15 @@ function AnswerReviewContent() {
                                   <p className="text-xs text-gray-600">
                                     Confidence Level: <strong>{selectedAnswer.ocrAnalysis.aiDetection.confidence}%</strong>
                                   </p>
+                                  {selectedAnswer.ocrAnalysis.aiDetection.indicators && selectedAnswer.ocrAnalysis.aiDetection.indicators.length > 0 && (
+                                    <div className="mt-2 flex flex-wrap gap-1">
+                                      {selectedAnswer.ocrAnalysis.aiDetection.indicators.map((ind, i) => (
+                                        <Badge key={i} variant="outline" className="text-[10px] bg-white text-gray-700">
+                                          {ind}
+                                        </Badge>
+                                      ))}
+                                    </div>
+                                  )}
                                 </CardContent>
                               </Card>
                             )}
@@ -903,6 +914,89 @@ function AnswerReviewContent() {
                         No external files were uploaded for this online submission.
                       </p>
                     )}
+                  </TabsContent>
+
+                  {/* Plagiarism & Similarity Tab */}
+                  <TabsContent value="plagiarism" className="mt-4 space-y-4">
+                    <div className="space-y-4">
+                      {/* Overall Similarity Summary */}
+                      <Card className="border-amber-200 bg-amber-50/20">
+                        <CardContent className="pt-4">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <h4 className="font-semibold text-xs text-gray-900 flex items-center gap-1.5">
+                                <Copy className="h-4 w-4 text-amber-600" /> Cross-Student Plagiarism Score
+                              </h4>
+                              <p className="text-xs text-gray-500 mt-0.5">
+                                Evaluated against all student submissions for exam: <strong>{selectedAnswer.examTitle}</strong>
+                              </p>
+                            </div>
+                            {(() => {
+                              const score = selectedAnswer.similarityScore ?? 0;
+                              const level = getSimilarityLevel(score);
+                              const color = getSimilarityColor(level);
+                              return (
+                                <Badge className={`${color.bg} ${color.text} ${color.border} border text-xs px-2.5 py-1 font-bold`}>
+                                  {score}% Similarity ({level.toUpperCase()})
+                                </Badge>
+                              );
+                            })()}
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      {/* Matching Students Breakdown */}
+                      {selectedAnswer.similarityMatches && selectedAnswer.similarityMatches.length > 0 ? (
+                        <div className="space-y-2">
+                          <h4 className="text-xs font-semibold text-gray-800">Matching Student Scripts</h4>
+                          {selectedAnswer.similarityMatches.map((match, mIdx) => (
+                            <div key={mIdx} className="p-3 border rounded-lg bg-white flex items-center justify-between text-xs">
+                              <div>
+                                <p className="font-bold text-gray-900">{match.studentName || "Another Student"}</p>
+                                <p className="text-[11px] text-gray-500">Student ID: {match.studentId}</p>
+                              </div>
+                              <Badge variant={match.score >= 70 ? "destructive" : "secondary"}>
+                                {match.score}% Match
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="p-4 border rounded-lg bg-gray-50 text-center text-xs text-gray-600">
+                          {selectedAnswer.ocrText || (selectedAnswer.answers && Object.keys(selectedAnswer.answers).length > 0) ? (
+                            <p>No high-risk plagiarism matches detected against other students for this exam.</p>
+                          ) : (
+                            <p>Run OCR or upload answers first to check cross-student similarity.</p>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="mt-3 text-xs gap-1.5"
+                            onClick={async () => {
+                              const text = selectedAnswer.ocrText || (selectedAnswer.answers ? Object.values(selectedAnswer.answers).join(" ") : "");
+                              if (text.trim().length > 20) {
+                                toast({ title: "Checking Plagiarism...", description: "Comparing script against all students" });
+                                const res = await performSimilarityCheck(selectedAnswer.id, selectedAnswer.examId, selectedAnswer.studentId, text);
+                                setSelectedAnswer(prev => prev ? {
+                                  ...prev,
+                                  similarityScore: res.score,
+                                  similarityMatches: res.matches.map(m => ({
+                                    studentId: m.sourceId || "",
+                                    studentName: m.sourceName,
+                                    score: m.matchPercentage
+                                  }))
+                                } : null);
+                                toast({ title: "Check Completed", description: `Plagiarism Score: ${res.score}%` });
+                              } else {
+                                toast({ title: "Notice", description: "Insufficient text length to perform similarity check", variant: "destructive" });
+                              }
+                            }}
+                          >
+                            <RefreshCcw className="h-3.5 w-3.5" /> Re-Check Similarity Now
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </TabsContent>
 
                   {/* Submitted Online Answers Tab */}

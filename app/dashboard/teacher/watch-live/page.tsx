@@ -38,6 +38,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
+import { connectTeacherToStudentStream, subscribeToLocalLiveVideo } from "@/lib/services/webrtcSignaling";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
@@ -52,6 +53,77 @@ import {
   WarningScreenshot,
 } from "@/lib/services/proctoring";
 import { getBehaviorLevel } from "@/lib/utils/helpers";
+
+function StudentVideoTile({ session, refreshKey }: { session: LiveStudentSession; refreshKey: number }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [hasRemoteStream, setHasRemoteStream] = useState(false);
+  const [localLiveFrame, setLocalLiveFrame] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!session.sessionId) return;
+
+    // 1. Listen to BroadcastChannel live video stream for zero-latency local PC streaming
+    const unsubLocal = subscribeToLocalLiveVideo(session.sessionId, (frameUrl) => {
+      setLocalLiveFrame(frameUrl);
+    });
+
+    // 2. Listen to WebRTC P2P remote stream
+    let cleanupWebRTC: (() => void) | null = null;
+    connectTeacherToStudentStream(session.sessionId, (remoteStream) => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = remoteStream;
+        videoRef.current.play().catch(console.error);
+        setHasRemoteStream(true);
+      }
+    }).then((c) => {
+      cleanupWebRTC = c;
+    });
+
+    return () => {
+      unsubLocal();
+      if (cleanupWebRTC) cleanupWebRTC();
+    };
+  }, [session.sessionId]);
+
+  return (
+    <div className="relative w-full h-full bg-gray-900 overflow-hidden">
+      {/* HTML5 WebRTC Video Stream */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className={`w-full h-full object-cover ${hasRemoteStream ? "block" : "hidden"}`}
+      />
+
+      {/* Local Inter-Tab Live Stream Frame */}
+      {!hasRemoteStream && localLiveFrame && (
+        <img
+          src={localLiveFrame}
+          alt={`${session.studentName} live stream`}
+          className="w-full h-full object-cover"
+        />
+      )}
+
+      {/* Firestore Snapshot Fallback (Proof Evidence) */}
+      {!hasRemoteStream && !localLiveFrame && (
+        session.latestSnapshot?.snapshotUrl ? (
+          <img
+            key={refreshKey}
+            src={session.latestSnapshot.snapshotUrl}
+            alt={`${session.studentName} snapshot`}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-600">
+            <CameraOff className="h-10 w-10 mb-2" />
+            <span className="text-xs">No camera feed</span>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
 
 // Grid helper: determine columns based on student count
 function getGridCols(count: number): string {
@@ -437,19 +509,7 @@ export default function TeacherWatchLivePage() {
                         >
                           {/* Camera Feed Area */}
                           <div className="relative aspect-video bg-gray-900 group">
-                            {session.latestSnapshot?.snapshotUrl ? (
-                              <img
-                                key={refreshKey}
-                                src={session.latestSnapshot.snapshotUrl}
-                                alt={`${session.studentName} camera`}
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-600">
-                                <CameraOff className="h-10 w-10 mb-2" />
-                                <span className="text-xs">No camera feed</span>
-                              </div>
-                            )}
+                            <StudentVideoTile session={session} refreshKey={refreshKey} />
 
                             {/* Overlay badges */}
                             <div className="absolute top-2 left-2 flex items-center gap-1.5">

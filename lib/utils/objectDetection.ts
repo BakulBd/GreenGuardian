@@ -19,15 +19,15 @@ interface ObjectDetectionResult {
 
 // Prohibited object classes from COCO dataset
 const PROHIBITED_OBJECTS = {
-  mobilePhone: ['cell phone', 'remote'], // 'remote' often misclassified as phone
+  mobilePhone: ['cell phone', 'remote', 'mobile phone', 'phone'], // 'remote' and 'cell phone' in COCO dataset
   book: ['book'],
   laptop: ['laptop'],
   person: ['person'],
 };
 
 // Minimum confidence threshold for detection
-const MIN_CONFIDENCE = 0.5;
-const PHONE_MIN_CONFIDENCE = 0.4; // Lower threshold for phones (harder to detect)
+const MIN_CONFIDENCE = 0.45;
+const PHONE_MIN_CONFIDENCE = 0.35; // Lower threshold for mobile phones held in hand
 
 // Model instance (lazy loaded)
 let objectModel: any = null;
