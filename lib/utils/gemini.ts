@@ -1,13 +1,23 @@
 /**
- * Gemini AI Integration for PDF OCR and Content Analysis
- * Uses Google Generative AI (Gemini) for text extraction and AI content detection
+ * Gemini 2.5 Flash AI Integration for PDF/Image OCR and Content Analysis
+ * Uses Google Generative AI (Gemini 2.5 Flash with fallback cascade) for text extraction,
+ * plagiarism/AI detection, answer quality scoring, and document question paper extraction.
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// Initialize Gemini AI with API key
-const getGeminiClient = () => {
-  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+const GEMINI_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+];
+
+// Initialize Gemini AI with API key (supports client & server side env vars)
+export const getGeminiClient = () => {
+  const apiKey =
+    process.env.NEXT_PUBLIC_GEMINI_API_KEY ||
+    process.env.GEMINI_API_KEY;
   if (!apiKey) {
     console.warn("Gemini API key not configured");
     return null;
@@ -16,15 +26,38 @@ const getGeminiClient = () => {
 };
 
 /**
+ * Execute Gemini content generation with fallback through model versions
+ */
+async function generateContentWithFallback(contents: any) {
+  const genAI = getGeminiClient();
+  if (!genAI) {
+    throw new Error("Gemini API key not configured. Please set NEXT_PUBLIC_GEMINI_API_KEY or GEMINI_API_KEY.");
+  }
+
+  let lastError: any = null;
+  for (const modelName of GEMINI_MODELS) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(contents);
+      const response = await result.response;
+      return { response, modelName };
+    } catch (err: any) {
+      console.warn(`Model ${modelName} failed/unavailable: ${err?.message || err}. Trying next model...`);
+      lastError = err;
+    }
+  }
+  throw lastError || new Error("All Gemini models failed to process the request.");
+}
+
+/**
  * Convert a File to base64 format required by Gemini
  */
-async function fileToBase64(file: File): Promise<string> {
+export async function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       const result = reader.result as string;
-      // Remove the data URL prefix (e.g., "data:application/pdf;base64,")
-      const base64 = result.split(",")[1];
+      const base64 = result.includes(",") ? result.split(",")[1] : result;
       resolve(base64);
     };
     reader.onerror = reject;
@@ -33,18 +66,21 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 /**
- * Convert a URL to base64 by fetching it
+ * Convert a URL to base64 format
  */
-async function urlToBase64(url: string): Promise<{ base64: string; mimeType: string }> {
+export async function urlToBase64(url: string): Promise<{ base64: string; mimeType: string }> {
   const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch file from URL: ${response.statusText}`);
+  }
   const blob = await response.blob();
-  const mimeType = blob.type || "application/pdf";
+  const mimeType = blob.type || (url.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/png");
   
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       const result = reader.result as string;
-      const base64 = result.split(",")[1];
+      const base64 = result.includes(",") ? result.split(",")[1] : result;
       resolve({ base64, mimeType });
     };
     reader.onerror = reject;
@@ -52,51 +88,39 @@ async function urlToBase64(url: string): Promise<{ base64: string; mimeType: str
   });
 }
 
-/**
- * Extract text from a PDF using Gemini Vision
- */
-export async function extractTextFromPDF(
-  file: File | string
-): Promise<{
+export interface ExtractionResult {
   success: boolean;
   text: string;
   wordCount: number;
+  modelUsed?: string;
   error?: string;
-}> {
+}
+
+/**
+ * Extract text from a PDF or Document using Gemini 2.5 Flash
+ */
+export async function extractTextFromPDF(
+  file: File | string
+): Promise<ExtractionResult> {
   try {
-    const genAI = getGeminiClient();
-    if (!genAI) {
-      return {
-        success: false,
-        text: "",
-        wordCount: 0,
-        error: "Gemini API not configured. Please set NEXT_PUBLIC_GEMINI_API_KEY in environment.",
-      };
-    }
-
-    // Use Gemini Pro Vision for document analysis
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
     let base64Data: string;
     let mimeType: string;
 
     if (typeof file === "string") {
-      // It's a URL
       const result = await urlToBase64(file);
       base64Data = result.base64;
       mimeType = result.mimeType;
     } else {
-      // It's a File object
       base64Data = await fileToBase64(file);
       mimeType = file.type || "application/pdf";
     }
 
     const prompt = `Extract all text content from this document. 
-    Return the text exactly as written, preserving paragraphs and structure.
-    Do not add any commentary or interpretation - just extract the raw text content.
-    If the document contains handwritten text, transcribe it as accurately as possible.`;
+Return the text exactly as written, preserving paragraphs, mathematical notation, and structure.
+Do not add any commentary or extra text - just transcribe the raw content.
+If the document contains handwritten text or diagrams, transcribe all handwritten text accurately.`;
 
-    const result = await model.generateContent([
+    const { response, modelName } = await generateContentWithFallback([
       prompt,
       {
         inlineData: {
@@ -106,151 +130,35 @@ export async function extractTextFromPDF(
       },
     ]);
 
-    const response = await result.response;
-    const extractedText = response.text();
-
-    // Count words
+    const extractedText = response.text().trim();
     const wordCount = extractedText
-      .trim()
       .split(/\s+/)
-      .filter((word) => word.length > 0).length;
+      .filter((w) => w.length > 0).length;
 
     return {
       success: true,
       text: extractedText,
       wordCount,
+      modelUsed: modelName,
     };
   } catch (error: any) {
-    console.error("PDF extraction error:", error);
+    console.error("Gemini PDF extraction error:", error);
     return {
       success: false,
       text: "",
       wordCount: 0,
-      error: error.message || "Failed to extract text from PDF",
+      error: error.message || "Failed to extract text from document",
     };
   }
 }
 
 /**
- * Analyze text for AI-generated content indicators
- */
-export async function detectAIContent(
-  text: string
-): Promise<{
-  success: boolean;
-  isAIGenerated: boolean;
-  confidence: number; // 0-100
-  indicators: string[];
-  error?: string;
-}> {
-  try {
-    const genAI = getGeminiClient();
-    if (!genAI) {
-      return {
-        success: false,
-        isAIGenerated: false,
-        confidence: 0,
-        indicators: [],
-        error: "Gemini API not configured",
-      };
-    }
-
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-    const prompt = `Analyze the following text for signs of AI-generated content.
-    
-Consider these factors:
-1. Writing style consistency
-2. Lack of personal anecdotes or unique perspectives
-3. Overly formal or generic phrasing
-4. Repetitive sentence structures
-5. Perfect grammar with no natural variations
-6. Generic transitions between paragraphs
-7. Lack of specific examples or personal experiences
-8. Unusually consistent tone throughout
-
-Return a JSON response in this exact format:
-{
-  "isAIGenerated": true/false,
-  "confidence": 0-100,
-  "indicators": ["list of specific indicators found"]
-}
-
-Text to analyze:
-"""
-${text.substring(0, 5000)}
-"""
-
-Return ONLY the JSON object, no other text.`;
-
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const responseText = response.text().trim();
-
-    // Parse JSON response
-    try {
-      // Clean up response - remove markdown code blocks if present
-      const cleanedResponse = responseText
-        .replace(/```json\n?/g, "")
-        .replace(/```\n?/g, "")
-        .trim();
-
-      const analysis = JSON.parse(cleanedResponse);
-
-      return {
-        success: true,
-        isAIGenerated: analysis.isAIGenerated || false,
-        confidence: Math.min(100, Math.max(0, analysis.confidence || 0)),
-        indicators: analysis.indicators || [],
-      };
-    } catch {
-      // If JSON parsing fails, try to extract info from text
-      const isAI = responseText.toLowerCase().includes("ai-generated") || 
-                   responseText.toLowerCase().includes("likely generated");
-      
-      return {
-        success: true,
-        isAIGenerated: isAI,
-        confidence: isAI ? 60 : 30,
-        indicators: ["Analysis completed but structured response not available"],
-      };
-    }
-  } catch (error: any) {
-    console.error("AI detection error:", error);
-    return {
-      success: false,
-      isAIGenerated: false,
-      confidence: 0,
-      indicators: [],
-      error: error.message || "Failed to analyze text",
-    };
-  }
-}
-
-/**
- * Extract text from images (handwritten answers, screenshots, etc.)
+ * Extract text from an image (handwritten answer, screenshot, scan) using Gemini 2.5 Flash
  */
 export async function extractTextFromImage(
   file: File | string
-): Promise<{
-  success: boolean;
-  text: string;
-  wordCount: number;
-  error?: string;
-}> {
+): Promise<ExtractionResult> {
   try {
-    const genAI = getGeminiClient();
-    if (!genAI) {
-      return {
-        success: false,
-        text: "",
-        wordCount: 0,
-        error: "Gemini API not configured",
-      };
-    }
-
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
     let base64Data: string;
     let mimeType: string;
 
@@ -263,11 +171,12 @@ export async function extractTextFromImage(
       mimeType = file.type || "image/png";
     }
 
-    const prompt = `Extract all text from this image. 
-    If it contains handwritten text, transcribe it as accurately as possible.
-    Return ONLY the extracted text, no commentary.`;
+    const prompt = `Extract all text from this image carefully. 
+Transcribe handwritten student answers, printed test questions, and text accurately.
+If formulas or math equations exist, format them in standard clear math notation.
+Return ONLY the extracted text with no conversational filler.`;
 
-    const result = await model.generateContent([
+    const { response, modelName } = await generateContentWithFallback([
       prompt,
       {
         inlineData: {
@@ -277,21 +186,19 @@ export async function extractTextFromImage(
       },
     ]);
 
-    const response = await result.response;
-    const extractedText = response.text();
-
+    const extractedText = response.text().trim();
     const wordCount = extractedText
-      .trim()
       .split(/\s+/)
-      .filter((word) => word.length > 0).length;
+      .filter((w) => w.length > 0).length;
 
     return {
       success: true,
       text: extractedText,
       wordCount,
+      modelUsed: modelName,
     };
   } catch (error: any) {
-    console.error("Image text extraction error:", error);
+    console.error("Gemini Image text extraction error:", error);
     return {
       success: false,
       text: "",
@@ -302,7 +209,79 @@ export async function extractTextFromImage(
 }
 
 /**
- * Analyze answer quality and provide feedback
+ * Deep AI-Generated Content & Paraphrasing Detection using Gemini 2.5 Flash
+ */
+export async function detectAIContent(
+  text: string
+): Promise<{
+  success: boolean;
+  isAIGenerated: boolean;
+  confidence: number; // 0-100
+  indicators: string[];
+  error?: string;
+}> {
+  try {
+    if (!text || text.trim().length < 20) {
+      return {
+        success: true,
+        isAIGenerated: false,
+        confidence: 0,
+        indicators: ["Insufficient text length for AI detection"],
+      };
+    }
+
+    const prompt = `Analyze the following student exam answer text for signs of AI-generated content (e.g. ChatGPT, Claude, Gemini, Copilot).
+
+Consider:
+1. Artificial perfection or rigid essay structures
+2. Generic filler phrases ("delve into", "crucial to note", "in conclusion")
+3. Lack of natural student voice or typos
+4. Typical AI structural formatting (lists, bullet points where paragraph expected)
+
+Return a JSON response in this EXACT format:
+{
+  "isAIGenerated": true or false,
+  "confidence": number between 0 and 100,
+  "indicators": ["specific indicator 1", "specific indicator 2"]
+}
+
+Text to analyze:
+"""
+${text.substring(0, 8000)}
+"""
+
+Return ONLY the valid JSON object.`;
+
+    const { response } = await generateContentWithFallback(prompt);
+    const responseText = response.text().trim();
+
+    const cleanedJson = responseText
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
+      .trim();
+
+    const analysis = JSON.parse(cleanedJson);
+
+    return {
+      success: true,
+      isAIGenerated: Boolean(analysis.isAIGenerated),
+      confidence: Math.min(100, Math.max(0, Number(analysis.confidence) || 0)),
+      indicators: Array.isArray(analysis.indicators) ? analysis.indicators : [],
+    };
+  } catch (error: any) {
+    console.error("Gemini AI detection error:", error);
+    return {
+      success: false,
+      isAIGenerated: false,
+      confidence: 0,
+      indicators: [],
+      error: error.message || "AI detection analysis failed",
+    };
+  }
+}
+
+/**
+ * Analyze Answer Quality against a question and reference rubric
  */
 export async function analyzeAnswerQuality(
   question: string,
@@ -316,156 +295,241 @@ export async function analyzeAnswerQuality(
   error?: string;
 }> {
   try {
-    const genAI = getGeminiClient();
-    if (!genAI) {
-      return {
-        success: false,
-        score: 0,
-        feedback: "",
-        strengths: [],
-        improvements: [],
-        error: "Gemini API not configured",
-      };
-    }
-
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-    const prompt = `Analyze this exam answer and provide a quality assessment.
-
+    const prompt = `Evaluate this student's exam answer.
+    
 Question: ${question}
+Student Answer: ${answer.substring(0, 4000)}
 
-Answer: ${answer.substring(0, 3000)}
-
-Return a JSON response:
+Provide a fair grade assessment (0-100), constructive feedback, strengths, and areas for improvement.
+Return a JSON response in this exact format:
 {
-  "score": 0-100,
-  "feedback": "Brief overall feedback",
-  "strengths": ["list of strong points"],
-  "improvements": ["list of areas to improve"]
+  "score": number 0-100,
+  "feedback": "Overall feedback summary",
+  "strengths": ["Strength 1", "Strength 2"],
+  "improvements": ["Improvement area 1", "Improvement area 2"]
 }
 
 Return ONLY the JSON object.`;
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const responseText = response.text().trim();
+    const { response } = await generateContentWithFallback(prompt);
+    const cleanedJson = response.text().trim()
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
+      .trim();
 
-    try {
-      const cleanedResponse = responseText
-        .replace(/```json\n?/g, "")
-        .replace(/```\n?/g, "")
-        .trim();
+    const analysis = JSON.parse(cleanedJson);
 
-      const analysis = JSON.parse(cleanedResponse);
-
-      return {
-        success: true,
-        score: Math.min(100, Math.max(0, analysis.score || 0)),
-        feedback: analysis.feedback || "",
-        strengths: analysis.strengths || [],
-        improvements: analysis.improvements || [],
-      };
-    } catch {
-      return {
-        success: false,
-        score: 0,
-        feedback: "",
-        strengths: [],
-        improvements: [],
-        error: "Failed to parse analysis response",
-      };
-    }
+    return {
+      success: true,
+      score: Math.min(100, Math.max(0, Number(analysis.score) || 0)),
+      feedback: analysis.feedback || "Evaluation complete",
+      strengths: Array.isArray(analysis.strengths) ? analysis.strengths : [],
+      improvements: Array.isArray(analysis.improvements) ? analysis.improvements : [],
+    };
   } catch (error: any) {
-    console.error("Answer analysis error:", error);
+    console.error("Answer quality analysis error:", error);
     return {
       success: false,
       score: 0,
       feedback: "",
       strengths: [],
       improvements: [],
-      error: error.message || "Failed to analyze answer",
+      error: error.message || "Failed to analyze answer quality",
     };
   }
 }
 
 /**
- * Comprehensive answer analysis for plagiarism and AI detection
+ * Comprehensive OCR analysis for multi-page or multi-file student submission scripts
  */
 export interface ComprehensiveAnalysis {
   extractedText: string;
   wordCount: number;
+  modelUsed?: string;
   aiDetection: {
     isAIGenerated: boolean;
     confidence: number;
     indicators: string[];
   };
+  fileAnalyses: Array<{
+    fileName: string;
+    fileUrl: string;
+    extractedText: string;
+    wordCount: number;
+    error?: string;
+  }>;
   errors?: string[];
 }
 
 export async function analyzeSubmittedAnswer(
-  fileOrUrl: File | string
+  filesOrUrls: Array<File | string | { url?: string; downloadURL?: string; name?: string }>
 ): Promise<ComprehensiveAnalysis> {
+  const fileAnalyses: ComprehensiveAnalysis["fileAnalyses"] = [];
   const errors: string[] = [];
-  
-  // Determine if it's a PDF or image
-  let mimeType = "";
-  if (typeof fileOrUrl === "string") {
-    // URL - try to determine type from extension
-    if (fileOrUrl.toLowerCase().includes(".pdf")) {
-      mimeType = "application/pdf";
+  let fullExtractedText = "";
+  let totalWordCount = 0;
+  let primaryModelUsed = "gemini-2.5-flash";
+
+  // Standardize inputs into an array
+  const fileList = Array.isArray(filesOrUrls) ? filesOrUrls : [filesOrUrls];
+
+  for (let i = 0; i < fileList.length; i++) {
+    const item = fileList[i];
+    let fileTarget: File | string;
+    let fileName = `Page_${i + 1}`;
+
+    if (typeof item === "string") {
+      fileTarget = item;
+      fileName = item.split("/").pop()?.split("?")[0] || `File_${i + 1}`;
+    } else if (item instanceof File) {
+      fileTarget = item;
+      fileName = item.name;
+    } else if (item && typeof item === "object") {
+      fileTarget = item.downloadURL || item.url || "";
+      fileName = item.name || `File_${i + 1}`;
     } else {
-      mimeType = "image/png";
+      continue;
     }
-  } else {
-    mimeType = fileOrUrl.type;
+
+    if (!fileTarget) continue;
+
+    const isPDF =
+      (typeof fileTarget === "string" && fileTarget.toLowerCase().includes(".pdf")) ||
+      (fileTarget instanceof File && fileTarget.type.includes("pdf"));
+
+    let extraction: ExtractionResult;
+    if (isPDF) {
+      extraction = await extractTextFromPDF(fileTarget);
+    } else {
+      extraction = await extractTextFromImage(fileTarget);
+    }
+
+    if (extraction.success && extraction.text) {
+      if (extraction.modelUsed) primaryModelUsed = extraction.modelUsed;
+      fullExtractedText += (fullExtractedText ? "\n\n--- Page Break ---\n\n" : "") + extraction.text;
+      totalWordCount += extraction.wordCount;
+      fileAnalyses.push({
+        fileName,
+        fileUrl: typeof fileTarget === "string" ? fileTarget : fileName,
+        extractedText: extraction.text,
+        wordCount: extraction.wordCount,
+      });
+    } else {
+      const err = extraction.error || `Failed to extract text from file ${fileName}`;
+      errors.push(err);
+      fileAnalyses.push({
+        fileName,
+        fileUrl: typeof fileTarget === "string" ? fileTarget : fileName,
+        extractedText: "",
+        wordCount: 0,
+        error: err,
+      });
+    }
   }
 
-  // Extract text
-  let extractedText = "";
-  let wordCount = 0;
-  
-  if (mimeType.includes("pdf")) {
-    const extraction = await extractTextFromPDF(fileOrUrl);
-    if (extraction.success) {
-      extractedText = extraction.text;
-      wordCount = extraction.wordCount;
-    } else {
-      errors.push(extraction.error || "Failed to extract PDF text");
-    }
-  } else {
-    const extraction = await extractTextFromImage(fileOrUrl);
-    if (extraction.success) {
-      extractedText = extraction.text;
-      wordCount = extraction.wordCount;
-    } else {
-      errors.push(extraction.error || "Failed to extract image text");
-    }
-  }
-
-  // Run AI detection if we have text
+  // Run AI content detection on combined text
   let aiDetection = {
     isAIGenerated: false,
     confidence: 0,
     indicators: [] as string[],
   };
 
-  if (extractedText.length > 50) {
-    const detection = await detectAIContent(extractedText);
+  if (fullExtractedText.trim().length > 30) {
+    const detection = await detectAIContent(fullExtractedText);
     if (detection.success) {
       aiDetection = {
         isAIGenerated: detection.isAIGenerated,
         confidence: detection.confidence,
         indicators: detection.indicators,
       };
-    } else {
-      errors.push(detection.error || "Failed to run AI detection");
+    } else if (detection.error) {
+      errors.push(detection.error);
     }
   }
 
   return {
-    extractedText,
-    wordCount,
+    extractedText: fullExtractedText,
+    wordCount: totalWordCount,
+    modelUsed: primaryModelUsed,
     aiDetection,
+    fileAnalyses,
     errors: errors.length > 0 ? errors : undefined,
   };
+}
+
+/**
+ * Extract structured questions from an uploaded question paper PDF/Image using Gemini 2.5 Flash
+ */
+export async function extractQuestionsFromPaper(
+  fileOrUrl: File | string
+): Promise<{
+  success: boolean;
+  questions: Array<{
+    text: string;
+    type: "mcq" | "short_answer" | "essay" | "true_false";
+    options?: string[];
+    correctAnswer?: string;
+    marks: number;
+  }>;
+  error?: string;
+}> {
+  try {
+    let base64Data: string;
+    let mimeType: string;
+
+    if (typeof fileOrUrl === "string") {
+      const res = await urlToBase64(fileOrUrl);
+      base64Data = res.base64;
+      mimeType = res.mimeType;
+    } else {
+      base64Data = await fileToBase64(fileOrUrl);
+      mimeType = fileOrUrl.type || "application/pdf";
+    }
+
+    const prompt = `Analyze this exam question paper document and parse all questions into structured JSON.
+
+Return JSON in this format:
+{
+  "questions": [
+    {
+      "text": "Question text here",
+      "type": "mcq" or "short_answer" or "essay" or "true_false",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correctAnswer": "Answer key or correct option if present",
+      "marks": 5
+    }
+  ]
+}
+
+Return ONLY the raw JSON object.`;
+
+    const { response } = await generateContentWithFallback([
+      prompt,
+      {
+        inlineData: {
+          mimeType,
+          data: base64Data,
+        },
+      },
+    ]);
+
+    const cleanedJson = response.text().trim()
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
+      .trim();
+
+    const parsed = JSON.parse(cleanedJson);
+
+    return {
+      success: true,
+      questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+    };
+  } catch (error: any) {
+    console.error("Error extracting questions from paper:", error);
+    return {
+      success: false,
+      questions: [],
+      error: error.message || "Failed to extract questions from document",
+    };
+  }
 }

@@ -37,6 +37,7 @@ import {
   getBehaviorLevel,
 } from "@/lib/utils/helpers";
 import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
+import { performSimilarityCheck } from "@/lib/utils/similarity";
 import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
@@ -1064,26 +1065,23 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
       } else {
         // For upload mode, include answer files and run OCR analysis
         answerData.answerFiles = answerFiles;
-        // Run OCR and AI detection on uploaded files (async, don't block submission)
         if (answerFiles.length > 0) {
           try {
-            // Analyze the first uploaded file
-            const primaryFile = answerFiles[0];
-            if (primaryFile.url) {
-              const analysis = await analyzeSubmittedAnswer(primaryFile.url);
-              const ocrErrors = analysis.errors?.filter(Boolean) ?? [];
-              // Store OCR results with the answer
-              answerData.ocrAnalysis = {
-                extractedText: analysis.extractedText.substring(0, 10000), // Limit text size
-                wordCount: analysis.wordCount,
-                aiDetection: analysis.aiDetection,
-                analyzedAt: new Date().toISOString(),
-                ...(ocrErrors.length > 0 ? { errors: ocrErrors } : {}),
-              };
-            }
+            // Process ALL uploaded files via Gemini 2.5 Flash
+            const analysis = await analyzeSubmittedAnswer(answerFiles);
+            const ocrErrors = analysis.errors?.filter(Boolean) ?? [];
+            answerData.ocrAnalysis = {
+              extractedText: analysis.extractedText,
+              wordCount: analysis.wordCount,
+              modelUsed: analysis.modelUsed || "gemini-2.5-flash",
+              aiDetection: analysis.aiDetection,
+              fileAnalyses: analysis.fileAnalyses,
+              analyzedAt: new Date().toISOString(),
+              ...(ocrErrors.length > 0 ? { errors: ocrErrors } : {}),
+            };
+            answerData.ocrText = analysis.extractedText;
           } catch (ocrError) {
             console.error("OCR analysis error (non-blocking):", ocrError);
-            // OCR failure shouldn't block submission
             answerData.ocrAnalysis = {
               error: "Analysis failed - will be processed later",
             };
@@ -1092,7 +1090,15 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
       }
 
       // Retry Firestore writes for reliability
-      await retryAsync(() => addDoc(collection(db, "answers"), answerData), "addDoc(answers)");
+      const addedDoc = await retryAsync(() => addDoc(collection(db, "answers"), answerData), "addDoc(answers)");
+
+      // Asynchronously trigger cross-student similarity check & AI pattern match
+      const textForSimCheck = answerData.ocrText || (typeof answers === "object" ? Object.values(answers).join(" ") : "");
+      if (addedDoc?.id && textForSimCheck.trim().length > 20) {
+        performSimilarityCheck(addedDoc.id, exam.id, user.id, textForSimCheck).catch((err) => {
+          console.warn("Background similarity check error:", err);
+        });
+      }
       await retryAsync(() => updateDoc(doc(db, "examSessions", sessionId), {
         status: sessionStatus,
         submitted: true,

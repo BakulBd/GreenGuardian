@@ -33,8 +33,8 @@ import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { doc, getDoc, collection, query, where, getDocs, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
-import { getSimilarityLevel, getSimilarityColor, SIMILARITY_THRESHOLDS } from "@/lib/utils/similarity";
-import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
+import { getSimilarityLevel, getSimilarityColor, SIMILARITY_THRESHOLDS, performSimilarityCheck } from "@/lib/utils/similarity";
+import { analyzeSubmittedAnswer, detectAIContent } from "@/lib/utils/gemini";
 import { formatDate } from "@/lib/utils/helpers";
 import { getQuestionsByExam, getExamsByTeacher, getAnswersByTeacher } from "@/lib/firebase/exams";
 import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
@@ -286,44 +286,68 @@ function AnswerReviewContent() {
 
     setAnalyzing(answer.id);
     try {
-      const fileUrl = answer.answerFiles[0].downloadURL || answer.answerFiles[0].url;
-      if (!fileUrl) throw new Error("File URL not found");
+      // Analyze all uploaded files using Gemini 2.5 Flash
+      const analysis = await analyzeSubmittedAnswer(answer.answerFiles);
 
-      const analysis = await analyzeSubmittedAnswer(fileUrl);
+      const ocrAnalysisData = {
+        extractedText: analysis.extractedText,
+        wordCount: analysis.wordCount,
+        modelUsed: analysis.modelUsed || "gemini-2.5-flash",
+        aiDetection: analysis.aiDetection,
+        fileAnalyses: analysis.fileAnalyses,
+        errors: analysis.errors,
+        analyzedAt: new Date().toISOString(),
+      };
 
-      // Update the answer document in Firestore
+      // Update answer document in Firestore
       await updateDoc(doc(db, "answers", answer.id), {
-        ocrAnalysis: {
-          extractedText: analysis.extractedText.substring(0, 10000),
-          wordCount: analysis.wordCount,
-          aiDetection: analysis.aiDetection,
-          errors: analysis.errors,
-          analyzedAt: new Date().toISOString(),
-        },
+        ocrAnalysis: ocrAnalysisData,
+        ocrText: analysis.extractedText,
       });
+
+      // Run cross-student similarity check automatically
+      if (answer.examId && answer.studentId && analysis.extractedText.trim().length > 20) {
+        await performSimilarityCheck(answer.id, answer.examId, answer.studentId, analysis.extractedText);
+      }
 
       // Update local state
       setAnswers((prev) =>
         prev.map((a) =>
           a.id === answer.id
-            ? { ...a, ocrAnalysis: { ...analysis, analyzedAt: new Date().toISOString() } }
+            ? { ...a, ocrAnalysis: ocrAnalysisData, ocrText: analysis.extractedText }
             : a
         )
       );
 
       if (selectedAnswer?.id === answer.id) {
         setSelectedAnswer((prev) =>
-          prev ? { ...prev, ocrAnalysis: { ...analysis, analyzedAt: new Date().toISOString() } } : null
+          prev ? { ...prev, ocrAnalysis: ocrAnalysisData, ocrText: analysis.extractedText } : null
         );
       }
 
-      toast({ title: "Success", description: "OCR analysis completed successfully" });
+      toast({ title: "Success", description: "Gemini 2.5 Flash OCR & similarity check completed!" });
     } catch (error: any) {
       console.error("OCR analysis error:", error);
       toast({ title: "Error", description: error.message || "Analysis failed", variant: "destructive" });
     } finally {
       setAnalyzing(null);
     }
+  };
+
+  const runBatchOCRAnalysis = async () => {
+    const unanalyzed = filteredAnswers.filter(a => a.answerFiles && a.answerFiles.length > 0 && !a.ocrAnalysis?.extractedText);
+    if (unanalyzed.length === 0) {
+      toast({ title: "Info", description: "All uploaded submissions have already been processed with OCR." });
+      return;
+    }
+
+    toast({ title: "Batch Processing Started", description: `Processing ${unanalyzed.length} submission(s) with Gemini 2.5 Flash...` });
+
+    for (const ans of unanalyzed) {
+      await runOCRAnalysis(ans);
+    }
+
+    toast({ title: "Batch Completed", description: `Finished processing ${unanalyzed.length} submission(s).` });
   };
 
   const getOCRBadge = (answer: Answer) => {
@@ -430,10 +454,16 @@ function AnswerReviewContent() {
               Review completed student exams, marks breakdown, and automated OCR analysis
             </p>
           </div>
-          <Button variant="outline" onClick={loadSubmissionsData} className="gap-2">
-            <RefreshCcw className="h-4 w-4" />
-            Refresh Results
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={runBatchOCRAnalysis} className="gap-2 border-purple-300 text-purple-700 hover:bg-purple-50">
+              <Bot className="h-4 w-4 text-purple-600" />
+              Batch Gemini 2.5 Flash OCR
+            </Button>
+            <Button variant="outline" onClick={loadSubmissionsData} className="gap-2">
+              <RefreshCcw className="h-4 w-4" />
+              Refresh Results
+            </Button>
+          </div>
         </div>
 
         {/* Overview Stats */}

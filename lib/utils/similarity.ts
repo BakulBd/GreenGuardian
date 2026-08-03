@@ -160,17 +160,17 @@ export async function checkSimilarityAgainstStudents(
       // Skip own answer
       if (data.studentId === studentId) continue;
       
-      // Get the answer text (for online mode) or skip (for upload mode - needs OCR)
       let otherAnswerText = "";
-      
-      if (data.answers && typeof data.answers === "object") {
-        // Online mode - concatenate all answers
-        otherAnswerText = Object.values(data.answers).join(" ");
+      if (data.ocrAnalysis?.extractedText) {
+        otherAnswerText = data.ocrAnalysis.extractedText;
+      } else if (data.ocrText) {
+        otherAnswerText = data.ocrText;
       } else if (data.extractedText) {
-        // If we have extracted text from PDF
         otherAnswerText = data.extractedText;
+      } else if (data.answers && typeof data.answers === "object") {
+        otherAnswerText = Object.values(data.answers).join(" ");
       } else {
-        continue; // Skip if no text available
+        continue;
       }
       
       if (!otherAnswerText) continue;

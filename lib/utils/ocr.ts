@@ -1,63 +1,89 @@
 import { createWorker, Worker } from "tesseract.js";
+import { extractTextFromImage as extractWithGeminiImage, extractTextFromPDF as extractWithGeminiPDF } from "./gemini";
 
-let worker: Worker | null = null;
+let workerPromise: Promise<Worker> | null = null;
 
-export async function initOCR(): Promise<void> {
-  if (!worker) {
-    worker = await createWorker("eng");
+export async function getTesseractWorker(): Promise<Worker> {
+  if (!workerPromise) {
+    workerPromise = (async () => {
+      const w = await createWorker("eng");
+      return w;
+    })();
   }
+  return workerPromise;
 }
 
-export async function extractTextFromImage(imageFile: File | Blob): Promise<string> {
+/**
+ * Extract text from image file/blob using Tesseract.js engine
+ */
+export async function extractTextWithTesseract(imageFile: File | Blob | string): Promise<string> {
   try {
-    if (!worker) {
-      await initOCR();
-    }
-
-    if (!worker) {
-      throw new Error("OCR worker not initialized");
-    }
-
+    const worker = await getTesseractWorker();
     const { data } = await worker.recognize(imageFile);
-    return data.text;
+    return data.text || "";
   } catch (error) {
-    console.error("OCR extraction error:", error);
+    console.error("Tesseract OCR extraction error:", error);
     return "";
   }
 }
 
-export async function extractTextFromImageURL(imageURL: string): Promise<string> {
+/**
+ * Hybrid OCR Extractor:
+ * Attempts Gemini 2.5 Flash API first for state-of-the-art accuracy;
+ * Falls back to Tesseract.js client-side OCR if Gemini fails or is unconfigured.
+ */
+export async function hybridExtractText(
+  fileOrUrl: File | string
+): Promise<{ text: string; engine: "gemini" | "tesseract"; confidence?: number; error?: string }> {
+  // 1. Try Gemini 2.5 Flash
   try {
-    if (!worker) {
-      await initOCR();
-    }
+    const isPDF =
+      (typeof fileOrUrl === "string" && fileOrUrl.toLowerCase().includes(".pdf")) ||
+      (fileOrUrl instanceof File && fileOrUrl.type.includes("pdf"));
 
-    if (!worker) {
-      throw new Error("OCR worker not initialized");
-    }
+    const geminiResult = isPDF
+      ? await extractWithGeminiPDF(fileOrUrl)
+      : await extractWithGeminiImage(fileOrUrl);
 
-    const { data } = await worker.recognize(imageURL);
-    return data.text;
-  } catch (error) {
-    console.error("OCR extraction error:", error);
-    return "";
+    if (geminiResult.success && geminiResult.text.trim().length > 0) {
+      return {
+        text: geminiResult.text,
+        engine: "gemini",
+      };
+    }
+  } catch (geminiErr) {
+    console.warn("Gemini Vision OCR failed, dropping down to Tesseract.js fallback:", geminiErr);
   }
+
+  // 2. Fallback to Tesseract.js
+  try {
+    const fallbackText = await extractTextWithTesseract(fileOrUrl);
+    if (fallbackText.trim().length > 0) {
+      return {
+        text: fallbackText,
+        engine: "tesseract",
+      };
+    }
+  } catch (tesseractErr: any) {
+    console.error("Tesseract.js fallback also failed:", tesseractErr);
+  }
+
+  return {
+    text: "",
+    engine: "tesseract",
+    error: "Failed to extract text using both Gemini AI and Tesseract.js engines.",
+  };
 }
 
 export async function terminateOCR(): Promise<void> {
-  if (worker) {
-    await worker.terminate();
-    worker = null;
+  if (workerPromise) {
+    try {
+      const worker = await workerPromise;
+      await worker.terminate();
+    } catch {
+      // Ignore termination errors
+    } finally {
+      workerPromise = null;
+    }
   }
-}
-
-export async function extractTextFromMultipleImages(images: File[]): Promise<string[]> {
-  const results: string[] = [];
-
-  for (const image of images) {
-    const text = await extractTextFromImage(image);
-    results.push(text);
-  }
-
-  return results;
 }

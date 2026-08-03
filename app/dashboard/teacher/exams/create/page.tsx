@@ -19,7 +19,8 @@ import {
   GripVertical,
   FileText,
   Upload as UploadIcon,
-  ListChecks
+  ListChecks,
+  Bot
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
@@ -64,9 +65,47 @@ export default function CreateExamPage() {
   });
   const [questions, setQuestions] = useState<Question[]>([]);
   const [examPapers, setExamPapers] = useState<UploadResult[]>([]);
+  const [extractingOCRQuestions, setExtractingOCRQuestions] = useState(false);
   const { user, loading: authLoading } = useAuth();
   const { toast } = useToast();
   const router = useRouter();
+
+  const extractQuestionsFromPaperOCR = async () => {
+    if (examPapers.length === 0) {
+      toast({ title: "Error", description: "Please upload an exam paper first.", variant: "destructive" });
+      return;
+    }
+    setExtractingOCRQuestions(true);
+    try {
+      const primaryUrl = examPapers[0].url;
+      const res = await fetch("/api/ocr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "extract_questions", fileUrl: primaryUrl }),
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.questions) && data.questions.length > 0) {
+        const parsedQuestions: Question[] = data.questions.map((q: any, idx: number) => ({
+          id: `${Date.now()}_${idx}`,
+          text: q.text || `Question ${idx + 1}`,
+          type: q.type === "mcq" ? "multiple-choice" : "short-answer",
+          options: Array.isArray(q.options) && q.options.length >= 2 ? q.options : ["Option 1", "Option 2", "Option 3", "Option 4"],
+          correctAnswer: q.correctAnswer || "",
+          marks: q.marks || 10,
+        }));
+
+        setQuestions(parsedQuestions);
+        setExamMode("online");
+        toast({ title: "Questions Extracted!", description: `Successfully imported ${parsedQuestions.length} questions using Gemini 2.5 Flash OCR.` });
+      } else {
+        toast({ title: "OCR Notice", description: data.error || "Could not automatically parse structured questions from this document.", variant: "destructive" });
+      }
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message || "Failed to extract questions", variant: "destructive" });
+    } finally {
+      setExtractingOCRQuestions(false);
+    }
+  };
 
   const addQuestion = () => {
     const newQuestion: Question = {
@@ -449,6 +488,29 @@ export default function CreateExamPage() {
                 maxFiles={10}
                 disabled={!user || authLoading}
               />
+
+              {examPapers.length > 0 && (
+                <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-semibold text-purple-900">Auto-Extract Questions with Gemini 2.5 Flash</p>
+                    <p className="text-xs text-purple-700">Extract question titles, options, and marks into the online editor.</p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={extractQuestionsFromPaperOCR}
+                    disabled={extractingOCRQuestions}
+                    className="bg-purple-600 hover:bg-purple-700 text-white gap-2"
+                  >
+                    {extractingOCRQuestions ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Bot className="h-4 w-4" />
+                    )}
+                    Extract Questions
+                  </Button>
+                </div>
+              )}
               
               <div className="space-y-2">
                 <Label htmlFor="totalMarks">Total Marks *</Label>

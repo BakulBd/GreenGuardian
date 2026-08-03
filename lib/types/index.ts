@@ -147,18 +147,70 @@ export interface ProctoringData {
   suspiciousEvents: number;
 }
 
+export interface FileOCRAnalysis {
+  fileName: string;
+  fileUrl: string;
+  extractedText: string;
+  wordCount: number;
+  confidence?: number;
+  error?: string;
+}
+
+export interface OCRAnalysis {
+  extractedText: string;
+  wordCount: number;
+  confidence?: number;
+  modelUsed?: string;
+  aiDetection?: {
+    isAIGenerated: boolean;
+    confidence: number;
+    indicators: string[];
+  };
+  qualityAnalysis?: {
+    score: number;
+    feedback: string;
+    strengths: string[];
+    improvements: string[];
+  };
+  fileAnalyses?: FileOCRAnalysis[];
+  errors?: string[];
+  analyzedAt?: string;
+  editedByTeacher?: boolean;
+  editedAt?: string;
+  error?: string;
+}
+
 export interface Answer {
   id: string;
-  examSessionId: string;
-  questionId: string;
+  examSessionId?: string;
+  examId?: string;
+  questionId?: string;
   studentId: string;
-  answer: string | string[];
+  studentName?: string;
+  answer?: string | string[];
+  answerFiles?: Array<{
+    name?: string;
+    url?: string;
+    downloadURL?: string;
+    type?: string;
+    size?: number;
+    path?: string;
+  }>;
   fileUrls?: string[];
   ocrText?: string;
+  ocrAnalysis?: OCRAnalysis;
   similarityScore?: number;
+  similarityLevel?: "unique" | "partial" | "plagiarized";
+  similarityReportId?: string;
   plagiarismDetected?: boolean;
+  score?: number;
+  totalMarks?: number;
+  accuracy?: number;
+  grading?: any;
+  flagged?: boolean;
+  flagReasons?: string[];
   submittedAt: FirestoreDate;
-  updatedAt: FirestoreDate;
+  updatedAt?: FirestoreDate;
 }
 
 export type ExamLogType =

@@ -47,6 +47,7 @@ export async function sendEmail(input: SendEmailInput): Promise<
   }
 
   try {
+    // @ts-ignore - nodemailer is dynamically imported if present
     const nodemailer = await import("nodemailer");
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
