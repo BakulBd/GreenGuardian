@@ -24,10 +24,8 @@ import {
   subscribeToAssignedStudents,
   getAssignmentsByTeacher,
 } from "@/lib/firebase/assignments";
-import { TeacherStudentMapping, TeacherAssignment } from "@/lib/types";
-import { formatDateTime } from "@/lib/utils/helpers";
-
-import { getUser, getUsersByRole } from "@/lib/firebase/firestore";
+import { TeacherStudentMapping, TeacherAssignment, User as UserType } from "@/lib/types";
+import { getUsersByRole } from "@/lib/firebase/firestore";
 
 interface StudentInfo {
   id: string;
@@ -49,112 +47,91 @@ export default function TeacherStudentsPage() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
 
-  useEffect(() => {
-    if (!user) return;
+  const loadData = useCallback(async (teacherId: string) => {
+    try {
+      setLoading(true);
+      const [mappingsData, assign, allStudentDocs] = await Promise.all([
+        getAssignedStudents(teacherId).catch(() => []),
+        getAssignmentsByTeacher(teacherId).catch(() => []),
+        getUsersByRole("student").catch(() => []),
+      ]);
 
-    // Load assignments
-    getAssignmentsByTeacher(user.id).then(setAssignments).catch(() => {});
+      setAssignments(assign);
+      setMappings(mappingsData);
 
-    // Real-time subscription to assigned students
-    const unsubscribe = subscribeToAssignedStudents(user.id, (data) => {
-      setMappings(data);
-      buildStudentList(data, assignments);
-      setLoading(false);
-    });
+      const userMap = new Map<string, UserType>();
+      for (const u of allStudentDocs) {
+        if (u.id) userMap.set(u.id, u);
+      }
 
-    return () => unsubscribe();
-  }, [user]);
+      const studentMap = new Map<string, StudentInfo>();
 
-  // Rebuild student list when mappings or assignments change
-  const buildStudentList = useCallback(async (mappingsData: TeacherStudentMapping[], assignmentsData?: TeacherAssignment[]) => {
-    const assign = assignmentsData || assignments;
-    const studentMap = new Map<string, StudentInfo>();
-
-    for (const mapping of mappingsData) {
-      const sid = mapping.studentId;
-      if (!studentMap.has(sid)) {
-        let studentName = mapping.studentName || "";
-        let studentCode = mapping.studentCode;
-        let email = "";
-        let batch = mapping.batchName;
-        let section = mapping.sectionName;
-
-        try {
-          const userDoc = await getUser(sid);
-          if (userDoc) {
-            studentName = userDoc.name || studentName;
-            email = userDoc.email || email;
-            studentCode = userDoc.studentCode || studentCode;
-            batch = userDoc.batch || batch;
-            section = userDoc.section || section;
+      // 1. Process explicit teacher-student mappings if present
+      if (mappingsData.length > 0) {
+        for (const mapping of mappingsData) {
+          const sid = mapping.studentId;
+          const u = userMap.get(sid);
+          if (!studentMap.has(sid)) {
+            studentMap.set(sid, {
+              id: sid,
+              name: u?.name || mapping.studentName || `Student ${sid.slice(0, 8)}`,
+              email: u?.email || "",
+              studentCode: u?.studentCode || mapping.studentCode || "",
+              batch: u?.batch || mapping.batchName || "241",
+              section: u?.section || mapping.sectionName || "D1",
+              courses: [],
+            });
           }
-        } catch (e) {
-          // Ignore
+          const student = studentMap.get(sid)!;
+          if (mapping.courseName && !student.courses.some((c) => c.courseId === mapping.courseId)) {
+            student.courses.push({
+              courseId: mapping.courseId,
+              courseName: mapping.courseName || mapping.courseId,
+            });
+          }
         }
-
-        if (!studentName) studentName = `Student ${sid.slice(0, 8)}`;
-
-        studentMap.set(sid, {
-          id: sid,
-          name: studentName,
-          email: email,
-          studentCode,
-          batch,
-          section,
-          courses: [],
-        });
       }
-      const student = studentMap.get(sid)!;
-      // Add course if not already present
-      if (mapping.courseName && !student.courses.some((c) => c.courseId === mapping.courseId)) {
-        student.courses.push({
-          courseId: mapping.courseId,
-          courseName: mapping.courseName || mapping.courseId,
-        });
-      }
-    }
 
-    // If no explicit teacher mappings exist yet, load all registered student profiles
-    if (studentMap.size === 0) {
-      try {
-        const allStudents = await getUsersByRole("student");
-        for (const s of allStudents) {
-          studentMap.set(s.id, {
-            id: s.id,
-            name: s.name || `Student ${s.id.slice(0, 8)}`,
-            email: s.email || "",
-            studentCode: s.studentCode || "",
-            batch: s.batch || "241",
-            section: s.section || "D1",
+      // 2. If no explicit mappings exist yet, load all registered student profiles
+      if (studentMap.size === 0) {
+        for (const u of allStudentDocs) {
+          studentMap.set(u.id, {
+            id: u.id,
+            name: u.name || `Student ${u.id.slice(0, 8)}`,
+            email: u.email || "",
+            studentCode: u.studentCode || "",
+            batch: u.batch || "241",
+            section: u.section || "D1",
             courses: [],
           });
         }
-      } catch (e) {
-        console.warn("Failed to load fallback students list:", e);
       }
-    }
 
-    setStudents(Array.from(studentMap.values()));
-  }, [assignments]);
+      setStudents(Array.from(studentMap.values()));
+    } catch (error) {
+      console.error("Failed to load teacher students:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    loadData(user.id);
+
+    const unsubscribe = subscribeToAssignedStudents(user.id, () => {
+      loadData(user.id);
+    });
+
+    return () => unsubscribe();
+  }, [user, loadData]);
 
   // Refresh data
   const handleRefresh = async () => {
     if (!user) return;
-    setLoading(true);
-    try {
-      const [mappingsData, assign] = await Promise.all([
-        getAssignedStudents(user.id),
-        getAssignmentsByTeacher(user.id),
-      ]);
-      setMappings(mappingsData);
-      setAssignments(assign);
-      buildStudentList(mappingsData, assign);
-    } catch (error) {
-      console.error("Error refreshing students:", error);
-      toast({ title: "Error", description: "Failed to refresh students", variant: "destructive" });
-    } finally {
-      setLoading(false);
-    }
+    await loadData(user.id);
+    toast({ title: "Refreshed", description: "Student list updated successfully." });
   };
 
   // Get unique courses for filter
@@ -199,50 +176,51 @@ export default function TeacherStudentsPage() {
               Students assigned to you by the administrator
             </p>
           </div>
-          <Button variant="outline" onClick={handleRefresh} disabled={loading}>
-            <RefreshCw className="h-4 w-4 mr-2" />
-            Refresh
+          <Button
+            onClick={handleRefresh}
+            variant="outline"
+            className="flex items-center gap-2"
+            disabled={loading}
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh List
           </Button>
         </div>
 
-        {/* Stats Overview */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center">
-                <div className="p-3 bg-blue-100 rounded-lg">
-                  <Users className="h-6 w-6 text-blue-600" />
-                </div>
-                <div className="ml-4">
-                  <p className="text-sm text-gray-600">Assigned Students</p>
-                  <p className="text-2xl font-bold">{totalStudents}</p>
-                </div>
+        {/* Stats Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <Card className="bg-gradient-to-br from-emerald-50 to-teal-50 border-emerald-200">
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold text-emerald-700 uppercase tracking-wider">Total Students</p>
+                <p className="text-2xl font-bold text-emerald-900 mt-1">{totalStudents}</p>
+              </div>
+              <div className="p-3 bg-emerald-500/10 rounded-xl text-emerald-600">
+                <Users className="h-6 w-6" />
               </div>
             </CardContent>
           </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center">
-                <div className="p-3 bg-emerald-100 rounded-lg">
-                  <BookOpen className="h-6 w-6 text-emerald-600" />
-                </div>
-                <div className="ml-4">
-                  <p className="text-sm text-gray-600">Assigned Courses</p>
-                  <p className="text-2xl font-bold">{totalCourses}</p>
-                </div>
+
+          <Card className="bg-gradient-to-br from-blue-50 to-indigo-50 border-blue-200">
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold text-blue-700 uppercase tracking-wider">Courses</p>
+                <p className="text-2xl font-bold text-blue-900 mt-1">{totalCourses}</p>
+              </div>
+              <div className="p-3 bg-blue-500/10 rounded-xl text-blue-600">
+                <BookOpen className="h-6 w-6" />
               </div>
             </CardContent>
           </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center">
-                <div className="p-3 bg-purple-100 rounded-lg">
-                  <Layers className="h-6 w-6 text-purple-600" />
-                </div>
-                <div className="ml-4">
-                  <p className="text-sm text-gray-600">Active Batches</p>
-                  <p className="text-2xl font-bold">{totalBatches}</p>
-                </div>
+
+          <Card className="bg-gradient-to-br from-purple-50 to-fuchsia-50 border-purple-200">
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold text-purple-700 uppercase tracking-wider">Batches</p>
+                <p className="text-2xl font-bold text-purple-900 mt-1">{totalBatches}</p>
+              </div>
+              <div className="p-3 bg-purple-500/10 rounded-xl text-purple-600">
+                <Layers className="h-6 w-6" />
               </div>
             </CardContent>
           </Card>
@@ -250,93 +228,96 @@ export default function TeacherStudentsPage() {
 
         {/* Search */}
         <Card>
-          <CardContent className="pt-6">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
+          <CardContent className="p-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
               <Input
                 placeholder="Search students by name, ID, batch, section, or course..."
-                className="pl-10"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9"
               />
             </div>
           </CardContent>
         </Card>
 
-        {/* Students List */}
+        {/* Student Table / Cards */}
         <Card>
           <CardHeader>
-            <CardTitle>Students</CardTitle>
+            <CardTitle>Assigned Students Directory</CardTitle>
             <CardDescription>
-              Students assigned to you ({filteredStudents.length} of {totalStudents})
+              Showing {filteredStudents.length} of {students.length} students
             </CardDescription>
           </CardHeader>
           <CardContent>
             {loading ? (
-              <div className="text-center py-8">
-                <Loader2 className="h-8 w-8 text-emerald-600 animate-spin mx-auto" />
+              <div className="flex items-center justify-center py-12 text-gray-500">
+                <Loader2 className="h-6 w-6 animate-spin mr-2" />
+                Loading students...
               </div>
             ) : filteredStudents.length === 0 ? (
-              <div className="text-center py-12">
-                <Users className="h-16 w-16 text-gray-400 mx-auto mb-4" />
-                <h3 className="text-lg font-medium text-gray-900 mb-2">No Students Found</h3>
-                <p className="text-gray-600">
-                  {searchQuery
-                    ? "No students match your search criteria"
-                    : "No students have been assigned to you yet. Contact the administrator."}
-                </p>
+              <div className="text-center py-12 text-gray-500">
+                <Users className="h-12 w-12 mx-auto mb-3 text-gray-300" />
+                <p className="text-lg font-medium">No students found</p>
+                <p className="text-sm mt-1">Try adjusting your search criteria</p>
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b">
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Student</th>
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">ID</th>
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Batch</th>
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Section</th>
-                      <th className="text-left py-3 px-4 text-sm font-medium text-gray-700">Courses</th>
+                <table className="w-full text-sm text-left">
+                  <thead className="bg-gray-50 text-gray-700 font-semibold uppercase text-xs">
+                    <tr>
+                      <th className="px-4 py-3">Student Name</th>
+                      <th className="px-4 py-3">Email</th>
+                      <th className="px-4 py-3">Student ID</th>
+                      <th className="px-4 py-3">Batch</th>
+                      <th className="px-4 py-3">Section</th>
+                      <th className="px-4 py-3">Courses</th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody className="divide-y divide-gray-100">
                     {filteredStudents.map((student) => (
-                      <tr key={student.id} className="border-b hover:bg-gray-50">
-                        <td className="py-3 px-4">
-                          <div className="flex items-center">
-                            <div className="w-10 h-10 bg-primary-100 rounded-full flex items-center justify-center mr-3">
-                              <span className="text-primary-600 font-medium">
-                                {student.name.charAt(0).toUpperCase()}
-                              </span>
-                            </div>
-                            <div>
-                              <p className="font-medium text-gray-900">{student.name}</p>
-                              <p className="text-sm text-gray-500">{student.email || "Email not available"}</p>
-                            </div>
+                      <tr key={student.id} className="hover:bg-gray-50/80 transition-colors">
+                        <td className="px-4 py-3 font-medium text-gray-900 flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs">
+                            {student.name.charAt(0).toUpperCase()}
                           </div>
+                          <span>{student.name}</span>
                         </td>
-                        <td className="py-3 px-4">
-                          <span className="text-sm font-mono text-gray-700">
-                            {student.studentCode || student.id.slice(0, 10)}
-                          </span>
+                        <td className="px-4 py-3 text-gray-600">
+                          {student.email ? (
+                            <span className="flex items-center gap-1">
+                              <Mail className="h-3.5 w-3.5 text-gray-400" />
+                              {student.email}
+                            </span>
+                          ) : (
+                            <span className="text-gray-400 italic">N/A</span>
+                          )}
                         </td>
-                        <td className="py-3 px-4">
-                          <Badge variant="outline" className="bg-blue-50 text-blue-800 border-blue-200">
-                            Batch {student.batch || "N/A"}
+                        <td className="px-4 py-3 font-mono text-xs text-gray-700">
+                          {student.studentCode || "N/A"}
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+                            Batch {student.batch || "241"}
                           </Badge>
                         </td>
-                        <td className="py-3 px-4">
-                          <Badge variant="outline" className="bg-purple-50 text-purple-800 border-purple-200">
-                            Section {student.section || "N/A"}
+                        <td className="px-4 py-3">
+                          <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
+                            Section {student.section || "D1"}
                           </Badge>
                         </td>
-                        <td className="py-3 px-4">
-                          <div className="flex flex-wrap gap-1">
-                            {student.courses.map((c) => (
-                              <Badge key={c.courseId} className="bg-emerald-100 text-emerald-800 border-emerald-200 text-xs">
-                                {c.courseName}
-                              </Badge>
-                            ))}
-                          </div>
+                        <td className="px-4 py-3">
+                          {student.courses.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {student.courses.map((c) => (
+                                <Badge key={c.courseId} className="bg-emerald-100 text-emerald-800 hover:bg-emerald-200 border-none text-xs">
+                                  {c.courseName}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-gray-400 italic">All Department Courses</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -350,4 +331,3 @@ export default function TeacherStudentsPage() {
     </DashboardLayout>
   );
 }
-
