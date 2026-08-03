@@ -14,6 +14,8 @@ import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { isEmailRegistered, hasCompleteProfile } from "@/lib/firebase/user-lookup";
 import { getPending, upsertPending, deletePending } from "@/lib/registration-store";
 
+import { validateName, validateEmail, validatePassword } from "@/lib/utils/validation";
+
 export const dynamic = "force-dynamic";
 
 interface RegisterBody {
@@ -49,17 +51,14 @@ export async function POST(req: NextRequest) {
   const role = body.role;
 
   // 2. Validate input.
-  if (!name || name.length < 2 || name.length > 100) {
-    return NextResponse.json(
-      { error: "Please provide a valid full name (2-100 characters)." },
-      { status: 400 }
-    );
+  const nameValidation = validateName(name);
+  if (!nameValidation.isValid) {
+    return NextResponse.json({ error: nameValidation.error }, { status: 400 });
   }
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return NextResponse.json(
-      { error: "Please provide a valid email address." },
-      { status: 400 }
-    );
+
+  const emailValidation = validateEmail(email);
+  if (!emailValidation.isValid) {
+    return NextResponse.json({ error: emailValidation.error }, { status: 400 });
   }
   if (!password || password.length < 6) {
     return NextResponse.json(

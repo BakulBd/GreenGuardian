@@ -17,6 +17,8 @@ import { DEFAULT_DEPARTMENT, DEFAULT_BATCHES, DEFAULT_SECTIONS, DEFAULT_COURSES 
 import { doc, setDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 
+import { validateName, validateEmail } from "@/lib/utils/validation";
+
 export default function StudentsPage() {
   const [students, setStudents] = useState<UserType[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,10 +68,21 @@ export default function StudentsPage() {
 
   const handleCreateStudent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.name || !formData.email) {
+    const nameCheck = validateName(formData.name);
+    if (!nameCheck.isValid) {
       toast({
         title: "Validation Error",
-        description: "Please fill in all required fields.",
+        description: nameCheck.error || "Invalid full name.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const emailCheck = validateEmail(formData.email);
+    if (!emailCheck.isValid) {
+      toast({
+        title: "Validation Error",
+        description: emailCheck.error || "Invalid email address.",
         variant: "destructive",
       });
       return;

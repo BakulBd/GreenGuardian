@@ -27,6 +27,8 @@ import {
 import { TeacherStudentMapping, TeacherAssignment } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils/helpers";
 
+import { getUser, getUsersByRole } from "@/lib/firebase/firestore";
+
 interface StudentInfo {
   id: string;
   name: string;
@@ -71,19 +73,34 @@ export default function TeacherStudentsPage() {
     for (const mapping of mappingsData) {
       const sid = mapping.studentId;
       if (!studentMap.has(sid)) {
-        // Try to get student name from mapping or from users collection
-        let studentName = mapping.studentName || `Student ${sid.slice(0, 8)}`;
+        let studentName = mapping.studentName || "";
         let studentCode = mapping.studentCode;
         let email = "";
+        let batch = mapping.batchName;
+        let section = mapping.sectionName;
 
-        // We store the mapping info directly
+        try {
+          const userDoc = await getUser(sid);
+          if (userDoc) {
+            studentName = userDoc.name || studentName;
+            email = userDoc.email || email;
+            studentCode = userDoc.studentCode || studentCode;
+            batch = userDoc.batch || batch;
+            section = userDoc.section || section;
+          }
+        } catch (e) {
+          // Ignore
+        }
+
+        if (!studentName) studentName = `Student ${sid.slice(0, 8)}`;
+
         studentMap.set(sid, {
           id: sid,
           name: studentName,
           email: email,
           studentCode,
-          batch: mapping.batchName,
-          section: mapping.sectionName,
+          batch,
+          section,
           courses: [],
         });
       }
@@ -94,6 +111,26 @@ export default function TeacherStudentsPage() {
           courseId: mapping.courseId,
           courseName: mapping.courseName || mapping.courseId,
         });
+      }
+    }
+
+    // If no explicit teacher mappings exist yet, load all registered student profiles
+    if (studentMap.size === 0) {
+      try {
+        const allStudents = await getUsersByRole("student");
+        for (const s of allStudents) {
+          studentMap.set(s.id, {
+            id: s.id,
+            name: s.name || `Student ${s.id.slice(0, 8)}`,
+            email: s.email || "",
+            studentCode: s.studentCode || "",
+            batch: s.batch || "241",
+            section: s.section || "D1",
+            courses: [],
+          });
+        }
+      } catch (e) {
+        console.warn("Failed to load fallback students list:", e);
       }
     }
 

@@ -29,9 +29,20 @@ export async function getAllUsers(): Promise<User[]> {
 }
 
 export async function getUsersByRole(role: UserRole): Promise<User[]> {
-  const q = query(collection(db, "users"), where("role", "==", role));
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as User));
+  try {
+    const q = query(collection(db, "users"), where("role", "==", role));
+    const snapshot = await getDocs(q);
+    const users = snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as User));
+    if (users.length > 0) return users;
+
+    // Fallback: fetch all users and filter in-memory
+    const allUsers = await getAllUsers();
+    return allUsers.filter(u => u.role === role || (role === "student" && u.role !== "teacher" && u.role !== "admin"));
+  } catch (error) {
+    console.warn("getUsersByRole fallback:", error);
+    const allUsers = await getAllUsers();
+    return allUsers.filter(u => u.role === role || (role === "student" && u.role !== "teacher" && u.role !== "admin"));
+  }
 }
 
 export async function getPendingTeachers(): Promise<User[]> {
