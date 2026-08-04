@@ -79,22 +79,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 3. Check if the email is already registered. Uses the Admin SDK when
-  // configured, otherwise falls back to the Firebase Auth REST endpoint
-  // (public API key only, no service account required).
+  // 3. Check if the email is already registered in Firebase.
   try {
     const alreadyRegistered = await isEmailRegistered(email);
     if (alreadyRegistered) {
-      // Only block if the account is *fully* registered (has a Firestore
-      // profile). An Auth user whose profile write failed earlier (orphaned
-      // account) can be re-registered — the verify step will complete it.
-      const complete = await hasCompleteProfile(email);
-      if (complete) {
-        return NextResponse.json(
-          { error: "An account with this email already exists. Please login instead." },
-          { status: 409 }
-        );
-      }
+      return NextResponse.json(
+        { error: "An account with this email already exists. Please login instead." },
+        { status: 409 }
+      );
     }
   } catch (err: any) {
     console.error("Error checking existing user:", err);

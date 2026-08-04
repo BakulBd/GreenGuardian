@@ -1,8 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   allowedDevOrigins: [
-    '192.168.1.101',
     'green.bakul.app',
+    'https://green.bakul.app',
+    'http://green.bakul.app',
+    '*.bakul.app',
+    '192.168.1.101',
+    '192.168.0.203',
     'localhost:3000',
     'localhost:3001',
     '127.0.0.1:3000',

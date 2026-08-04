@@ -1,61 +1,67 @@
 /**
  * Server-only email existence lookup.
- *
- * Uses the Firebase Admin SDK when configured (production / emulator). When the
- * Admin SDK is NOT configured (local dev without a service account), it falls
- * back to the Firebase Auth REST `accounts:lookup` endpoint, which only needs
- * the public web API key (already available via NEXT_PUBLIC_FIREBASE_API_KEY).
- *
- * The lookup is best-effort: if it fails for any reason it returns `false` so
- * registration is not blocked — a duplicate email is still caught later at
- * account-creation time.
+ * Checks Firestore users collection AND Firebase Auth to prevent sending verification
+ * emails to already registered accounts.
  */
+import { collection, query, where, getDocs } from "firebase/firestore";
+import { db } from "./config";
 import { getAdminAuth, getAdminDb, isAdminSdkConfigured } from "./admin";
 
 /**
- * True when an Auth user exists for `email` AND its Firestore `users/{uid}`
- * profile document exists (i.e. a fully-registered account).
- *
- * Used by the register route to distinguish a real, existing account (block
- * re-registration) from an "orphaned" Auth user that was created but whose
- * profile write failed partway through the OTP flow. Orphaned accounts are
- * allowed to re-register — the verify step completes their profile via the
- * sign-in recovery path.
+ * True when a user with `email` exists in Firestore `users` collection
+ * or Firebase Auth.
  */
 export async function hasCompleteProfile(email: string): Promise<boolean> {
+  const cleanEmail = (email || "").trim().toLowerCase();
+  
   if (isAdminSdkConfigured()) {
     try {
-      const user = await getAdminAuth().getUserByEmail(email);
+      const user = await getAdminAuth().getUserByEmail(cleanEmail);
       const doc = await getAdminDb().collection("users").doc(user.uid).get();
-      return doc.exists;
+      if (doc.exists) return true;
     } catch (e: any) {
       if (e?.code === "auth/user-not-found") return false;
-      console.warn("[user-lookup] hasCompleteProfile (Admin) failed:", e?.message || e);
-      return false;
     }
   }
 
-  // REST mode: without the user's password we have no idToken to read the
-  // profile. Returning false lets the verify step handle it via the sign-in
-  // recovery path (EMAIL_EXISTS → sign in → write profile).
+  try {
+    const q = query(collection(db, "users"), where("email", "==", cleanEmail));
+    const snap = await getDocs(q);
+    if (!snap.empty) return true;
+  } catch (e) {
+    // Ignore query failure
+  }
+
   return false;
 }
 
+/**
+ * True when an email is already registered in Firebase Auth or Firestore users collection.
+ */
 export async function isEmailRegistered(email: string): Promise<boolean> {
-  // Preferred: Admin SDK (no network round trip to an unversioned endpoint).
+  const cleanEmail = (email || "").trim().toLowerCase();
+
+  // 1. Direct Firestore check
+  try {
+    const q = query(collection(db, "users"), where("email", "==", cleanEmail));
+    const snap = await getDocs(q);
+    if (!snap.empty) return true;
+  } catch (e) {
+    // Ignore query failure
+  }
+
+  // 2. Preferred: Admin SDK check
   if (isAdminSdkConfigured()) {
     try {
-      await getAdminAuth().getUserByEmail(email);
+      await getAdminAuth().getUserByEmail(cleanEmail);
       return true;
     } catch (e: any) {
       if (e?.code === "auth/user-not-found") return false;
-      // Any other error — don't block registration; duplicate catch happens later.
-      console.warn("[user-lookup] Admin SDK email lookup failed:", e?.message || e);
       return false;
     }
   }
 
-  // Fallback: Firebase Auth REST endpoint using the public API key.
+  // 3. Fallback: Firebase Auth REST endpoint using public API key
   try {
     const apiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY;
     if (!apiKey) return false;
@@ -64,15 +70,13 @@ export async function isEmailRegistered(email: string): Promise<boolean> {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: [email] }),
+        body: JSON.stringify({ email: [cleanEmail] }),
       }
     );
     const data = await res.json().catch(() => null);
     if (!data || typeof data !== "object") return false;
     return Array.isArray((data as any).users) && (data as any).users.length > 0;
   } catch (e) {
-    console.warn("[user-lookup] REST email lookup failed:", e);
     return false;
   }
 }
-
