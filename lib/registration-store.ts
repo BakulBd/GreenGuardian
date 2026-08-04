@@ -102,47 +102,69 @@ function deleteFileRecord(email: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Public API (route handlers use only these)
+// In-Memory fallback store for read-only serverless filesystems & local dev
 // ---------------------------------------------------------------------------
+const memoryStore = new Map<string, PendingRegistration>();
+
 export function registrationStoreEnabled(): boolean {
   return true;
 }
 
 export async function getPending(email: string): Promise<PendingRegistration | null> {
+  const cleanEmail = email.toLowerCase();
   if (isAdminSdkConfigured()) {
     try {
       const db = getAdminDb();
-      const doc = await db.collection("pendingRegistrations").doc(email.toLowerCase()).get();
-      return toAdminRecord(doc);
+      const doc = await db.collection("pendingRegistrations").doc(cleanEmail).get();
+      const rec = toAdminRecord(doc);
+      if (rec) return rec;
     } catch (e) {
-      console.warn("[registration-store] Admin read failed:", e);
-      return null;
+      console.warn("[registration-store] Admin read failed, trying fallbacks:", e);
     }
   }
-  return readFileRecord(email.toLowerCase());
+
+  const fileRec = readFileRecord(cleanEmail);
+  if (fileRec) return fileRec;
+
+  const memRec = memoryStore.get(cleanEmail);
+  if (memRec && Date.now() < memRec.expiresAt) {
+    return memRec;
+  }
+  return null;
 }
 
 export async function upsertPending(rec: PendingRegistration): Promise<void> {
   const email = rec.email.toLowerCase();
+  memoryStore.set(email, { ...rec, email });
+
   if (isAdminSdkConfigured()) {
-    const db = getAdminDb();
-    await db.collection("pendingRegistrations").doc(email).set({
-      email: rec.email,
-      name: rec.name,
-      password: rec.password,
-      role: rec.role,
-      otpHash: rec.otpHash,
-      verificationToken: rec.verificationToken,
-      expiresAt: new Date(rec.expiresAt),
-      sendCount: rec.sendCount,
-      attempts: rec.attempts,
-      lastSentAt: new Date(rec.lastSentAt),
-      createdAt: rec.createdAt ? new Date(rec.createdAt) : new Date(),
-      updatedAt: new Date(rec.updatedAt),
-    });
-    return;
+    try {
+      const db = getAdminDb();
+      await db.collection("pendingRegistrations").doc(email).set({
+        email: rec.email,
+        name: rec.name,
+        password: rec.password,
+        role: rec.role,
+        otpHash: rec.otpHash,
+        verificationToken: rec.verificationToken,
+        expiresAt: new Date(rec.expiresAt),
+        sendCount: rec.sendCount,
+        attempts: rec.attempts,
+        lastSentAt: new Date(rec.lastSentAt),
+        createdAt: rec.createdAt ? new Date(rec.createdAt) : new Date(),
+        updatedAt: new Date(rec.updatedAt),
+      });
+      return;
+    } catch (e) {
+      console.warn("[registration-store] Admin upsert failed, stored in memory & file:", e);
+    }
   }
-  writeFileRecord({ ...rec, email });
+
+  try {
+    writeFileRecord({ ...rec, email });
+  } catch (e) {
+    console.warn("[registration-store] File write failed, saved in memory:", e);
+  }
 }
 
 export async function updatePending(
@@ -163,15 +185,16 @@ export async function consumePending(email: string, expectedOtpHash: string): Pr
 }
 
 export async function deletePending(email: string): Promise<void> {
+  const cleanEmail = email.toLowerCase();
+  memoryStore.delete(cleanEmail);
   if (isAdminSdkConfigured()) {
     try {
       const db = getAdminDb();
-      await db.collection("pendingRegistrations").doc(email.toLowerCase()).delete();
+      await db.collection("pendingRegistrations").doc(cleanEmail).delete();
     } catch (e) {
       console.warn("[registration-store] Admin delete failed:", e);
     }
-    return;
   }
-  deleteFileRecord(email.toLowerCase());
+  deleteFileRecord(cleanEmail);
 }
 
