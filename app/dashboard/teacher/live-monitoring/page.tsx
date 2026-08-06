@@ -34,7 +34,7 @@ import {
   ShieldAlert,
   TrendingDown,
   History,
-  Image,
+  Image as ImageIcon,
   Wifi,
   WifiOff,
   Volume2,
@@ -718,7 +718,7 @@ export default function LiveMonitoringPage() {
                             />
                           ) : (
                             <div className="flex items-center justify-center h-full">
-                              <Image className="h-8 w-8 text-gray-400" />
+                              <ImageIcon className="h-8 w-8 text-gray-400" />
                             </div>
                           )}
                           <div className="absolute bottom-0 left-0 right-0 bg-black/50 px-2 py-1">

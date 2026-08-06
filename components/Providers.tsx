@@ -3,6 +3,8 @@
 import { ReactNode } from "react";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { Toaster } from "@/components/ui/toaster";
+import ErrorBoundary from "@/components/ErrorBoundary";
+import NetworkStatus from "@/components/NetworkStatus";
 
 interface ProvidersProps {
   children: ReactNode;
@@ -10,9 +12,12 @@ interface ProvidersProps {
 
 export function Providers({ children }: ProvidersProps) {
   return (
-    <AuthProvider>
-      {children}
-      <Toaster />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <NetworkStatus />
+        {children}
+        <Toaster />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }

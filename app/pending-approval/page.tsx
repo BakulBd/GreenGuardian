@@ -108,7 +108,7 @@ export default function PendingApprovalPage() {
               <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
                 <p className="text-sm text-yellow-800">
                   Your request is currently under review. An administrator will approve
-                  your account soon. You'll receive access to the teacher dashboard once
+                  your account soon. You&apos;ll receive access to the teacher dashboard once
                   approved.
                 </p>
               </div>

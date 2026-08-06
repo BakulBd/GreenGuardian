@@ -27,7 +27,7 @@ import {
   Maximize2,
   Eye,
   History,
-  Image,
+  Image as ImageIcon,
   Shield,
   Activity,
   X,
@@ -770,7 +770,7 @@ export default function TeacherWatchLivePage() {
                             />
                           ) : (
                             <div className="flex items-center justify-center h-full">
-                              <Image className="h-8 w-8 text-gray-400" />
+                              <ImageIcon className="h-8 w-8 text-gray-400" />
                             </div>
                           )}
                           <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-2 py-1">

@@ -24,10 +24,17 @@ export default function ExamPage() {
   };
 
   useEffect(() => {
-    if (!authLoading) {
-      loadExams();
+    if (authLoading) return;
+
+    // Guard the route: this page lives outside DashboardLayout, so without this
+    // an anonymous visitor just saw an empty list (every read denied by rules).
+    if (!user) {
+      router.replace("/login?next=/exam");
+      return;
     }
-  }, [authLoading]);
+
+    loadExams();
+  }, [authLoading, user, router]);
 
   const loadExams = async () => {
     try {

@@ -546,6 +546,25 @@ to a heartbeat once WebRTC connects, to stay inside the Firebase free tier.
 >
 > Full design notes and the system audit: [`docs/EXAM_SYSTEM_ANALYSIS.md`](docs/EXAM_SYSTEM_ANALYSIS.md).
 
+## ✅ Quality gates
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm run lint        # eslint
+npm test            # vitest (unit tests for scoring, validation, live video)
+npm run build       # production build
+```
+
+Before deploying, read [`docs/PRODUCTION_AUDIT.md`](docs/PRODUCTION_AUDIT.md). It
+lists the security fixes in this release, the required Firestore rules
+deployment, the Vercel environment variables, and the limitations that are
+deliberately still open.
+
+> **Security note:** the Gemini key is **server-side only** (`GEMINI_API_KEY`).
+> Never set `NEXT_PUBLIC_GEMINI_API_KEY` — that inlines the key into the browser
+> bundle. Browser code calls `/api/ocr`, which verifies the caller's Firebase ID
+> token. If that public variable was ever set in your deployment, rotate the key.
+
 ## 🎨 UI Theme
 
 The application uses a custom green theme:
