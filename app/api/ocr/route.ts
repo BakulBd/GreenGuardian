@@ -7,7 +7,7 @@ import {
   analyzeAnswerQuality,
   extractQuestionsFromPaper,
 } from "@/lib/utils/gemini";
-import { getAdminAuth, isAdminSdkConfigured } from "@/lib/firebase/admin";
+import { getAdminAuth, getAdminDb, isAdminSdkConfigured } from "@/lib/firebase/admin";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 /** Longest text we will forward to the model (protects quota and latency). */
@@ -53,6 +53,18 @@ async function requireUser(
 
   try {
     const decoded = await getAdminAuth().verifyIdToken(token);
+
+    // Accounts an admin has put on hold or suspended may not call billable
+    // AI endpoints even with an otherwise-valid session token.
+    const userSnap = await getAdminDb().collection("users").doc(decoded.uid).get();
+    const status = userSnap.exists ? userSnap.data()?.status : undefined;
+    if (status === "hold" || status === "suspended") {
+      return NextResponse.json(
+        { success: false, error: "Your account access has been restricted. Please contact an administrator." },
+        { status: 403 }
+      );
+    }
+
     return { uid: decoded.uid };
   } catch {
     return NextResponse.json(

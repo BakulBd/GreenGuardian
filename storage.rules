@@ -31,6 +31,22 @@ service firebase.storage {
       // Max 10MB per file
       return request.resource.size < 10 * 1024 * 1024;
     }
+
+    // Classroom materials (Phase 2, Feature 1) additionally allow video,
+    // zip, and presentation files, with a larger size ceiling for video.
+    function isClassroomFileType() {
+      return isValidFileType() ||
+        request.resource.contentType.matches('video/.*') ||
+        request.resource.contentType == 'application/zip' ||
+        request.resource.contentType == 'application/x-zip-compressed' ||
+        request.resource.contentType == 'application/vnd.ms-powerpoint' ||
+        request.resource.contentType == 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    }
+
+    function isClassroomFileSize() {
+      // Max 100MB per file (materials can include short video clips).
+      return request.resource.size < 100 * 1024 * 1024;
+    }
     
     // User avatars
     match /avatars/{userId}/{fileName} {
@@ -51,16 +67,27 @@ service firebase.storage {
       allow write: if isAuthenticated() && isValidFileType() && isValidSize();
     }
     
-    // Warning screenshots
+    // Warning screenshots — permanent proctoring evidence (Task 9).
+    // Delete is split out from create/update: a delete request has no
+    // request.resource, so folding it into the size/type-checked `write`
+    // rule below would silently deny every delete attempt.
     match /warningScreenshots/{allPaths=**} {
       allow read: if isAuthenticated();
-      allow write: if isAuthenticated() && isImage() && isValidSize();
+      allow create, update: if isAuthenticated() && isImage() && isValidSize();
+      allow delete: if isAuthenticated();
     }
     
     // Exam papers and materials
     match /exams/{allPaths=**} {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isValidFileType() && isValidSize();
+      allow delete: if isAuthenticated();
+    }
+
+    // Classroom stream/classwork attachments (Phase 2, Feature 1)
+    match /classrooms/{allPaths=**} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isClassroomFileType() && isClassroomFileSize();
       allow delete: if isAuthenticated();
     }
     

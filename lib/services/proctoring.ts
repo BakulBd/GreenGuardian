@@ -3,6 +3,7 @@
 
 import {
   doc,
+  getDoc,
   updateDoc,
   onSnapshot,
   collection,
@@ -12,11 +13,13 @@ import {
   serverTimestamp,
   addDoc,
   getDocs,
+  deleteDoc,
   increment,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
-import { ref, uploadString, getDownloadURL } from "firebase/storage";
+import { ref, uploadString, getDownloadURL, deleteObject } from "firebase/storage";
 import { storage } from "@/lib/firebase/config";
+import { getExamsByTeacher } from "@/lib/firebase/exams";
 
 // Proctoring event types
 export type ProctoringEventType = 
@@ -140,6 +143,10 @@ export interface LiveStudentSession {
   // Flags
   hasAlert: boolean;
   alertReasons: string[];
+
+  // Teacher-triggered suspend/resume (Task 3)
+  locked: boolean;
+  lockReason?: string;
 }
 
 /**
@@ -248,6 +255,48 @@ export async function logProctoringEvent(
   } catch (error) {
     console.error("Failed to log proctoring event:", error);
   }
+}
+
+/**
+ * Suspend a student's in-progress exam session. The student's client watches
+ * `locked` in real time and freezes the exam (timer stops, inputs disabled)
+ * until a teacher resumes it. See resumeExamSession() for how the paused
+ * duration is credited back to the student.
+ */
+export async function suspendExamSession(
+  sessionId: string,
+  teacherId: string,
+  reason?: string
+): Promise<void> {
+  await updateDoc(doc(db, "examSessions", sessionId), {
+    locked: true,
+    lockReason: reason || "",
+    lockedBy: teacherId,
+    lockedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+/**
+ * Resume a suspended exam session. The time spent locked is added to
+ * `totalPausedMs` so neither the live countdown nor a resume-after-refresh
+ * calculation (see ExamClient's resolvePriorAttempt) counts it against the
+ * student.
+ */
+export async function resumeExamSession(sessionId: string): Promise<void> {
+  const sessionRef = doc(db, "examSessions", sessionId);
+  const snap = await getDoc(sessionRef);
+  const data = snap.data();
+  const lockedAtMs = data?.lockedAt ? toDateSafe(data.lockedAt).getTime() : Date.now();
+  const pausedDeltaMs = Math.max(0, Date.now() - lockedAtMs);
+
+  await updateDoc(sessionRef, {
+    locked: false,
+    lockReason: "",
+    lockedAt: null,
+    totalPausedMs: increment(pausedDeltaMs),
+    updatedAt: serverTimestamp(),
+  });
 }
 
 /**
@@ -433,6 +482,8 @@ export function subscribeToLiveSessions(
           recentEvents,
           hasAlert,
           alertReasons,
+          locked: !!data.locked,
+          lockReason: data.lockReason || undefined,
         } as LiveStudentSession;
       })
     );
@@ -693,4 +744,67 @@ export async function getExamWarningScreenshots(
     console.error("Failed to get exam warning screenshots:", error);
     return [];
   }
+}
+
+/**
+ * Get every warning screenshot captured across all of a teacher's exams —
+ * powers the standalone Snapshots gallery (Task 9). Admins pass no teacherId
+ * to get every screenshot in the system.
+ */
+export async function getWarningScreenshotsByTeacher(teacherId?: string): Promise<WarningScreenshot[]> {
+  try {
+    let examIds: string[] | null = null;
+    if (teacherId) {
+      const exams = await getExamsByTeacher(teacherId);
+      if (exams.length === 0) return [];
+      examIds = exams.map((e) => e.id);
+    }
+
+    const items: WarningScreenshot[] = [];
+
+    if (examIds) {
+      // Firestore `in` queries allow at most 30 values per batch.
+      for (let i = 0; i < examIds.length; i += 30) {
+        const chunk = examIds.slice(i, i + 30);
+        const snapshot = await getDocs(
+          query(collection(db, "warningScreenshots"), where("examId", "in", chunk))
+        );
+        snapshot.docs.forEach((d) => {
+          items.push({ id: d.id, ...d.data(), timestamp: d.data().timestamp?.toDate?.() || new Date() } as WarningScreenshot);
+        });
+      }
+    } else {
+      const snapshot = await getDocs(collection(db, "warningScreenshots"));
+      snapshot.docs.forEach((d) => {
+        items.push({ id: d.id, ...d.data(), timestamp: d.data().timestamp?.toDate?.() || new Date() } as WarningScreenshot);
+      });
+    }
+
+    items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return items;
+  } catch (error) {
+    console.error("Failed to get teacher warning screenshots:", error);
+    return [];
+  }
+}
+
+/**
+ * Permanently delete a warning screenshot: the Storage object first (if it
+ * was actually uploaded there rather than falling back to inline base64),
+ * then the Firestore record.
+ */
+export async function deleteWarningScreenshot(screenshot: WarningScreenshot): Promise<void> {
+  if (!screenshot.id) throw new Error("Screenshot has no id");
+
+  if (screenshot.storagePath) {
+    try {
+      await deleteObject(ref(storage, screenshot.storagePath));
+    } catch (error) {
+      // Already gone, or it was never actually uploaded to Storage (the
+      // base64 fallback path) — either way, still remove the Firestore record.
+      console.warn("Failed to delete screenshot from Storage (continuing):", error);
+    }
+  }
+
+  await deleteDoc(doc(db, "warningScreenshots", screenshot.id));
 }

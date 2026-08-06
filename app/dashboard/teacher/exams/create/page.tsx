@@ -38,6 +38,7 @@ interface Question {
   options: string[];
   correctAnswer: string;
   marks: number;
+  negativeMarks?: number;
   courseId?: string;
   batch?: string;
   section?: string;
@@ -85,14 +86,22 @@ export default function CreateExamPage() {
       });
       const data = await res.json();
       if (data.success && Array.isArray(data.questions) && data.questions.length > 0) {
-        const parsedQuestions: Question[] = data.questions.map((q: any, idx: number) => ({
-          id: `${Date.now()}_${idx}`,
-          text: q.text || `Question ${idx + 1}`,
-          type: q.type === "mcq" ? "multiple-choice" : "short-answer",
-          options: Array.isArray(q.options) && q.options.length >= 2 ? q.options : ["Option 1", "Option 2", "Option 3", "Option 4"],
-          correctAnswer: q.correctAnswer || "",
-          marks: q.marks || 10,
-        }));
+        const parsedQuestions: Question[] = data.questions.map((q: any, idx: number) => {
+          const type: Question["type"] = q.type === "mcq" ? "multiple-choice" : "short-answer";
+          return {
+            id: `${Date.now()}_${idx}`,
+            text: q.text || `Question ${idx + 1}`,
+            type,
+            options:
+              type === "multiple-choice"
+                ? Array.isArray(q.options) && q.options.length >= 2
+                  ? q.options
+                  : ["Option 1", "Option 2", "Option 3", "Option 4"]
+                : [],
+            correctAnswer: q.correctAnswer || "",
+            marks: q.marks || 10,
+          };
+        });
 
         setQuestions(parsedQuestions);
         setExamMode("online");
@@ -591,9 +600,14 @@ export default function CreateExamPage() {
                       <select
                         className="w-full px-3 py-2 border rounded-md"
                         value={question.type}
-                        onChange={(e) => updateQuestion(question.id, { 
+                        onChange={(e) => updateQuestion(question.id, {
                           type: e.target.value as Question["type"],
-                          options: e.target.value === "true-false" ? ["True", "False"] : ["", "", "", ""],
+                          options:
+                            e.target.value === "true-false"
+                              ? ["True", "False"]
+                              : e.target.value === "short-answer"
+                              ? []
+                              : ["", "", "", ""],
                         })}
                       >
                         <option value="multiple-choice">Multiple Choice</option>
@@ -611,6 +625,20 @@ export default function CreateExamPage() {
                       />
                     </div>
                   </div>
+
+                  {question.type !== "short-answer" && (
+                    <div className="space-y-2 max-w-[200px]">
+                      <Label>Negative Marks (optional)</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        value={question.negativeMarks || ""}
+                        onChange={(e) => updateQuestion(question.id, { negativeMarks: parseFloat(e.target.value) || undefined })}
+                        placeholder="0"
+                      />
+                      <p className="text-xs text-gray-500">Deducted from the student&apos;s score if answered incorrectly.</p>
+                    </div>
+                  )}
 
                   {question.type !== "short-answer" && (
                     <div className="space-y-2">

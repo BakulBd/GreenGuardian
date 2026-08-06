@@ -20,6 +20,7 @@ import {
   getAssignmentHistory,
   subscribeToAllAssignments,
   getStudentGroup,
+  backfillAllAssignedTeacherIds,
 } from "@/lib/firebase/assignments";
 import { TeacherAssignment, TeacherStudentMapping, AssignmentHistory, User } from "@/lib/types";
 import {
@@ -51,6 +52,7 @@ export default function AdminAssignmentsPage() {
   const [history, setHistory] = useState<AssignmentHistory[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   // Assignment form state
   const [showForm, setShowForm] = useState(false);
@@ -291,6 +293,26 @@ export default function AdminAssignmentsPage() {
     }
   };
 
+  /**
+   * Fixes the "published exams / notices not visible" bug (Feature 5) for
+   * every student whose assignment predates the assignedTeacherIds sync
+   * logic. Safe to run any time — see backfillAllAssignedTeacherIds() for why.
+   */
+  const handleSyncAssignedTeacherIds = async () => {
+    setSyncing(true);
+    try {
+      const { studentsUpdated } = await backfillAllAssignedTeacherIds();
+      toast({
+        title: "Sync Complete",
+        description: `Refreshed assignment visibility for ${studentsUpdated} student${studentsUpdated !== 1 ? "s" : ""}. Exams and notices will now reach everyone who's actually assigned.`,
+      });
+    } catch (error: any) {
+      toast({ title: "Sync Failed", description: error.message || "Failed to sync assignments", variant: "destructive" });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   // ===================== Derived Data =====================
 
   const teacherName = (id: string) => teachers.find((t) => t.id === id)?.name || id;
@@ -335,10 +357,14 @@ export default function AdminAssignmentsPage() {
               Assign courses, batches & sections to teachers. Teachers only see their assigned students.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <Button variant="outline" onClick={handleRefresh} disabled={loading}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Refresh
+            </Button>
+            <Button variant="outline" onClick={handleSyncAssignedTeacherIds} disabled={syncing} title="Fixes exams/notices not showing up for already-assigned students">
+              {syncing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <UserCog className="h-4 w-4 mr-2" />}
+              Sync Assignment Visibility
             </Button>
             <Button onClick={openCreateForm} disabled={saving}>
               <Plus className="h-4 w-4 mr-2" />

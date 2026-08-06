@@ -23,6 +23,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { collection, query, where, getDocs, doc, getDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
+import { subscribeToPublishedExams } from "@/lib/firebase/exams";
 import Link from "next/link";
 
 interface Exam {
@@ -34,6 +35,7 @@ interface Exam {
   status: string;
   startDate?: string;
   endDate?: string;
+  attemptsAllowed?: number;
 }
 
 interface ExamSession {
@@ -69,27 +71,35 @@ export default function StudentDashboardPage() {
     }
   }, [user]);
 
+  // Realtime exam visibility (Feature 5): a newly published exam appears
+  // immediately, without the student needing to reload the dashboard. Split
+  // out from loadData() (which stays a one-time fetch for sessions/stats) so
+  // this listener can update independently as exams are published/edited.
+  useEffect(() => {
+    if (!user) return;
+    const assignedTeacherIds = user.assignedTeacherIds || [];
+    const unsubscribe = subscribeToPublishedExams((allExams) => {
+      const now = new Date();
+      const exams = allExams.filter((exam) => {
+        // A student only sees exams from teachers an admin assigned them
+        // to (Task 10) — see lib/firebase/assignments.ts.
+        if ((exam as any).teacherId && !assignedTeacherIds.includes((exam as any).teacherId)) {
+          return false;
+        }
+        // Check if exam is within date range
+        if ((exam as any).startDate && new Date((exam as any).startDate) > now) return false;
+        if ((exam as any).endDate && new Date((exam as any).endDate) < now) return false;
+        return true;
+      });
+      setAvailableExams(exams as unknown as Exam[]);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
   const loadData = async () => {
     if (!user) return;
 
     try {
-      // Load available exams
-      const now = new Date();
-      const examsQuery = query(
-        collection(db, "exams"),
-        where("status", "in", ["published", "active"])
-      );
-      const examsSnapshot = await getDocs(examsQuery);
-      const exams = examsSnapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() } as Exam))
-        .filter(exam => {
-          // Check if exam is within date range
-          if (exam.startDate && new Date(exam.startDate) > now) return false;
-          if (exam.endDate && new Date(exam.endDate) < now) return false;
-          return true;
-        });
-      setAvailableExams(exams);
-
       // Load ALL of this student's sessions. The old query capped at 10 without
       // an ordering, so stats were computed from an arbitrary subset and an
       // older attempt could be missed entirely.
@@ -98,7 +108,9 @@ export default function StudentDashboardPage() {
       );
 
       // Resolve exam titles in one pass instead of one query per session.
-      const titleById = new Map(exams.map((e) => [e.id, e.title]));
+      // Best-effort cache from the realtime exam listener — any miss (it may
+      // not have loaded yet) falls back to the per-ID getDoc below.
+      const titleById = new Map(availableExams.map((e) => [e.id, e.title]));
       const missingExamIds = Array.from(
         new Set(
           sessionsSnapshot.docs
@@ -156,9 +168,13 @@ export default function StudentDashboardPage() {
   const isSubmittedStatus = (status: string) =>
     status === "submitted" || status === "auto-submitted" || status === "completed";
 
-  /** Finished attempt → exam is locked. */
-  const hasAttempted = (examId: string) =>
-    allSessions.some((s) => s.examId === examId && isSubmittedStatus(s.status));
+  /** How many finished attempts the student has used for this exam. */
+  const finishedAttemptCount = (examId: string) =>
+    allSessions.filter((s) => s.examId === examId && isSubmittedStatus(s.status)).length;
+
+  /** All allowed attempts used, and nothing left in progress → exam is locked. */
+  const hasAttempted = (exam: Exam) =>
+    finishedAttemptCount(exam.id) >= (exam.attemptsAllowed || 1);
 
   /** Unfinished attempt → the student must be able to go back in and finish. */
   const canResume = (examId: string) =>
@@ -310,17 +326,22 @@ export default function StudentDashboardPage() {
                           <FileText className="h-3 w-3 mr-1" />
                           {exam.totalMarks} marks
                         </Badge>
+                        {(exam.attemptsAllowed || 1) > 1 && (
+                          <Badge variant="outline">
+                            {finishedAttemptCount(exam.id)}/{exam.attemptsAllowed} attempts used
+                          </Badge>
+                        )}
                       </div>
                       <Button
                         className="w-full mt-4"
                         onClick={() => router.push(`/exam/${exam.id}`)}
-                        disabled={hasAttempted(exam.id)}
-                        variant={canResume(exam.id) && !hasAttempted(exam.id) ? "secondary" : "default"}
+                        disabled={hasAttempted(exam)}
+                        variant={canResume(exam.id) && !hasAttempted(exam) ? "secondary" : "default"}
                       >
-                        {hasAttempted(exam.id) ? (
+                        {hasAttempted(exam) ? (
                           <>
                             <CheckCircle className="mr-2 h-4 w-4" />
-                            Attempted
+                            No Attempts Left
                           </>
                         ) : canResume(exam.id) ? (
                           <>
@@ -475,9 +496,9 @@ export default function StudentDashboardPage() {
               </div>
 
               <div className="flex gap-2 mt-4">
-                <Button 
-                  className="flex-1 bg-blue-600 hover:bg-blue-700" 
-                  onClick={() => router.push(`/exam/${selectedSession.examId}/review`)}
+                <Button
+                  className="flex-1 bg-blue-600 hover:bg-blue-700"
+                  onClick={() => router.push(`/exam/${selectedSession.examId}/review?session=${selectedSession.id}`)}
                 >
                   <Eye className="w-4 h-4 mr-2" />
                   Review Answers

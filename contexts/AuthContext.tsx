@@ -2,8 +2,10 @@
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase/config";
+import { signOut as signOutUser } from "@/lib/firebase/auth";
+import { toast } from "@/components/ui/use-toast";
 import { User } from "@/lib/types";
 
 interface AuthContextType {
@@ -71,6 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [initialized, setInitialized] = useState(false);
+  const [liveUid, setLiveUid] = useState<string | null>(null);
 
   useEffect(() => {
     const cached = getCachedUser();
@@ -86,6 +89,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!isMounted) return;
 
       if (firebaseUser) {
+        setLiveUid(firebaseUser.uid);
         // Only show loading if we don't have a cached user to avoid blocking UI during background refresh
         if (isMounted && !cached) setLoading(true);
         try {
@@ -139,6 +143,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } else {
         if (isMounted) {
+          setLiveUid(null);
           setUser(null);
           setCachedUser(null);
           setLoading(false);
@@ -152,6 +157,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       unsubscribe();
     };
   }, []);
+
+  // Real-time account-status watch. If an admin puts this account on hold or
+  // suspends it while the user has an active session, sign them out
+  // immediately instead of waiting for their next page load / token refresh.
+  useEffect(() => {
+    if (!liveUid) return;
+
+    const unsubscribe = onSnapshot(doc(db, "users", liveUid), (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as User;
+      if (data.status === "hold" || data.status === "suspended") {
+        toast({
+          title: data.status === "suspended" ? "Account Suspended" : "Account On Hold",
+          description:
+            data.statusReason ||
+            "Your account access has been restricted. Please contact an administrator.",
+          variant: "destructive",
+        });
+        signOutUser().then(() => {
+          setUser(null);
+          setCachedUser(null);
+          setLiveUid(null);
+        });
+      }
+    }, (error) => {
+      // Expected during sign-out races (the listener can outlive the auth
+      // token by a tick) and in dev under fast refresh — never fatal, so
+      // just log instead of letting it surface as an uncaught console error.
+      console.warn("Account status listener error (non-fatal):", error.code || error);
+    });
+
+    return () => unsubscribe();
+  }, [liveUid]);
 
   // While loading, show cached user to prevent flicker
   const effectiveUser = loading ? (user || getCachedUser()) : user;

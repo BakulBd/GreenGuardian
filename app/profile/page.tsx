@@ -3,15 +3,16 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Shield, User, Mail, Calendar, ArrowLeft, Save, Loader2, Camera } from "lucide-react";
+import { Shield, User, Mail, Calendar, ArrowLeft, Save, Loader2, Camera, Lock, Eye, EyeOff, KeyRound, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { updateUserProfile } from "@/lib/firebase/auth";
+import { updateUserProfile, changePassword } from "@/lib/firebase/auth";
 import { uploadFile } from "@/lib/firebase/storage";
+import { validateStrongPassword } from "@/lib/utils/validation";
 import Navbar from "@/components/Navbar";
 
 export default function ProfilePage() {
@@ -20,13 +21,24 @@ export default function ProfilePage() {
   const { toast } = useToast();
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Change password
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+
   useEffect(() => {
     if (user) {
       setName(user.name || "");
+      setPhone(user.phone || "");
       setAvatarUrl(user.avatarUrl || "");
     }
   }, [user]);
@@ -77,7 +89,7 @@ export default function ProfilePage() {
 
     setSaving(true);
     try {
-      await updateUserProfile(user.id, { name, avatarUrl });
+      await updateUserProfile(user.id, { name, phone, avatarUrl });
       toast({
         title: "Profile Updated",
         description: "Your profile has been updated successfully.",
@@ -90,6 +102,47 @@ export default function ProfilePage() {
       });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+
+    if (!currentPassword) {
+      toast({ title: "Error", description: "Please enter your current password.", variant: "destructive" });
+      return;
+    }
+
+    const strength = validateStrongPassword(newPassword);
+    if (!strength.isValid) {
+      toast({ title: "Weak Password", description: strength.error, variant: "destructive" });
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      toast({ title: "Error", description: "New password and confirmation do not match.", variant: "destructive" });
+      return;
+    }
+
+    if (newPassword === currentPassword) {
+      toast({ title: "Error", description: "New password must be different from your current password.", variant: "destructive" });
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const result = await changePassword(currentPassword, newPassword);
+      if (result.success) {
+        toast({ title: "Password Changed", description: "Your password has been updated successfully." });
+        setCurrentPassword("");
+        setNewPassword("");
+        setConfirmNewPassword("");
+      } else {
+        toast({ title: "Error", description: result.error || "Failed to change password.", variant: "destructive" });
+      }
+    } finally {
+      setChangingPassword(false);
     }
   };
 
@@ -214,6 +267,21 @@ export default function ProfilePage() {
                   </div>
 
                   <div className="space-y-2">
+                    <Label htmlFor="phone">Phone Number</Label>
+                    <div className="relative">
+                      <Phone className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <Input
+                        id="phone"
+                        type="tel"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        className="pl-10"
+                        placeholder="+880 1XXX-XXXXXX"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
                     <Label htmlFor="email">Email Address</Label>
                     <div className="relative">
                       <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
@@ -253,6 +321,110 @@ export default function ProfilePage() {
                       <>
                         <Save className="mr-2 h-4 w-4" />
                         Save Changes
+                      </>
+                    )}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+
+            {/* Change Password */}
+            <Card className="mt-6">
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <KeyRound className="h-5 w-5 text-emerald-600" /> Change Password
+                </CardTitle>
+                <CardDescription>
+                  Use a strong password: at least 8 characters, with uppercase, lowercase, a number, and a special character.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleChangePassword} className="space-y-6">
+                  <div className="space-y-2">
+                    <Label htmlFor="currentPassword">Current Password</Label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <Input
+                        id="currentPassword"
+                        type={showCurrentPassword ? "text" : "password"}
+                        value={currentPassword}
+                        onChange={(e) => setCurrentPassword(e.target.value)}
+                        className="pl-10 pr-10"
+                        placeholder="••••••••"
+                        autoComplete="current-password"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors p-1"
+                        aria-label={showCurrentPassword ? "Hide password" : "Show password"}
+                      >
+                        {showCurrentPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="newPassword">New Password</Label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <Input
+                        id="newPassword"
+                        type={showNewPassword ? "text" : "password"}
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                        className="pl-10 pr-10"
+                        placeholder="••••••••"
+                        autoComplete="new-password"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowNewPassword(!showNewPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors p-1"
+                        aria-label={showNewPassword ? "Hide password" : "Show password"}
+                      >
+                        {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="confirmNewPassword">Confirm New Password</Label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <Input
+                        id="confirmNewPassword"
+                        type={showConfirmNewPassword ? "text" : "password"}
+                        value={confirmNewPassword}
+                        onChange={(e) => setConfirmNewPassword(e.target.value)}
+                        className="pl-10 pr-10"
+                        placeholder="••••••••"
+                        autoComplete="new-password"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowConfirmNewPassword(!showConfirmNewPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors p-1"
+                        aria-label={showConfirmNewPassword ? "Hide password" : "Show password"}
+                      >
+                        {showConfirmNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <Button type="submit" disabled={changingPassword} className="w-full">
+                    {changingPassword ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Updating Password...
+                      </>
+                    ) : (
+                      <>
+                        <KeyRound className="mr-2 h-4 w-4" />
+                        Update Password
                       </>
                     )}
                   </Button>

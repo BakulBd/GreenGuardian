@@ -762,6 +762,15 @@ function AnswerReviewContent() {
                             <Eye className="h-3.5 w-3.5 mr-1" />
                             View Details
                           </Button>
+
+                          {answer.sessionId && (
+                            <Link href={`/dashboard/teacher/session-results?sessionId=${answer.sessionId}`}>
+                              <Button size="sm" variant="outline" className="text-xs">
+                                <FileText className="h-3.5 w-3.5 mr-1" />
+                                Full Review
+                              </Button>
+                            </Link>
+                          )}
                         </div>
                       </div>
                     </div>

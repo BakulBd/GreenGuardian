@@ -293,6 +293,34 @@ export const ANSWER_ALLOWED_TYPES = [
 export const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 /**
+ * Allowed file types for Classroom stream/classwork attachments — mirrors
+ * isClassroomFileType() in storage.rules. Broader than exam uploads since
+ * teachers attach slides, zipped resources, and short video clips.
+ */
+export const CLASSROOM_MATERIAL_ALLOWED_TYPES = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/zip",
+  "application/x-zip-compressed",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+];
+
+/**
+ * Max file size for classroom materials (100MB) — mirrors
+ * isClassroomFileSize() in storage.rules.
+ */
+export const CLASSROOM_MAX_FILE_SIZE = 100 * 1024 * 1024;
+
+/**
  * Validate file before upload
  * @param file File to validate
  * @param allowedTypes Array of allowed MIME types

@@ -31,6 +31,28 @@ service cloud.firestore {
     function isTeacherOrAdmin() {
       return isAdmin() || isTeacher();
     }
+
+    // Accounts an admin has put on hold or suspended may not perform actions
+    // (start/submit exams, create content). Missing `status` == active.
+    function isActiveUser() {
+      return isAuthenticated() && getUserData().get('status', 'active') == 'active';
+    }
+
+    // Deterministic per-student-per-exam attempt counter document ID,
+    // shared by the examAttemptCounters rules and the examSessions create
+    // rule below (Task 4 — exam attempt limits).
+    function attemptCounterId(examId, studentId) {
+      return examId + '_' + studentId;
+    }
+
+    // Is the requesting teacher one this student is actually assigned to?
+    // (Phase 2 Feature 6.) Looks up the STUDENT's own assignedTeacherIds
+    // rather than requiring a denormalized teacher->students list — reuses
+    // the same field Task 10 already maintains.
+    function isAssignedToStudent(studentId) {
+      return isAuthenticated() &&
+        request.auth.uid in get(/databases/$(database)/documents/users/$(studentId)).data.get('assignedTeacherIds', []);
+    }
     
     // Users collection
     match /users/{userId} {
@@ -71,12 +93,12 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       
       // Teachers can create exams
-      allow create: if isTeacher() && 
+      allow create: if isTeacher() && isActiveUser() &&
                        request.resource.data.teacherId == request.auth.uid &&
                        request.resource.data.status in ['draft', 'published'];
-      
+
       // Teachers can update their own exams
-      allow update: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow update: if isTeacher() && isActiveUser() && resource.data.teacherId == request.auth.uid;
       
       // Admins can update/delete any exam
       allow update, delete: if isAdmin();
@@ -112,16 +134,50 @@ service cloud.firestore {
       // Teachers and admins can read sessions for monitoring and evaluation
       allow read: if isTeacherOrAdmin();
       
-      // Students can create their own sessions
-      allow create: if isAuthenticated() &&
+      // Students can create their own sessions. attemptNumber must be a
+      // positive integer within the exam's attemptsAllowed cap, and must
+      // equal (pre-write counter value + 1) / 1 if no counter exists yet.
+      // The client writes the matching examAttemptCounters update in the
+      // same transaction (see ExamClient.startExam) — since rule `get()`
+      // calls inside a transaction see the pre-transaction snapshot, this
+      // is safe against a crafted client trying to skip the counter or
+      // claim an attempt number a real transaction wouldn't produce.
+      allow create: if isAuthenticated() && isActiveUser() &&
                request.resource.data.studentId == request.auth.uid &&
-               exists(/databases/$(database)/documents/exams/$(request.resource.data.examId));
-      
+               exists(/databases/$(database)/documents/exams/$(request.resource.data.examId)) &&
+               request.resource.data.attemptNumber is int &&
+               request.resource.data.attemptNumber >= 1 &&
+               request.resource.data.attemptNumber <=
+                 get(/databases/$(database)/documents/exams/$(request.resource.data.examId)).data.get('attemptsAllowed', 1) &&
+               request.resource.data.attemptNumber == (
+                 exists(/databases/$(database)/documents/examAttemptCounters/$(attemptCounterId(request.resource.data.examId, request.auth.uid)))
+                   ? get(/databases/$(database)/documents/examAttemptCounters/$(attemptCounterId(request.resource.data.examId, request.auth.uid))).data.count + 1
+                   : 1
+               );
+
       // Students can update their own sessions
-      allow update: if isUser(resource.data.studentId);
-      
+      allow update: if isUser(resource.data.studentId) && isActiveUser();
+
       // Teachers and admins can update sessions for monitoring
-      allow update: if isTeacherOrAdmin();
+      allow update: if isTeacherOrAdmin() && isActiveUser();
+    }
+
+    // Exam attempt counters — one document per (exam, student) pair,
+    // backing the attempt-limit enforcement above (Task 4).
+    match /examAttemptCounters/{counterId} {
+      // `resource == null` short-circuits before dereferencing `.data` — a
+      // student's first attempt at any exam reads this doc before it exists
+      // (see ExamClient.startExam's transaction), and resource.data.X on a
+      // nonexistent doc throws in rules, which is treated as a denial. That
+      // was silently blocking every first attempt.
+      allow read: if isTeacherOrAdmin() ||
+        (isAuthenticated() && (resource == null || resource.data.studentId == request.auth.uid));
+      allow create: if isAuthenticated() && isActiveUser() &&
+        request.resource.data.studentId == request.auth.uid &&
+        request.resource.data.count == 1;
+      allow update: if isAuthenticated() && isActiveUser() &&
+        resource.data.studentId == request.auth.uid &&
+        request.resource.data.count == resource.data.count + 1;
     }
 
     // Answers collection
@@ -133,13 +189,13 @@ service cloud.firestore {
       allow read: if isTeacherOrAdmin();
       
       // Students can create/update their own answers
-      allow create, update: if isAuthenticated() &&
+      allow create, update: if isAuthenticated() && isActiveUser() &&
                request.resource.data.studentId == request.auth.uid &&
                exists(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)) &&
                get(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)).data.studentId == request.auth.uid;
 
       // Teachers and admins can update answers (for grading, OCR analysis & similarity reports)
-      allow update: if isTeacherOrAdmin();
+      allow update: if isTeacherOrAdmin() && isActiveUser();
     }
 
     // Similarity Reports collection
@@ -197,10 +253,12 @@ service cloud.firestore {
       allow create: if isAuthenticated();
     }
     
-    // Warning Screenshots collection
+    // Warning Screenshots collection — permanent proctoring evidence
+    // captured on every warning (Task 9's Snapshots gallery).
     match /warningScreenshots/{screenshotId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated();
+      allow delete: if isTeacherOrAdmin();
     }
 
     // Settings collection (admin only)
@@ -255,8 +313,11 @@ service cloud.firestore {
     match /results/{resultId} {
       // Students can only read their own published results
       allow read: if isStudent() && resource.data.studentId == request.auth.uid && resource.data.isPublished == true;
-      // Teachers can read results for courses they teach (via batch/section filtering)
-      allow read: if isTeacher();
+      // Teachers can only read results for their own assigned students —
+      // the comment here used to claim "via batch/section filtering" but no
+      // such check actually existed, letting any teacher read any student's
+      // results (Phase 2 Feature 6 audit finding).
+      allow read: if isTeacher() && isAssignedToStudent(resource.data.studentId);
       // Admins can read all results
       allow read: if isAdmin();
       // Only teachers and admins can create results
@@ -271,8 +332,9 @@ service cloud.firestore {
     match /studentWarnings/{warningId} {
       // Students can only read their own warnings
       allow read: if isStudent() && resource.data.studentId == request.auth.uid;
-      // Teachers can read warnings for their students
-      allow read: if isTeacher();
+      // Teachers can only read warnings for their own assigned students
+      // (Phase 2 Feature 6 audit finding — same gap as `results` above).
+      allow read: if isTeacher() && isAssignedToStudent(resource.data.studentId);
       // Admins can read all warnings
       allow read: if isAdmin();
       // Only teachers and admins can create warnings
@@ -283,9 +345,13 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // Result Notifications collection (for real-time update signaling)
+    // Result Notifications collection (for real-time update signaling).
+    // Not currently written or read by any app code (confirmed unused,
+    // Phase 2 Feature 6 audit), but `allow read: if isAuthenticated()` let
+    // any signed-in student read every other student's signal — tightened
+    // to staff-only in case this is wired up later.
     match /resultNotifications/{notificationId} {
-      allow read: if isAuthenticated();
+      allow read: if isTeacherOrAdmin();
       allow create: if isTeacherOrAdmin();
       allow delete: if isAdmin();
     }
@@ -295,10 +361,13 @@ service cloud.firestore {
     // Notices collection
     match /notices/{noticeId} {
       // Students can only read PUBLISHED notices that are actually addressed to
-      // them. These conditions mirror the queries in getStudentNotices() — keep
+      // them AND whose teacher is one an admin actually assigned this student
+      // to (Task 10 — teacher communication only reaches assigned students).
+      // These conditions mirror the queries in getStudentNotices() — keep
       // the two in sync or student notice lists will fail with permission-denied.
       allow read: if isStudent() &&
-                     resource.data.status == 'published' && (
+                     resource.data.status == 'published' &&
+                     resource.data.teacherId in getUserData().get('assignedTeacherIds', []) && (
                        resource.data.targetType == 'all' ||
                        (resource.data.targetType == 'individual' &&
                         request.auth.uid in resource.data.get('targetStudentIds', [])) ||
@@ -314,11 +383,11 @@ service cloud.firestore {
       // Admins can read all notices
       allow read: if isAdmin();
       // Teachers can create notices
-      allow create: if isTeacher() && 
+      allow create: if isTeacher() && isActiveUser() &&
                        request.resource.data.teacherId == request.auth.uid &&
                        request.resource.data.status in ['draft', 'published'];
       // Teachers can update their own notices
-      allow update: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow update: if isTeacher() && isActiveUser() && resource.data.teacherId == request.auth.uid;
       // Admins can update any notice
       allow update: if isAdmin();
       // Teachers can delete their own notices
@@ -386,6 +455,82 @@ service cloud.firestore {
       allow create: if isAdmin();
       allow update: if isAdmin();
       allow delete: if isAdmin();
+    }
+
+    // ============ Classroom Module (Phase 2, Feature 1) ============
+
+    function isClassroomMember(classroomId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/classroomMembers/$(classroomId + '_' + request.auth.uid));
+    }
+
+    // Classrooms collection
+    match /classrooms/{classroomId} {
+      // Broad read: needed so a student can look up a classroom by code
+      // before joining, and so "already joined" checks work. The classroom
+      // doc itself (name/subject/code) is not sensitive; content (posts,
+      // classwork, roster) is gated separately below.
+      allow read: if isAuthenticated();
+      allow create: if isTeacher() && isActiveUser() && request.resource.data.teacherId == request.auth.uid;
+      allow update, delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // Classroom membership ("People" tab / joined students). Document id is
+    // deterministic `${classroomId}_${studentId}` — this both stops
+    // duplicate joins (a second `create` on the same id is an `update`,
+    // which this rule doesn't grant to students) and lets other collections
+    // cheaply check "is this student a member" via exists().
+    match /classroomMembers/{memberId} {
+      allow read: if isTeacherOrAdmin() ||
+        (isAuthenticated() && resource.data.studentId == request.auth.uid);
+      // Task 10, reused: a student may only join a classroom whose teacher
+      // is one an admin actually assigned them to — this is the "no
+      // leakage even with the code" guarantee.
+      allow create: if isStudent() && isActiveUser() &&
+        request.resource.data.studentId == request.auth.uid &&
+        memberId == request.resource.data.classroomId + '_' + request.auth.uid &&
+        get(/databases/$(database)/documents/classrooms/$(request.resource.data.classroomId)).data.teacherId in getUserData().get('assignedTeacherIds', []) &&
+        get(/databases/$(database)/documents/classrooms/$(request.resource.data.classroomId)).data.status == 'active';
+      // Student leaves, or teacher/admin removes them.
+      allow delete: if isTeacherOrAdmin() ||
+        (isAuthenticated() && resource.data.studentId == request.auth.uid);
+    }
+
+    // Stream posts (announcements/notices/materials)
+    match /classroomPosts/{postId} {
+      allow read: if isTeacherOrAdmin() || isClassroomMember(resource.data.classroomId);
+      allow create: if isTeacher() && isActiveUser() && request.resource.data.teacherId == request.auth.uid;
+      allow update, delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    // Stream comments
+    match /classroomComments/{commentId} {
+      allow read: if isTeacherOrAdmin() || isClassroomMember(resource.data.classroomId);
+      allow create: if isAuthenticated() && isActiveUser() &&
+        request.resource.data.authorId == request.auth.uid &&
+        (isTeacherOrAdmin() || isClassroomMember(request.resource.data.classroomId));
+      allow delete: if isTeacherOrAdmin() ||
+        (isAuthenticated() && resource.data.authorId == request.auth.uid);
+    }
+
+    // Classwork (assignments/quizzes/materials/resources/links)
+    match /classroomClasswork/{itemId} {
+      // Students only ever see published classwork; drafts are teacher-only.
+      allow read: if isTeacherOrAdmin() ||
+        (resource.data.status == 'published' && isClassroomMember(resource.data.classroomId));
+      allow create: if isTeacher() && isActiveUser() && request.resource.data.teacherId == request.auth.uid;
+      allow update, delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    // Email delivery log for classroom notifications — written by the
+    // server (Admin SDK, /api/classroom/notify) which bypasses rules;
+    // these rules only cover the (currently unused) direct-client path.
+    match /classroomEmailLogs/{logId} {
+      allow read: if isTeacherOrAdmin();
+      allow create: if isTeacherOrAdmin();
     }
   }
 }
