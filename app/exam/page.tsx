@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Shield, FileText, Clock, ChevronRight, LogOut } from "lucide-react";
-import { getAllExams } from "@/lib/firebase/exams";
+import { subscribeToPublishedExams } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
 import { useAuth } from "@/hooks/useAuth";
@@ -33,40 +33,38 @@ export default function ExamPage() {
       return;
     }
 
-    loadExams();
-  }, [authLoading, user, router]);
-
-  const loadExams = async () => {
-    try {
-      const allExams = await getAllExams();
-      // Filter for published/active exams matching student batch & section
+    // Realtime feed (Feature 5): a newly published exam appears without a
+    // manual refresh, and the assignment filter re-runs on every snapshot.
+    const unsubscribe = subscribeToPublishedExams((allExams) => {
+      const assignedTeacherIds = user.assignedTeacherIds || [];
       const availableExams = allExams.filter((e) => {
-        if (e.status !== "published" && e.status !== "active") return false;
+        // A student only sees exams from teachers an admin assigned them
+        // to (Task 10) — see lib/firebase/assignments.ts.
+        if (e.teacherId && !assignedTeacherIds.includes(e.teacherId)) {
+          return false;
+        }
 
-        if (user) {
-          const studentBatch = user.batch;
-          const studentSections = user.sections || (user.section ? [user.section] : null);
+        const studentBatch = user.batch;
+        const studentSections = user.sections || (user.section ? [user.section] : null);
 
-          // If exam specifies batch and student has batch, must match
-          if (e.batch && studentBatch && e.batch !== studentBatch) {
-            return false;
-          }
+        // If exam specifies batch and student has batch, must match
+        if (e.batch && studentBatch && e.batch !== studentBatch) {
+          return false;
+        }
 
-          // If exam specifies section and student has section list, must match
-          if (e.section && studentSections && !studentSections.includes(e.section)) {
-            return false;
-          }
+        // If exam specifies section and student has section list, must match
+        if (e.section && studentSections && !studentSections.includes(e.section)) {
+          return false;
         }
 
         return true;
       });
       setExams(availableExams);
-    } catch (error) {
-      console.error("Error loading exams:", error);
-    } finally {
       setLoading(false);
-    }
-  };
+    });
+
+    return () => unsubscribe();
+  }, [authLoading, user, router]);
 
   if (authLoading || loading) {
     return (

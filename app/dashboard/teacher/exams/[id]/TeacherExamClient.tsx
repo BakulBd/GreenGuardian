@@ -33,6 +33,7 @@ import { Exam, Question, ExamSession } from "@/lib/types";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { formatDate } from "@/lib/utils/helpers";
+import { isOptionBasedQuestion } from "@/lib/utils/questionTypes";
 
 export default function TeacherExamClient() {
   const params = useParams();
@@ -355,12 +356,12 @@ export default function TeacherExamClient() {
                           {q.text}
                         </div>
 
-                        {/* Options View for MCQ */}
-                        {q.options && q.options.length > 0 && (
+                        {/* Options View for MCQ / True-False */}
+                        {isOptionBasedQuestion(q) && (
                           <div className="space-y-2 pt-2">
                             <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Options:</span>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                              {q.options.map((opt, optIdx) => {
+                              {(q.options || []).map((opt, optIdx) => {
                                 const isCorrect = opt === (q as any).correctAnswer && opt !== "";
                                 const letter = String.fromCharCode(65 + optIdx); // A, B, C, D
                                 return (
@@ -392,8 +393,8 @@ export default function TeacherExamClient() {
                           </div>
                         )}
 
-                        {/* Correct Answer Display for Short-Answer or True-False */}
-                        {(!q.options || q.options.length === 0) && (q as any).correctAnswer && (
+                        {/* Correct Answer Display for Short-Answer */}
+                        {!isOptionBasedQuestion(q) && (q as any).correctAnswer && (
                           <div className="mt-3 p-3 bg-emerald-50/80 rounded-lg border border-emerald-200 text-xs flex items-center gap-2">
                             <CheckCircle className="h-4 w-4 text-emerald-600 flex-shrink-0" />
                             <div>

@@ -19,6 +19,7 @@ import {
   Shield,
   Monitor,
   TrendingDown,
+  PauseCircle,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
@@ -32,6 +33,8 @@ import {
   where,
   serverTimestamp,
   updateDoc,
+  onSnapshot,
+  runTransaction,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { 
@@ -53,6 +56,7 @@ import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
 import { captureVideoFrame, sendProctoringSnapshot, captureAndUploadWarningScreenshot } from "@/lib/services/proctoring";
+import { isOptionBasedQuestion } from "@/lib/utils/questionTypes";
 
 interface Question {
   id: string;
@@ -82,6 +86,7 @@ interface Exam {
   passingScore: number;
   allowAnswerUpload?: boolean;
   totalMarks: number;
+  attemptsAllowed?: number;
 }
 
 const mapViolationToEventType = (violationType: keyof ViolationCounts | null): string => {
@@ -173,7 +178,17 @@ export default function ExamClient() {
   const behaviorScoreRef = useRef(100);
   const warningsRef = useRef(0);
 
-  const maxWarnings = 5;
+  // Teacher-triggered suspend/resume (Task 3). While locked the exam is
+  // frozen: timer stops, inputs are hidden, and violations are ignored so a
+  // frozen tab cannot trigger an auto-submit.
+  const [examLocked, setExamLocked] = useState(false);
+  const [lockReason, setLockReason] = useState("");
+  const examLockedRef = useRef(false);
+
+  // Admin-configured limit (Settings → Proctoring → Maximum Warnings,
+  // stored at settings/global.proctoring.maxWarnings). Loaded in loadExam();
+  // 5 is only the fallback for when no admin value has ever been saved.
+  const [maxWarnings, setMaxWarnings] = useState(5);
 
   // Route protection: the exam page renders outside DashboardLayout, so it has
   // to guard itself. Without this an unauthenticated visitor sat on the loading
@@ -202,9 +217,10 @@ export default function ExamClient() {
     }
   }, [params.id, user?.id, user?.role]);
 
-  // Timer
+  // Timer. Frozen while a teacher has the exam locked (see the session
+  // listener above) — the countdown simply doesn't tick during that window.
   useEffect(() => {
-    if (!examStarted || timeLeft <= 0) return;
+    if (!examStarted || timeLeft <= 0 || examLocked) return;
 
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
@@ -218,7 +234,7 @@ export default function ExamClient() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [examStarted]);
+  }, [examStarted, examLocked]);
 
   // Tab visibility detection
   useEffect(() => {
@@ -259,6 +275,29 @@ export default function ExamClient() {
   useEffect(() => {
     warningsRef.current = warnings;
   }, [warnings]);
+
+  useEffect(() => {
+    examLockedRef.current = examLocked;
+  }, [examLocked]);
+
+  // Live watch for a teacher suspending/resuming this session.
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const unsubscribe = onSnapshot(doc(db, "examSessions", sessionId), (snap) => {
+      const data = snap.data();
+      if (!data) return;
+      setExamLocked(!!data.locked);
+      setLockReason(data.lockReason || "");
+    }, (error) => {
+      // Non-fatal: a brief denial can happen right as the session document
+      // is first created (listener attaches before the create commits) or
+      // during a sign-out race. Don't let it surface as an uncaught error.
+      console.warn("Exam lock listener error (non-fatal):", error.code || error);
+    });
+
+    return () => unsubscribe();
+  }, [sessionId]);
 
   // Safe play function that handles the AbortError gracefully
   const playVideoRef = useRef<Promise<void> | null>(null);
@@ -421,6 +460,7 @@ export default function ExamClient() {
   // A finished attempt blocks re-entry; an unfinished one is resumed.
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
+  const [nextAttemptNumber, setNextAttemptNumber] = useState(1);
 
   /**
    * Look for an earlier attempt at this exam by this student.
@@ -431,6 +471,10 @@ export default function ExamClient() {
   const resolvePriorAttempt = async (examData: any): Promise<number | null> => {
     if (!user?.id) return null;
 
+    const allowed = examData.attemptsAllowed || 1;
+    const isFinished = (a: any) =>
+      a.submitted === true || a.status === "submitted" || a.status === "auto-submitted";
+
     try {
       const priorSnap = await getDocs(
         query(
@@ -439,26 +483,46 @@ export default function ExamClient() {
           where("studentId", "==", user.id)
         )
       );
-      if (priorSnap.empty) return null;
-
-      const attempts = priorSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-
-      if (attempts.some((a) => a.submitted === true || a.status === "submitted" || a.status === "auto-submitted")) {
-        setAlreadySubmitted(true);
+      if (priorSnap.empty) {
+        setNextAttemptNumber(1);
         return null;
       }
 
-      // Most recent unfinished attempt.
+      const attempts = priorSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+      let finishedCount = attempts.filter(isFinished).length;
+
+      // Most recent unfinished attempt — always resumable to completion even
+      // if it happens to be the student's last allowed attempt.
       const openAttempt = attempts
+        .filter((a) => !isFinished(a))
         .slice()
         .sort((a, b) => toMillis(b.startTime) - toMillis(a.startTime))[0];
-      if (!openAttempt) return null;
+
+      if (!openAttempt) {
+        if (finishedCount >= allowed) {
+          setAlreadySubmitted(true);
+          return null;
+        }
+        setNextAttemptNumber(finishedCount + 1);
+        return null;
+      }
 
       const startedAt = toMillis(openAttempt.startTime);
       const durationMs = (examData.duration || 0) * 60_000;
+      // Time already credited back from completed locks, plus (if the
+      // session is still locked right now) the ongoing lock so a refresh
+      // during a suspension doesn't burn the student's clock.
+      const pausedMs =
+        (typeof openAttempt.totalPausedMs === "number" ? openAttempt.totalPausedMs : 0) +
+        (openAttempt.locked && openAttempt.lockedAt ? Math.max(0, Date.now() - toMillis(openAttempt.lockedAt)) : 0);
       const remainingSeconds = startedAt
-        ? Math.floor((startedAt + durationMs - Date.now()) / 1000)
+        ? Math.floor((startedAt + durationMs + pausedMs - Date.now()) / 1000)
         : null;
+
+      if (openAttempt.locked) {
+        setExamLocked(true);
+        setLockReason(openAttempt.lockReason || "");
+      }
 
       if (remainingSeconds !== null && remainingSeconds <= 0) {
         // Time ran out while the student was away — close the attempt out.
@@ -469,12 +533,18 @@ export default function ExamClient() {
           reason: "Time expired while disconnected",
           updatedAt: serverTimestamp(),
         }).catch(() => {});
-        setAlreadySubmitted(true);
+        finishedCount += 1;
+        if (finishedCount >= allowed) {
+          setAlreadySubmitted(true);
+        } else {
+          setNextAttemptNumber(finishedCount + 1);
+        }
         return null;
       }
 
       setResumeSessionId(openAttempt.id);
       setSessionId(openAttempt.id);
+      setNextAttemptNumber(openAttempt.attemptNumber || finishedCount + 1);
       if (openAttempt.savedAnswers && typeof openAttempt.savedAnswers === "object") {
         setAnswers(openAttempt.savedAnswers);
       }
@@ -499,6 +569,19 @@ export default function ExamClient() {
 
   const loadExam = async (examId: string) => {
     try {
+      // Admin-configured warning limit. Falls back to 5 if the admin has
+      // never saved a value (matches the default shown on the settings page).
+      getDoc(doc(db, "settings", "global"))
+        .then((settingsDoc) => {
+          const configured = settingsDoc.data()?.proctoring?.maxWarnings;
+          if (typeof configured === "number" && configured > 0) {
+            setMaxWarnings(configured);
+          }
+        })
+        .catch(() => {
+          // Keep the default on failure (e.g. offline) rather than blocking exam load.
+        });
+
       const examDoc = await getDoc(doc(db, "exams", examId));
       if (!examDoc.exists()) {
         toast({
@@ -558,9 +641,11 @@ export default function ExamClient() {
   const submittedRef = useRef(false); // Track if exam already submitted
 
   const addWarning = useCallback((reason: string) => {
-    // Don't add more warnings if exam was already submitted
-    if (submittedRef.current) return;
-    
+    // Don't add more warnings if exam was already submitted, or while a
+    // teacher has the exam suspended (the frozen tab can still fire
+    // visibility/blur/detection events; none of them should count).
+    if (submittedRef.current || examLockedRef.current) return;
+
     setWarnings((prev) => {
       // Don't exceed max warnings
       if (prev >= maxWarnings) return prev;
@@ -677,7 +762,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         }
       }
     }
-  }, [warnings, toast]);
+  }, [warnings, toast, maxWarnings]);
 
   // Track if fullscreen was exited (for showing re-enter prompt)
   const [fullscreenExited, setFullscreenExited] = useState(false);
@@ -1087,28 +1172,58 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         return;
       }
 
-      // Create exam session
-      const sessionRef = await addDoc(collection(db, "examSessions"), {
-        examId: exam.id,
-        studentId: user.id,
-        studentName: user.name || user.email,
-        startTime: serverTimestamp(),
-        status: "in-progress",
-        submitted: false,
-        riskScore: 0,
-        flagged: false,
-        flagReasons: [],
-        proctoring: {
-          tabSwitches: 0,
-          fullscreenExits: 0,
-          noFaceDuration: 0,
-          multipleFacesCount: 0,
-          attentionAwayDuration: 0,
-          suspiciousEvents: 0,
-        },
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+      // Create exam session as attempt #N. The attempt number and its
+      // matching counter document are written in one transaction so the
+      // Firestore rules (which check the counter) can't be bypassed by a
+      // crafted client sending an arbitrary attemptNumber — see
+      // firestore.rules for the examAttemptCounters + examSessions rules.
+      const sessionRef = doc(collection(db, "examSessions"));
+      const counterRef = doc(db, "examAttemptCounters", `${exam.id}_${user.id}`);
+
+      await runTransaction(db, async (tx) => {
+        const counterSnap = await tx.get(counterRef);
+        const currentCount = counterSnap.exists() ? (counterSnap.data().count as number) || 0 : 0;
+        const attemptNumber = currentCount + 1;
+
+        if (attemptNumber > (exam.attemptsAllowed || 1)) {
+          throw new Error("No attempts remaining for this exam.");
+        }
+
+        tx.set(
+          counterRef,
+          {
+            examId: exam.id,
+            studentId: user.id,
+            count: attemptNumber,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        tx.set(sessionRef, {
+          examId: exam.id,
+          studentId: user.id,
+          studentName: user.name || user.email,
+          attemptNumber,
+          startTime: serverTimestamp(),
+          status: "in-progress",
+          submitted: false,
+          riskScore: 0,
+          flagged: false,
+          flagReasons: [],
+          proctoring: {
+            tabSwitches: 0,
+            fullscreenExits: 0,
+            noFaceDuration: 0,
+            multipleFacesCount: 0,
+            attentionAwayDuration: 0,
+            suspiciousEvents: 0,
+          },
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
       });
+
       setSessionId(sessionRef.id);
 
       // Setup camera (attach existing stream)
@@ -1438,9 +1553,11 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
             <div className="mx-auto p-4 bg-green-50 rounded-full w-16 h-16 flex items-center justify-center mb-2">
               <CheckCircle className="h-8 w-8 text-green-600" />
             </div>
-            <CardTitle className="text-2xl text-slate-800">Already Submitted</CardTitle>
+            <CardTitle className="text-2xl text-slate-800">No Attempts Remaining</CardTitle>
             <CardDescription className="text-slate-600">
-              You have already completed &quot;{exam.title}&quot;. Each student may attempt this exam once.
+              {(exam.attemptsAllowed || 1) > 1
+                ? `You have used all ${exam.attemptsAllowed} allowed attempts for "${exam.title}".`
+                : `You have already completed "${exam.title}". This exam allows only one attempt.`}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -1522,6 +1639,12 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
                   <div className="p-4 bg-gray-100 rounded-lg">
                     <p className="text-sm text-gray-500">Max Warnings</p>
                     <p className="text-lg font-semibold">{maxWarnings}</p>
+                  </div>
+                  <div className="p-4 bg-gray-100 rounded-lg col-span-2">
+                    <p className="text-sm text-gray-500">Attempt</p>
+                    <p className="text-lg font-semibold">
+                      {nextAttemptNumber} of {exam.attemptsAllowed || 1}
+                    </p>
                   </div>
                 </div>
 
@@ -1837,6 +1960,39 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
             <Button className="mt-4" onClick={() => router.push("/dashboard/student")}>
               Back to Dashboard
             </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // Teacher-suspended: freeze the exam behind a blocking overlay. The timer
+  // effect above already stopped ticking and addWarning() is a no-op while
+  // this is true, so nothing progresses (for better or worse) until a
+  // teacher resumes the session.
+  if (examLocked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-900 p-4">
+        <Card className="max-w-lg w-full text-center shadow-lg border-2 border-amber-500/50 bg-gray-800 text-white">
+          <CardHeader>
+            <div className="mx-auto p-4 bg-amber-500/10 rounded-full w-16 h-16 flex items-center justify-center mb-2">
+              <PauseCircle className="h-8 w-8 text-amber-400" />
+            </div>
+            <CardTitle className="text-2xl">Exam Suspended</CardTitle>
+            <CardDescription className="text-gray-300">
+              Your teacher has paused this exam. Your timer and answers are safe — the exam
+              will resume automatically as soon as your teacher lifts the suspension.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {lockReason && (
+              <div className="bg-gray-700/60 border border-gray-600 rounded-lg p-3 text-sm text-gray-200">
+                <strong>Reason:</strong> {lockReason}
+              </div>
+            )}
+            <p className="text-xs text-gray-400 mt-4">
+              Do not close this tab. Time remaining: {formatTime(timeLeft)}
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -2214,7 +2370,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
             <CardContent className="space-y-6">
               <p className="text-lg">{question.text}</p>
 
-              {question.type === "multiple-choice" || question.type === "true-false" ? (
+              {isOptionBasedQuestion(question) ? (
                 <div className="space-y-3">
                   {question.options?.map((option, idx) => (
                     <button

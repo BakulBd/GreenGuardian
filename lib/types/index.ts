@@ -4,6 +4,9 @@ export type FirestoreDate = Date | Timestamp | FieldValue;
 
 export type UserRole = "student" | "teacher" | "admin";
 
+/** Account status set by an admin. Missing/undefined is treated as "active" everywhere. */
+export type UserStatus = "active" | "hold" | "suspended";
+
 export interface User {
   id: string;
   name: string;
@@ -15,6 +18,12 @@ export interface User {
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
   avatarUrl?: string;
+  phone?: string;
+  // Account status (admin-controlled). Undefined == "active".
+  status?: UserStatus;
+  statusReason?: string;
+  statusUpdatedAt?: FirestoreDate;
+  statusUpdatedBy?: string;
   // Academic fields
   studentCode?: string; // Student ID e.g. 0182220005101001
   department?: string; // e.g. "CSE"
@@ -22,6 +31,11 @@ export interface User {
   section?: string; // e.g. "D2"
   sections?: string[]; // e.g. ["D1", "D2", "D3", "D4", "D5"]
   courses?: string[]; // Assigned course IDs or names
+  // Denormalized from teacher_student_mapping (see lib/firebase/assignments.ts).
+  // A student only receives notices/notifications from teachers in this list —
+  // this is what "Teacher communication should only reach assigned students"
+  // (Task 10) is actually enforced against, both in queries and security rules.
+  assignedTeacherIds?: string[];
 }
 
 // ============ Course / Batch / Section Management ============
@@ -98,6 +112,8 @@ export interface Exam {
   section?: string;
   examMode?: string;
   questions?: Question[];
+  // How many times a student may submit this exam. Missing/undefined == 1.
+  attemptsAllowed?: number;
 }
 
 export type QuestionType = "mcq" | "short" | "long" | "code" | "multiple-choice" | "short-answer" | "essay" | "true-false";
@@ -111,6 +127,8 @@ export interface Question {
   order: number;
   options?: string[]; // for MCQ
   correctAnswer?: string | string[]; // for MCQ
+  explanation?: string; // optional rationale shown during review
+  negativeMarks?: number; // deducted on a wrong answer, if the teacher sets one
   codeLanguage?: string; // for code type
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
@@ -134,6 +152,16 @@ export interface ExamSession {
   flagReasons: string[];
   status: "in-progress" | "submitted" | "auto-submitted" | "cancelled";
   proctoring: ProctoringData;
+  // Which attempt this is for the student on this exam (1-based). Together
+  // with the exam's `attemptsAllowed`, the set of sessions for a
+  // studentId+examId pair IS the attempt history — no separate log needed.
+  attemptNumber?: number;
+  // Teacher-triggered suspend/resume of an in-progress attempt (Task 3).
+  locked?: boolean;
+  lockReason?: string;
+  lockedBy?: string; // teacherId
+  lockedAt?: FirestoreDate;
+  totalPausedMs?: number; // cumulative time spent locked, excluded from the countdown
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
 }
@@ -209,6 +237,9 @@ export interface Answer {
   grading?: any;
   flagged?: boolean;
   flagReasons?: string[];
+  /** Optional overall feedback a teacher leaves during review (Feature 4). */
+  teacherFeedback?: string;
+  teacherFeedbackAt?: FirestoreDate;
   submittedAt: FirestoreDate;
   updatedAt?: FirestoreDate;
 }
@@ -412,7 +443,7 @@ export interface NoticeRead {
   readAt: FirestoreDate;
 }
 
-export type NotificationType = "notice" | "result" | "warning" | "exam" | "general";
+export type NotificationType = "notice" | "result" | "warning" | "exam" | "general" | "classroom";
 
 export interface Notification {
   id: string;
@@ -425,6 +456,8 @@ export interface Notification {
   resultId?: string;
   examId?: string;
   warningId?: string;
+  classroomId?: string;
+  classroomPostId?: string;
   // Read status
   read: boolean;
   createdAt: FirestoreDate;
@@ -505,5 +538,117 @@ export interface AssignmentHistory {
   changedByAdminId?: string;
   changedByAdminName?: string;
   notes?: string;
+  timestamp: FirestoreDate;
+}
+
+// ============ Classroom Module ============
+
+export type ClassroomStatus = "active" | "archived";
+
+export interface Classroom {
+  id: string;
+  name: string;
+  subject: string;
+  section: string;
+  semester?: string;
+  description?: string;
+  /** Unique, auto-generated join code (e.g. "K7X9QA"). */
+  code: string;
+  teacherId: string;
+  teacherName: string;
+  status: ClassroomStatus;
+  /** Denormalized count, kept in sync on join/leave/remove. */
+  studentCount?: number;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+  archivedAt?: FirestoreDate;
+}
+
+/**
+ * A joined student. Document id is deterministic — `${classroomId}_${studentId}`
+ * — so the Firestore rules can cheaply prevent duplicate joins and check
+ * membership from other collections via exists().
+ */
+export interface ClassroomMember {
+  id: string;
+  classroomId: string;
+  studentId: string;
+  studentName: string;
+  studentEmail: string;
+  studentCode?: string;
+  joinedAt: FirestoreDate;
+}
+
+export type ClassroomPostType = "announcement" | "notice" | "material";
+
+export interface ClassroomAttachment {
+  name: string;
+  url: string;
+  /** MIME type, or "link" for an external URL attachment. */
+  type: string;
+  size?: number;
+}
+
+export interface ClassroomPost {
+  id: string;
+  classroomId: string;
+  teacherId: string;
+  teacherName: string;
+  type: ClassroomPostType;
+  title?: string;
+  content: string;
+  attachments?: ClassroomAttachment[];
+  pinned?: boolean;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
+export interface ClassroomComment {
+  id: string;
+  postId: string;
+  classroomId: string;
+  authorId: string;
+  authorName: string;
+  authorRole: UserRole;
+  content: string;
+  createdAt: FirestoreDate;
+}
+
+export type ClassworkType = "assignment" | "quiz" | "material" | "resource" | "link";
+export type ClassworkStatus = "draft" | "published";
+
+export interface ClassworkItem {
+  id: string;
+  classroomId: string;
+  teacherId: string;
+  teacherName: string;
+  type: ClassworkType;
+  title: string;
+  instructions?: string;
+  attachments?: ClassroomAttachment[];
+  externalLink?: string;
+  dueDate?: FirestoreDate;
+  totalMarks?: number;
+  status: ClassworkStatus;
+  /** Future-dated publish; a draft with this set is meant to auto-publish later. */
+  scheduledAt?: FirestoreDate;
+  createdAt: FirestoreDate;
+  updatedAt: FirestoreDate;
+}
+
+/**
+ * Per-recipient delivery record for classroom email notifications — the
+ * audit trail behind "log delivery status" / "retry failed emails".
+ */
+export interface ClassroomEmailLog {
+  id: string;
+  classroomId: string;
+  postId?: string;
+  classworkId?: string;
+  recipientId: string;
+  recipientEmail: string;
+  status: "sent" | "failed";
+  error?: string;
+  attempts: number;
   timestamp: FirestoreDate;
 }

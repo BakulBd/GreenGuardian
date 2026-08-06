@@ -23,6 +23,8 @@ import {
 Megaphone,
   GraduationCap,
   UserCog,
+  Image as ImageIcon,
+  School,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
@@ -141,18 +143,21 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
 
 const teacherMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/teacher" },
+    { icon: School, label: "Classrooms", href: "/dashboard/teacher/classrooms" },
     { icon: BookOpen, label: "My Courses", href: "/dashboard/teacher/courses" },
     { icon: FileText, label: "My Exams", href: "/dashboard/teacher/exams" },
     { icon: Megaphone, label: "Notices", href: "/dashboard/teacher/notices" },
     { icon: FileText, label: "Submissions & OCR", href: "/dashboard/teacher/answers" },
     { icon: Camera, label: "Watch Live", href: "/dashboard/teacher/watch-live" },
     { icon: Shield, label: "Live Monitoring", href: "/dashboard/teacher/monitoring" },
+    { icon: ImageIcon, label: "Snapshots", href: "/dashboard/teacher/snapshots" },
     { icon: Users, label: "Students", href: "/dashboard/teacher/students" },
     { icon: User, label: "My Profile", href: "/profile" },
   ];
 
   const studentMenuItems = [
     { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard/student" },
+    { icon: School, label: "My Classrooms", href: "/dashboard/student/classrooms" },
     { icon: FileText, label: "Available Exams", href: "/exam" },
     { icon: Award, label: "My Results", href: "/dashboard/student/results" },
     { icon: Megaphone, label: "Notices", href: "/dashboard/student/notices" },

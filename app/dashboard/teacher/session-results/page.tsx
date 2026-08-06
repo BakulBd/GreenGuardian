@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -46,6 +47,9 @@ import { doc, getDoc, collection, query, where, getDocs } from "firebase/firesto
 import { db } from "@/lib/firebase/config";
 import { getBehaviorLevel, getViolationSummary, ViolationCounts } from "@/lib/utils/helpers";
 import Link from "next/link";
+import ExamAnswerReview, { ReviewExam } from "@/components/ExamAnswerReview";
+import { updateAnswerFeedback } from "@/lib/firebase/exams";
+import { MessageSquare, Save } from "lucide-react";
 
 interface SessionResult {
   id: string;
@@ -91,7 +95,15 @@ function ResultsContent() {
   const [events, setEvents] = useState<ProctoringEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [showEventsDialog, setShowEventsDialog] = useState(false);
-  
+
+  // Raw (un-transformed) session doc + the matching exam/answer, for the
+  // shared question-by-question review below (Task 7).
+  const [rawSession, setRawSession] = useState<any | null>(null);
+  const [reviewExam, setReviewExam] = useState<ReviewExam | null>(null);
+  const [reviewAnswer, setReviewAnswer] = useState<any | null>(null);
+  const [feedbackText, setFeedbackText] = useState("");
+  const [savingFeedback, setSavingFeedback] = useState(false);
+
   useEffect(() => {
     if (sessionId) {
       loadSessionData();
@@ -114,14 +126,32 @@ function ResultsContent() {
       }
       
       const data = sessionDoc.data();
-      
-      // Get exam title
+      setRawSession({ id: sessionDoc.id, ...data });
+
+      // Get exam title (and full exam data, incl. questions, for the answer review below)
       let examTitle = "Unknown Exam";
       if (data.examId) {
         const examDoc = await getDoc(doc(db, "exams", data.examId));
         if (examDoc.exists()) {
-          examTitle = examDoc.data().title;
+          const examDocData = examDoc.data();
+          examTitle = examDocData.title;
+          setReviewExam({ id: examDoc.id, ...examDocData } as ReviewExam);
         }
+      }
+
+      // Teachers/admins can read any answer (isTeacherOrAdmin() in rules) —
+      // look it up by the session id, which every submission carries.
+      try {
+        const answersSnap = await getDocs(
+          query(collection(db, "answers"), where("examSessionId", "==", sessionDoc.id))
+        );
+        if (!answersSnap.empty) {
+          const answerData = { id: answersSnap.docs[0].id, ...answersSnap.docs[0].data() } as any;
+          setReviewAnswer(answerData);
+          setFeedbackText(answerData.teacherFeedback || "");
+        }
+      } catch (e) {
+        console.warn("No answer document found for this session:", e);
       }
       
       const result: SessionResult = {
@@ -596,8 +626,66 @@ function ResultsContent() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Answer Review — question-by-question, same rendering the student sees (Task 7) */}
+        {reviewExam && reviewAnswer ? (
+          <div>
+            <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <ClipboardList className="h-5 w-5" />
+              Submission Review
+            </h2>
+            <ExamAnswerReview exam={reviewExam} session={rawSession} answerData={reviewAnswer} />
+
+            {/* Teacher Feedback editor (Feature 4) */}
+            <Card className="mt-4">
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <MessageSquare className="h-5 w-5" />
+                  Feedback for {session.studentName}
+                </CardTitle>
+                <CardDescription>Visible to the student on their own result review.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <Textarea
+                  value={feedbackText}
+                  onChange={(e) => setFeedbackText(e.target.value)}
+                  placeholder="Add feedback on this submission..."
+                  rows={3}
+                />
+                <div className="flex justify-end">
+                  <Button
+                    size="sm"
+                    disabled={savingFeedback || feedbackText === (reviewAnswer.teacherFeedback || "")}
+                    onClick={async () => {
+                      setSavingFeedback(true);
+                      try {
+                        await updateAnswerFeedback(reviewAnswer.id, feedbackText);
+                        setReviewAnswer({ ...reviewAnswer, teacherFeedback: feedbackText });
+                        toast({ title: "Feedback Saved" });
+                      } catch (error: any) {
+                        toast({ title: "Error", description: error.message || "Failed to save feedback", variant: "destructive" });
+                      } finally {
+                        setSavingFeedback(false);
+                      }
+                    }}
+                  >
+                    <Save className="h-3.5 w-3.5 mr-1" />
+                    Save Feedback
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        ) : (
+          <Card>
+            <CardContent className="text-center py-10 text-gray-500">
+              <ClipboardList className="mx-auto h-10 w-10 text-gray-300 mb-3" />
+              <p>No submitted answer found for this session yet.</p>
+            </CardContent>
+          </Card>
+        )}
       </div>
-      
+
       {/* Events Timeline Dialog */}
       <Dialog open={showEventsDialog} onOpenChange={setShowEventsDialog}>
         <DialogContent className="max-w-2xl max-h-[80vh]">

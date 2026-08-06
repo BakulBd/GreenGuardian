@@ -110,6 +110,7 @@ export default function TeacherExamEditClient() {
         section: examData.section || DEFAULT_SECTIONS[0].name,
         duration: examData.duration || 60,
         totalMarks: examData.totalMarks || 100,
+        attemptsAllowed: examData.attemptsAllowed || 1,
         status: examData.status || "draft",
         startDate: examData.startDate,
         endDate: examData.endDate,
@@ -172,7 +173,12 @@ export default function TeacherExamEditClient() {
         examId,
         text: newQuestion.text,
         type: newQuestion.type,
-        options: newQuestion.type === "multiple-choice" ? newQuestion.options.map(o => o.trim()) : [],
+        options:
+          newQuestion.type === "multiple-choice"
+            ? newQuestion.options.map((o) => o.trim())
+            : newQuestion.type === "true-false"
+            ? ["True", "False"]
+            : [],
         correctAnswer: newQuestion.correctAnswer,
         marks: Number(newQuestion.marks || 10),
         order: questions.length,
@@ -214,8 +220,13 @@ export default function TeacherExamEditClient() {
     }
 
     try {
-      const isMCQ = (editedQuestion.type || "multiple-choice") === "multiple-choice";
-      const cleanOptions = isMCQ ? (editedQuestion.options || []).map(o => String(o).trim()) : [];
+      const questionType = editedQuestion.type || "multiple-choice";
+      const cleanOptions =
+        questionType === "multiple-choice"
+          ? (editedQuestion.options || []).map((o) => String(o).trim())
+          : questionType === "true-false"
+          ? ["True", "False"]
+          : [];
 
       await updateQuestion(questionId, {
         text: editedQuestion.text!,
@@ -391,12 +402,22 @@ export default function TeacherExamEditClient() {
 
               <div>
                 <Label>Total Marks (Calculated automatically if questions exist)</Label>
-                <Input 
-                  type="number" 
+                <Input
+                  type="number"
                   min="1"
-                  value={questions.length > 0 ? questions.reduce((s, q) => s + (q.marks || 0), 0) : (editedExam.totalMarks || 100)} 
-                  onChange={(e) => setEditedExam({ ...editedExam, totalMarks: parseInt(e.target.value) || 100 })} 
+                  value={questions.length > 0 ? questions.reduce((s, q) => s + (q.marks || 0), 0) : (editedExam.totalMarks || 100)}
+                  onChange={(e) => setEditedExam({ ...editedExam, totalMarks: parseInt(e.target.value) || 100 })}
                   disabled={questions.length > 0}
+                />
+              </div>
+
+              <div>
+                <Label>Attempts Allowed</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  value={editedExam.attemptsAllowed || 1}
+                  onChange={(e) => setEditedExam({ ...editedExam, attemptsAllowed: parseInt(e.target.value) || 1 })}
                 />
               </div>
 

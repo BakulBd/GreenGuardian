@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import LiveVideoTile from "@/components/LiveVideoTile";
+import ExamSuspendControl from "@/components/ExamSuspendControl";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
@@ -333,10 +334,17 @@ export default function TeacherMonitoringPage() {
                                   </div>
                                 </div>
 
-                                <Button variant="outline" size="sm" onClick={() => router.push(`/dashboard/teacher/session-results?sessionId=${session.sessionId}`) }>
-                                  <Eye className="h-4 w-4 mr-2" />
-                                  Full Details
-                                </Button>
+                                <div className="flex items-center gap-2">
+                                  <ExamSuspendControl
+                                    sessionId={session.sessionId}
+                                    studentName={session.studentName}
+                                    locked={session.locked}
+                                  />
+                                  <Button variant="outline" size="sm" onClick={() => router.push(`/dashboard/teacher/session-results?sessionId=${session.sessionId}`) }>
+                                    <Eye className="h-4 w-4 mr-2" />
+                                    Full Details
+                                  </Button>
+                                </div>
                               </div>
                             </div>
                           </div>

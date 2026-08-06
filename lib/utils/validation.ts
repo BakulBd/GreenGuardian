@@ -59,6 +59,30 @@ export function validatePassword(password: string): { isValid: boolean; error?: 
 }
 
 /**
+ * Validates a NEW password for a password-change flow.
+ * - At least 8 characters.
+ * - At least one uppercase letter, one lowercase letter, one digit, one special character.
+ */
+export function validateStrongPassword(password: string): { isValid: boolean; error?: string } {
+  if (!password || password.length < 8) {
+    return { isValid: false, error: "Password must be at least 8 characters long." };
+  }
+  if (!/[A-Z]/.test(password)) {
+    return { isValid: false, error: "Password must contain at least one uppercase letter." };
+  }
+  if (!/[a-z]/.test(password)) {
+    return { isValid: false, error: "Password must contain at least one lowercase letter." };
+  }
+  if (!/\d/.test(password)) {
+    return { isValid: false, error: "Password must contain at least one number." };
+  }
+  if (!/[^A-Za-z0-9]/.test(password)) {
+    return { isValid: false, error: "Password must contain at least one special character." };
+  }
+  return { isValid: true };
+}
+
+/**
  * Validates a Student Code / ID.
  * - Must be alphanumeric/numeric (e.g. 0182220005101001 or STU-1001).
  */

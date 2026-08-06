@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test *)",
+      "Bash(npx firebase *)",
+      "Bash(timeout 25 npx firebase emulators:start --only firestore --project greenguardian2026)"
+    ]
+  }
+}

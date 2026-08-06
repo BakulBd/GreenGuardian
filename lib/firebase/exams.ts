@@ -11,6 +11,7 @@ import {
   orderBy,
   serverTimestamp,
   addDoc,
+  onSnapshot,
 } from "firebase/firestore";
 import { db } from "./config";
 import { Exam, Question, ExamSession, Answer, ExamLog } from "../types";
@@ -79,6 +80,24 @@ export async function getAllExams(): Promise<Exam[]> {
   const q = query(collection(db, "exams"), orderBy("createdAt", "desc"));
   const snapshot = await getDocs(q);
   return snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as Exam));
+}
+
+/**
+ * Realtime feed of published/active exams (Feature 5 — "visibility should
+ * update automatically"). A student's exam list previously only refreshed
+ * on page load, so an exam a teacher just published wouldn't appear until
+ * the student manually reloaded.
+ */
+export function subscribeToPublishedExams(callback: (exams: Exam[]) => void): () => void {
+  const q = query(collection(db, "exams"), where("status", "in", ["published", "active"]));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const exams = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Exam));
+      callback(exams);
+    },
+    (error) => console.warn("[Exams] Published exams subscription error:", error.code || error)
+  );
 }
 
 export async function updateExam(examId: string, data: Partial<Exam>): Promise<void> {
@@ -306,6 +325,15 @@ export async function getAnswersBySession(sessionId: string): Promise<Answer[]> 
   );
   const snapshot = await getDocs(q);
   return snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as Answer));
+}
+
+/** Teacher/admin overall feedback on a submission, shown in the review (Feature 4). */
+export async function updateAnswerFeedback(answerId: string, feedback: string): Promise<void> {
+  await updateDoc(doc(db, "answers", answerId), {
+    teacherFeedback: feedback,
+    teacherFeedbackAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
 }
 
 export async function getAnswersByExam(examId: string): Promise<Answer[]> {

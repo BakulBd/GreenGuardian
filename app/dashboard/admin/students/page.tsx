@@ -7,15 +7,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { User, Mail, Calendar, Trash2, Plus, Edit, Shield, Check, X } from "lucide-react";
+import { User, Mail, Calendar, Trash2, Plus, Edit, Shield, Check, X, Download } from "lucide-react";
 import { getUsersByRole, deleteUser, updateUser } from "@/lib/firebase/firestore";
 import { registerUser } from "@/lib/firebase/auth";
 import { User as UserType } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
 import { useToast } from "@/components/ui/use-toast";
 import { DEFAULT_DEPARTMENT, DEFAULT_BATCHES, DEFAULT_SECTIONS, DEFAULT_COURSES } from "@/lib/academics/catalog";
-import { doc, setDoc, serverTimestamp } from "firebase/firestore";
+import AccountStatusControl from "@/components/AccountStatusControl";
+import { doc, setDoc, serverTimestamp, collection, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
+import { downloadStudentInfoPdf } from "@/lib/utils/studentPdf";
 
 import { validateName, validateEmail } from "@/lib/utils/validation";
 
@@ -24,6 +26,8 @@ export default function StudentsPage() {
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingStudent, setEditingStudent] = useState<UserType | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [teacherNamesByStudent, setTeacherNamesByStudent] = useState<Map<string, string[]>>(new Map());
   const { toast } = useToast();
 
   // Add Student Form State
@@ -52,8 +56,23 @@ export default function StudentsPage() {
   const loadStudents = async () => {
     try {
       setLoading(true);
-      const studentUsers = await getUsersByRole("student");
+      const [studentUsers, mappingsSnap] = await Promise.all([
+        getUsersByRole("student"),
+        getDocs(collection(db, "teacher_student_mapping")).catch(() => null),
+      ]);
       setStudents(studentUsers);
+
+      if (mappingsSnap) {
+        const map = new Map<string, Set<string>>();
+        mappingsSnap.docs.forEach((d) => {
+          const data = d.data();
+          if (!data.studentId || !data.teacherName) return;
+          const set = map.get(data.studentId) || new Set<string>();
+          set.add(data.teacherName);
+          map.set(data.studentId, set);
+        });
+        setTeacherNamesByStudent(new Map(Array.from(map.entries()).map(([k, v]) => [k, Array.from(v)])));
+      }
     } catch (error) {
       console.error("Error loading students:", error);
       toast({
@@ -64,6 +83,42 @@ export default function StudentsPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => (prev.size === students.length ? new Set() : new Set(students.map((s) => s.id))));
+  };
+
+  const handleDownloadPdf = () => {
+    const toExport = selectedIds.size > 0 ? students.filter((s) => selectedIds.has(s.id)) : students;
+    if (toExport.length === 0) {
+      toast({ title: "No Students", description: "There are no students to export.", variant: "destructive" });
+      return;
+    }
+    downloadStudentInfoPdf(
+      toExport.map((s) => ({
+        name: s.name,
+        studentCode: s.studentCode,
+        email: s.email,
+        department: s.department || DEFAULT_DEPARTMENT.name,
+        semester: s.batch ? `Batch ${s.batch}` : undefined,
+        phone: s.phone,
+        assignedTeacher: (teacherNamesByStudent.get(s.id) || []).join(", ") || undefined,
+        registrationDate: s.createdAt ? formatDate(s.createdAt as any) : undefined,
+        status: s.status ? s.status.charAt(0).toUpperCase() + s.status.slice(1) : "Active",
+      })),
+      "Student Information Report"
+    );
+    toast({ title: "PDF Generated", description: `Exported ${toExport.length} student${toExport.length !== 1 ? "s" : ""}.` });
   };
 
   const handleCreateStudent = async (e: React.FormEvent) => {
@@ -203,10 +258,16 @@ export default function StudentsPage() {
               Manage student accounts with Department, Batch, and Section assignments
             </p>
           </div>
-          <Button onClick={() => setShowAddModal(true)} className="w-fit">
-            <Plus className="h-4 w-4 mr-2" />
-            Add New Student
-          </Button>
+          <div className="flex gap-2">
+            <Button onClick={handleDownloadPdf} variant="outline" className="w-fit">
+              <Download className="h-4 w-4 mr-2" />
+              Download PDF{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
+            </Button>
+            <Button onClick={() => setShowAddModal(true)} className="w-fit">
+              <Plus className="h-4 w-4 mr-2" />
+              Add New Student
+            </Button>
+          </div>
         </div>
 
         {/* Add Student Modal */}
@@ -421,17 +482,34 @@ export default function StudentsPage() {
                 <table className="w-full">
                   <thead>
                     <tr className="border-b bg-gray-50/50 text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      <th className="text-left py-3 px-4 w-8">
+                        <input
+                          type="checkbox"
+                          checked={students.length > 0 && selectedIds.size === students.length}
+                          onChange={toggleSelectAll}
+                          aria-label="Select all students"
+                        />
+                      </th>
                       <th className="text-left py-3 px-4">Student & ID</th>
                       <th className="text-left py-3 px-4">Department</th>
                       <th className="text-left py-3 px-4">Batch</th>
                       <th className="text-left py-3 px-4">Section</th>
                       <th className="text-left py-3 px-4">Joined Date</th>
+                      <th className="text-right py-3 px-4">Status</th>
                       <th className="text-right py-3 px-4">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y text-sm">
                     {students.map((student) => (
                       <tr key={student.id} className="hover:bg-gray-50/80 transition-colors">
+                        <td className="py-3 px-4">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(student.id)}
+                            onChange={() => toggleSelect(student.id)}
+                            aria-label={`Select ${student.name}`}
+                          />
+                        </td>
                         <td className="py-3 px-4">
                           <div className="flex items-center">
                             <div className="h-9 w-9 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold mr-3 text-xs">
@@ -463,6 +541,14 @@ export default function StudentsPage() {
                         </td>
                         <td className="py-3 px-4 text-xs text-gray-500">
                           {formatDate(student.createdAt as any)}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <AccountStatusControl
+                            userId={student.id}
+                            userName={student.name}
+                            status={student.status}
+                            onChanged={loadStudents}
+                          />
                         </td>
                         <td className="py-3 px-4 text-right space-x-1">
                           <Button

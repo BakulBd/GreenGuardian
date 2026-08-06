@@ -424,11 +424,14 @@ const noticeId = await createNotice(noticeData);
                     <Users className="h-4 w-4 text-blue-600 mt-0.5" />
                     <div>
                       <p className="text-sm font-medium text-blue-800">
-                        {targetType === "all" && "Notice will be sent to all students"}
-                        {targetType === "course" && "Notice will be sent to students enrolled in the selected course"}
-                        {targetType === "batch" && "Notice will be sent to all students in the selected batch"}
-                        {targetType === "section" && "Notice will be sent to all students in the selected section"}
-                        {targetType === "semester" && "Notice will be sent to all students in the selected semester"}
+                        {targetType === "all" && "Notice will be sent to all of your assigned students"}
+                        {targetType === "course" && "Notice will be sent to your assigned students enrolled in the selected course"}
+                        {targetType === "batch" && "Notice will be sent to your assigned students in the selected batch"}
+                        {targetType === "section" && "Notice will be sent to your assigned students in the selected section"}
+                        {targetType === "semester" && "Notice will be sent to your assigned students in the selected semester"}
+                      </p>
+                      <p className="text-xs text-blue-600 mt-1">
+                        Only students an admin has assigned to you will receive this — not every student in the group.
                       </p>
                     </div>
                   </div>

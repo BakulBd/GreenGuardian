@@ -11,6 +11,7 @@ import { approveTeacher, rejectTeacher } from "@/lib/firebase/auth";
 import { deleteUser } from "@/lib/firebase/firestore";
 import { User as UserType } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
+import AccountStatusControl from "@/components/AccountStatusControl";
 
 export default function TeachersPage() {
   const [teachers, setTeachers] = useState<UserType[]>([]);
@@ -200,6 +201,9 @@ export default function TeachersPage() {
                         Joined Date
                       </th>
                       <th className="text-right py-3 px-4 text-sm font-medium text-gray-700">
+                        Status
+                      </th>
+                      <th className="text-right py-3 px-4 text-sm font-medium text-gray-700">
                         Actions
                       </th>
                     </tr>
@@ -216,6 +220,14 @@ export default function TeachersPage() {
                         <td className="py-3 px-4 text-sm text-gray-600">{teacher.email}</td>
                         <td className="py-3 px-4 text-sm text-gray-600">
                           {formatDate(teacher.createdAt as any)}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <AccountStatusControl
+                            userId={teacher.id}
+                            userName={teacher.name}
+                            status={teacher.status}
+                            onChanged={loadTeachers}
+                          />
                         </td>
                         <td className="py-3 px-4 text-right">
                           <Button

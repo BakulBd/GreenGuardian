@@ -3,6 +3,9 @@ import {
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   onAuthStateChanged,
+  reauthenticateWithCredential,
+  updatePassword,
+  EmailAuthProvider,
   User as FirebaseUser,
 } from "firebase/auth";
 import {
@@ -13,7 +16,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { auth, db } from "./config";
-import { User, UserRole } from "../types";
+import { User, UserRole, UserStatus } from "../types";
 
 export async function registerUser(
   email: string,
@@ -73,6 +76,26 @@ export async function loginUser(
     }
 
     const userData = userDoc.data() as User;
+
+    // Blocked accounts (set by an admin) may not sign in at all.
+    if (userData.status === "suspended") {
+      await firebaseSignOut(auth);
+      return {
+        user: null,
+        error: userData.statusReason
+          ? `Your account has been suspended: ${userData.statusReason}`
+          : "Your account has been suspended. Please contact an administrator.",
+      };
+    }
+    if (userData.status === "hold") {
+      await firebaseSignOut(auth);
+      return {
+        user: null,
+        error: userData.statusReason
+          ? `Your account is on hold: ${userData.statusReason}`
+          : "Your account is on hold. Please contact an administrator.",
+      };
+    }
 
     // Check if teacher is approved
     if (userData.role === "teacher" && !userData.approved) {
@@ -160,4 +183,66 @@ export async function rejectTeacher(userId: string): Promise<void> {
     rejected: true,
     updatedAt: serverTimestamp(),
   });
+}
+
+/**
+ * Sets a student or teacher's account status (admin only — enforced by
+ * Firestore rules). "hold" and "suspended" both block login and further app
+ * access; "active" restores it. See loginUser() and AuthContext's live
+ * status listener for enforcement.
+ */
+export async function setUserStatus(
+  userId: string,
+  status: UserStatus,
+  adminId: string,
+  reason?: string
+): Promise<void> {
+  await updateDoc(doc(db, "users", userId), {
+    status,
+    statusReason: reason || "",
+    statusUpdatedAt: serverTimestamp(),
+    statusUpdatedBy: adminId,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+/**
+ * Changes the signed-in user's password. Re-authenticates with the current
+ * password first — Firebase requires a recent login for this operation, and
+ * doing so also doubles as verifying the current password is correct.
+ * Firebase Auth is the sole source of truth for the credential; no password
+ * data is stored in Firestore, so there is nothing to sync there.
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<{ success: boolean; error?: string }> {
+  const firebaseUser = auth.currentUser;
+  if (!firebaseUser || !firebaseUser.email) {
+    return { success: false, error: "You must be signed in to change your password." };
+  }
+
+  try {
+    const credential = EmailAuthProvider.credential(firebaseUser.email, currentPassword);
+    await reauthenticateWithCredential(firebaseUser, credential);
+    await updatePassword(firebaseUser, newPassword);
+    return { success: true };
+  } catch (error: any) {
+    let errorMessage = error.message || "Failed to change password.";
+    if (
+      error.code === "auth/wrong-password" ||
+      error.code === "auth/invalid-credential"
+    ) {
+      errorMessage = "Current password is incorrect.";
+    } else if (error.code === "auth/weak-password") {
+      errorMessage = "New password is too weak.";
+    } else if (error.code === "auth/requires-recent-login") {
+      errorMessage = "Please log out and log back in, then try again.";
+    } else if (error.code === "auth/too-many-requests") {
+      errorMessage = "Too many attempts. Please try again later.";
+    } else if (error.code === "auth/network-request-failed") {
+      errorMessage = "Network error. Please check your connection and try again.";
+    }
+    return { success: false, error: errorMessage };
+  }
 }

@@ -141,6 +141,64 @@ export async function resolveAssignmentStudentIds(
   return group;
 }
 
+// ===================== Denormalized student -> teacher sync =====================
+
+/**
+ * Recomputes and writes `users/{studentId}.assignedTeacherIds` from the
+ * current `teacher_student_mapping` rows for each given student. This is the
+ * field Firestore security rules and notice/notification queries check to
+ * guarantee teacher communication only reaches assigned students (Task 10) —
+ * cheap to check in a rule, unlike a live query against the mapping
+ * collection. Always derives the full set fresh, so it's safe to call after
+ * any create/update/remove without separately tracking deltas.
+ */
+async function syncAssignedTeacherIds(studentIds: string[]): Promise<void> {
+  const uniqueIds = Array.from(new Set(studentIds.filter(Boolean)));
+  await Promise.all(
+    uniqueIds.map(async (studentId) => {
+      try {
+        const mappingsSnap = await getDocs(
+          query(collection(db, MAPPINGS_COLLECTION), where("studentId", "==", studentId))
+        );
+        const teacherIds = Array.from(
+          new Set(mappingsSnap.docs.map((d) => d.data().teacherId).filter(Boolean))
+        );
+        await updateDoc(doc(db, "users", studentId), {
+          assignedTeacherIds: teacherIds,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        console.warn(`[Assignments] Failed to sync assignedTeacherIds for student ${studentId}:`, error);
+      }
+    })
+  );
+}
+
+/**
+ * One-time backfill for `users.assignedTeacherIds` (Feature 5 bug fix).
+ *
+ * Root cause of "published exams / notices are not visible": the denormalized
+ * `assignedTeacherIds` field (Task 10) is only kept in sync going forward —
+ * written when an assignment is created/updated/removed. Any assignment that
+ * already existed before that sync logic shipped has a `teacher_student_mapping`
+ * row but no corresponding field on the student's `users` doc, so every
+ * exam-visibility and notice-visibility check (which reads that field) sees an
+ * empty list and hides everything, even though the student IS assigned.
+ *
+ * Recomputes the field for every student who has at least one mapping row.
+ * Safe to run repeatedly — it fully derives the field from the mapping
+ * collection each time, so it can't double-apply or drift.
+ */
+export async function backfillAllAssignedTeacherIds(): Promise<{ studentsUpdated: number }> {
+  const mappingsSnap = await getDocs(collection(db, MAPPINGS_COLLECTION));
+  const studentIds = Array.from(
+    new Set(mappingsSnap.docs.map((d) => d.data().studentId).filter(Boolean))
+  ) as string[];
+
+  await syncAssignedTeacherIds(studentIds);
+  return { studentsUpdated: studentIds.length };
+}
+
 // ===================== Duplicate Validation =====================
 
 /**
@@ -311,6 +369,7 @@ export async function createTeacherAssignment(
   }
 
   await batch.commit();
+  await syncAssignedTeacherIds(students.map((s) => s.id));
 
   // Log history (best-effort, after commit)
   await logAssignmentHistory({
@@ -385,6 +444,7 @@ export async function updateTeacherAssignment(
     where("assignmentId", "==", assignmentId)
   );
   const oldMappingsSnap = await getDocs(oldMappingsQ);
+  const oldStudentIds = oldMappingsSnap.docs.map((m) => m.data().studentId).filter(Boolean) as string[];
   oldMappingsSnap.docs.forEach((m) => batch.delete(doc(db, MAPPINGS_COLLECTION, m.id)));
 
   // 2. Update the assignment document
@@ -423,6 +483,11 @@ export async function updateTeacherAssignment(
   }
 
   await batch.commit();
+  // Union of old + new: students dropped from this assignment need their
+  // assignedTeacherIds recomputed (they may still be covered by another
+  // assignment to the same teacher, or not — syncAssignedTeacherIds derives
+  // the correct answer fresh either way.
+  await syncAssignedTeacherIds([...oldStudentIds, ...students.map((s) => s.id)]);
 
   await logAssignmentHistory({
     assignmentId,
@@ -473,6 +538,7 @@ export async function removeTeacherAssignment(
 
   batch.delete(assignmentRef);
   await batch.commit();
+  await syncAssignedTeacherIds(studentIds);
 
   await logAssignmentHistory({
     assignmentId,

@@ -14,6 +14,8 @@ import {
   Timestamp,
   onSnapshot,
   writeBatch,
+  Query,
+  DocumentData,
 } from "firebase/firestore";
 import { db } from "./config";
 import {
@@ -26,6 +28,7 @@ import {
   NoticeFilters,
   User,
 } from "../types";
+import { getAssignedStudentIds } from "./assignments";
 
 // ===================== Notices =====================
 
@@ -206,55 +209,63 @@ function sortNoticesByRecency(notices: Notice[]): Notice[] {
  *  • Robustness — equality-only queries need no composite index, and sorting in
  *    memory means notices missing `publishedAt` are still returned (an
  *    `orderBy("publishedAt")` query silently drops them).
+ *
+ * Every query is additionally scoped to `teacherId == <an assigned teacher>`
+ * (Task 10: a teacher's notices — of any target type, including "all" —
+ * must only reach students an admin actually assigned to them). Firestore
+ * only allows one `in`/array-contains-in filter per query, and targetType
+ * and targetCourseId already use that slot, so teacherId is scoped with a
+ * loop over each assigned teacher (equality, not `in`) rather than folded
+ * into the existing filters. The security rules mirror this exact condition
+ * set — keep the two in sync, see firestore.rules.
  */
 export async function getStudentNotices(student: User): Promise<Notice[]> {
+  const assignedTeacherIds = (student.assignedTeacherIds || []).filter(Boolean);
+  if (assignedTeacherIds.length === 0) return [];
+
   const noticesRef = collection(db, "notices");
   const published = where("status", "==", "published");
+  const queries: Query<DocumentData>[] = [];
 
-  const queries = [
-    query(noticesRef, published, where("targetType", "==", "all")),
-    query(
-      noticesRef,
-      published,
-      where("targetType", "==", "individual"),
-      where("targetStudentIds", "array-contains", student.id)
-    ),
-  ];
+  for (const teacherId of assignedTeacherIds) {
+    const byTeacher = where("teacherId", "==", teacherId);
 
-  if (student.batch) {
-    // "semester" notices are targeted by batch as well.
+    queries.push(query(noticesRef, published, byTeacher, where("targetType", "==", "all")));
     queries.push(
       query(
         noticesRef,
         published,
-        where("targetType", "in", ["batch", "semester"]),
-        where("targetBatch", "==", student.batch)
+        byTeacher,
+        where("targetType", "==", "individual"),
+        where("targetStudentIds", "array-contains", student.id)
       )
     );
-  }
 
-  if (student.section) {
-    queries.push(
-      query(
-        noticesRef,
-        published,
-        where("targetType", "==", "section"),
-        where("targetSection", "==", student.section)
-      )
-    );
-  }
+    if (student.batch) {
+      // "semester" notices are targeted by batch as well.
+      queries.push(query(noticesRef, published, byTeacher, where("targetType", "==", "batch"), where("targetBatch", "==", student.batch)));
+      queries.push(query(noticesRef, published, byTeacher, where("targetType", "==", "semester"), where("targetBatch", "==", student.batch)));
+    }
 
-  const studentCourses = (student.courses || []).filter(Boolean).slice(0, 30);
-  for (let i = 0; i < studentCourses.length; i += 10) {
-    // Firestore allows at most 10 values in an `in` filter.
-    queries.push(
-      query(
-        noticesRef,
-        published,
-        where("targetType", "==", "course"),
-        where("targetCourseId", "in", studentCourses.slice(i, i + 10))
-      )
-    );
+    if (student.section) {
+      queries.push(
+        query(noticesRef, published, byTeacher, where("targetType", "==", "section"), where("targetSection", "==", student.section))
+      );
+    }
+
+    const studentCourses = (student.courses || []).filter(Boolean).slice(0, 30);
+    for (let i = 0; i < studentCourses.length; i += 10) {
+      // Firestore allows at most 10 values in an `in` filter.
+      queries.push(
+        query(
+          noticesRef,
+          published,
+          byTeacher,
+          where("targetType", "==", "course"),
+          where("targetCourseId", "in", studentCourses.slice(i, i + 10))
+        )
+      );
+    }
   }
 
   try {
@@ -657,11 +668,23 @@ export function subscribeToUnreadCount(
 
 /**
  * Get all targeted student IDs for a notice based on its target settings.
+ *
+ * Intersected with the teacher's actually-assigned students (Task 10) — a
+ * batch/section/course match alone is not enough; the student must also be
+ * assigned to this notice's teacher, or they receive no notification for it
+ * (and per the matching firestore.rules, could not read the notice either).
  */
 export async function getTargetedStudentIds(
   notice: Notice
 ): Promise<string[]> {
   try {
+    const assignedStudentIds = new Set(await getAssignedStudentIds(notice.teacherId));
+    if (assignedStudentIds.size === 0) return [];
+
+    if (notice.targetType === "individual") {
+      return (notice.targetStudentIds || []).filter((id) => assignedStudentIds.has(id));
+    }
+
     const studentsRef = collection(db, "users");
     let constraints: any[] = [where("role", "==", "student")];
 
@@ -689,18 +712,13 @@ export async function getTargetedStudentIds(
           constraints.push(where("batch", "==", notice.targetBatch));
         }
         break;
-      case "individual":
-        if (notice.targetStudentIds && notice.targetStudentIds.length > 0) {
-          return notice.targetStudentIds;
-        }
-        return [];
       default:
         return [];
     }
 
     const q = query(studentsRef, ...constraints);
     const snapshot = await getDocs(q);
-    const studentIds = snapshot.docs.map((doc) => doc.id);
+    const studentIds = snapshot.docs.map((doc) => doc.id).filter((id) => assignedStudentIds.has(id));
     console.log(`[Notices] Found ${studentIds.length} targeted students for notice ${notice.id}`);
     return studentIds;
   } catch (error: any) {
