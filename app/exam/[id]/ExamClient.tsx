@@ -22,7 +22,17 @@ import {
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { doc, getDoc, addDoc, collection, serverTimestamp, updateDoc } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  getDocs,
+  addDoc,
+  collection,
+  query,
+  where,
+  serverTimestamp,
+  updateDoc,
+} from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { 
   loadFaceDetectionModel, 
@@ -38,7 +48,7 @@ import {
 } from "@/lib/utils/helpers";
 import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
 import { performSimilarityCheck } from "@/lib/utils/similarity";
-import { startStudentVideoBroadcast, startLocalLiveVideoBroadcaster } from "@/lib/services/webrtcSignaling";
+import { startStudentLiveBroadcast } from "@/lib/services/liveVideo";
 import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
@@ -107,6 +117,16 @@ const mapViolationToEventType = (violationType: keyof ViolationCounts | null): s
   }
 };
 
+/** Firestore Timestamp | Date | ISO string → epoch millis (0 when unknown). */
+const toMillis = (value: any): number => {
+  if (!value) return 0;
+  if (typeof value === "number") return value;
+  if (typeof value?.toMillis === "function") return value.toMillis();
+  if (typeof value?.toDate === "function") return value.toDate().getTime();
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
 export default function ExamClient() {
   const params = useParams();
   const router = useRouter();
@@ -145,12 +165,12 @@ export default function ExamClient() {
 
   const maxWarnings = 5;
 
-  // Load exam data
+  // Load exam data (waits for the user so a previous attempt can be resolved)
   useEffect(() => {
-    if (params.id) {
+    if (params.id && user?.id) {
       loadExam(params.id as string);
     }
-  }, [params.id]);
+  }, [params.id, user?.id]);
 
   // Timer
   useEffect(() => {
@@ -271,26 +291,54 @@ export default function ExamClient() {
     return () => clearTimeout(timeoutId);
   }, [examStep, cameraStream, safePlayVideo]);
 
-  // Start WebRTC live video broadcast for Zoom-style teacher monitoring
+  // Live video broadcast for Zoom-style teacher monitoring.
+  // Works both locally and on the deployed site: WebRTC P2P when the network
+  // allows it, otherwise a Firestore frame relay (see lib/services/liveVideo.ts).
   useEffect(() => {
-    if (!examStarted || !sessionId || !cameraStream) return;
-    let cleanupFunc: (() => void) | null = null;
-    startStudentVideoBroadcast(sessionId, cameraStream).then((cleanup) => {
-      cleanupFunc = cleanup;
+    if (!examStarted || !sessionId) return;
+
+    const stopBroadcast = startStudentLiveBroadcast({
+      sessionId,
+      studentId: user?.id,
+      studentName: user?.name || user?.email,
+      examId: exam?.id,
+      stream: cameraStream,
+      getVideoElement: () => videoRef.current,
     });
 
-    return () => {
-      if (cleanupFunc) cleanupFunc();
-    };
-  }, [examStarted, sessionId, cameraStream]);
+    return () => stopBroadcast();
+  }, [examStarted, sessionId, cameraStream, user?.id, user?.name, user?.email, exam?.id]);
 
-  // Start local BroadcastChannel live video stream for zero-latency local PC monitoring
+  // Heartbeat + answer autosave.
+  // The heartbeat is what drives the teacher's online/offline indicator, and the
+  // autosave means a crashed or refreshed browser resumes with its answers.
+  const answersRef = useRef(answers);
   useEffect(() => {
-    if (!examStarted || !sessionId || !videoRef.current) return;
-    const stopBroadcaster = startLocalLiveVideoBroadcaster(sessionId, videoRef.current);
-    return () => {
-      stopBroadcaster();
+    answersRef.current = answers;
+  }, [answers]);
+
+  useEffect(() => {
+    if (!examStarted || !sessionId) return;
+
+    let lastSaved = "";
+    const tick = () => {
+      if (submittedRef.current) return;
+      const serialized = JSON.stringify(answersRef.current);
+      const payload: Record<string, any> = { updatedAt: serverTimestamp() };
+
+      if (serialized !== lastSaved) {
+        payload.savedAnswers = answersRef.current;
+        lastSaved = serialized;
+      }
+
+      updateDoc(doc(db, "examSessions", sessionId), payload).catch(() => {
+        // Transient offline write — the next tick retries.
+      });
     };
+
+    tick();
+    const interval = setInterval(tick, 15_000);
+    return () => clearInterval(interval);
   }, [examStarted, sessionId]);
 
   // Keep camera stream alive during exam with periodic checks and auto-reconnect
@@ -340,6 +388,84 @@ export default function ExamClient() {
   }, [cameraStream, examStarted, toast, safePlayVideo]);
 
   const [isExamClosed, setIsExamClosed] = useState(false);
+  // A finished attempt blocks re-entry; an unfinished one is resumed.
+  const [alreadySubmitted, setAlreadySubmitted] = useState(false);
+  const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
+
+  /**
+   * Look for an earlier attempt at this exam by this student.
+   *  - submitted attempt  → block re-entry (one attempt per exam)
+   *  - unfinished attempt → resume it: same session document, same remaining
+   *    time, and any answers that were auto-saved before the page was lost.
+   */
+  const resolvePriorAttempt = async (examData: any): Promise<number | null> => {
+    if (!user?.id) return null;
+
+    try {
+      const priorSnap = await getDocs(
+        query(
+          collection(db, "examSessions"),
+          where("examId", "==", examData.id),
+          where("studentId", "==", user.id)
+        )
+      );
+      if (priorSnap.empty) return null;
+
+      const attempts = priorSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+
+      if (attempts.some((a) => a.submitted === true || a.status === "submitted" || a.status === "auto-submitted")) {
+        setAlreadySubmitted(true);
+        return null;
+      }
+
+      // Most recent unfinished attempt.
+      const openAttempt = attempts
+        .slice()
+        .sort((a, b) => toMillis(b.startTime) - toMillis(a.startTime))[0];
+      if (!openAttempt) return null;
+
+      const startedAt = toMillis(openAttempt.startTime);
+      const durationMs = (examData.duration || 0) * 60_000;
+      const remainingSeconds = startedAt
+        ? Math.floor((startedAt + durationMs - Date.now()) / 1000)
+        : null;
+
+      if (remainingSeconds !== null && remainingSeconds <= 0) {
+        // Time ran out while the student was away — close the attempt out.
+        await updateDoc(doc(db, "examSessions", openAttempt.id), {
+          status: "auto-submitted",
+          submitted: true,
+          completedAt: serverTimestamp(),
+          reason: "Time expired while disconnected",
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+        setAlreadySubmitted(true);
+        return null;
+      }
+
+      setResumeSessionId(openAttempt.id);
+      setSessionId(openAttempt.id);
+      if (openAttempt.savedAnswers && typeof openAttempt.savedAnswers === "object") {
+        setAnswers(openAttempt.savedAnswers);
+      }
+      if (typeof openAttempt.warnings === "number") {
+        setWarnings(openAttempt.warnings);
+        warningsRef.current = openAttempt.warnings;
+      }
+      if (typeof openAttempt.behaviorScore === "number") {
+        setBehaviorScore(openAttempt.behaviorScore);
+        behaviorScoreRef.current = openAttempt.behaviorScore;
+      }
+      if (openAttempt.violationCounts) {
+        setViolationCounts(openAttempt.violationCounts);
+      }
+
+      return remainingSeconds;
+    } catch (error) {
+      console.error("Failed to check previous attempts:", error);
+      return null;
+    }
+  };
 
   const loadExam = async (examId: string) => {
     try {
@@ -376,7 +502,15 @@ export default function ExamClient() {
       }
 
       setExam(examData);
-      setTimeLeft(examData.duration * 60);
+
+      // Resume an interrupted attempt (refresh, crash, connection drop) with the
+      // time that is actually left, instead of silently granting a fresh clock.
+      const remainingSeconds = isPast ? null : await resolvePriorAttempt(examData);
+      setTimeLeft(
+        remainingSeconds !== null && remainingSeconds > 0
+          ? remainingSeconds
+          : examData.duration * 60
+      );
     } catch (error) {
       console.error("Error loading exam:", error);
       toast({
@@ -904,6 +1038,25 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
 
     setStarting(true);
     try {
+      // Resuming an interrupted attempt: keep the original session (and its
+      // original start time, so the countdown cannot be reset by refreshing).
+      if (resumeSessionId) {
+        await updateDoc(doc(db, "examSessions", resumeSessionId), {
+          status: "in-progress",
+          resumedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        setSessionId(resumeSessionId);
+
+        await setupCamera();
+        startFaceDetection();
+        await enterFullscreen();
+
+        setExamStep("started");
+        setExamStarted(true);
+        return;
+      }
+
       // Create exam session
       const sessionRef = await addDoc(collection(db, "examSessions"), {
         examId: exam.id,
@@ -1241,6 +1394,32 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
     );
   }
 
+  if (alreadySubmitted && !examStarted) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-slate-100 p-4">
+        <Card className="max-w-lg w-full text-center shadow-lg border-2 border-green-100">
+          <CardHeader>
+            <div className="mx-auto p-4 bg-green-50 rounded-full w-16 h-16 flex items-center justify-center mb-2">
+              <CheckCircle className="h-8 w-8 text-green-600" />
+            </div>
+            <CardTitle className="text-2xl text-slate-800">Already Submitted</CardTitle>
+            <CardDescription className="text-slate-600">
+              You have already completed &quot;{exam.title}&quot;. Each student may attempt this exam once.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Button className="w-full" onClick={() => router.push("/dashboard/student/results")}>
+              View My Results
+            </Button>
+            <Button variant="outline" className="w-full" onClick={() => router.push("/dashboard/student")}>
+              Back to Dashboard
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   if (isExamClosed) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-slate-100 p-4">
@@ -1280,6 +1459,17 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
                 <CardDescription>{exam.description}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
+                {resumeSessionId && (
+                  <Alert className="border-amber-300 bg-amber-50">
+                    <Clock className="h-4 w-4 text-amber-600" />
+                    <AlertTitle className="text-amber-800">Resuming your attempt</AlertTitle>
+                    <AlertDescription className="text-amber-700">
+                      You already started this exam. Your saved answers are restored and
+                      you have <strong>{formatTime(timeLeft)}</strong> left — the clock kept
+                      running while you were away.
+                    </AlertDescription>
+                  </Alert>
+                )}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-4 bg-gray-100 rounded-lg">
                     <p className="text-sm text-gray-500">Duration</p>
@@ -1487,7 +1677,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
                       </>
                     ) : (
                       <>
-                        Start Exam Now
+                        {resumeSessionId ? "Resume Exam Now" : "Start Exam Now"}
                       </>
                     )}
                   </Button>
@@ -1567,7 +1757,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
                   ) : (
                     <>
                       <Camera className="mr-2 h-4 w-4" />
-                      Start Exam
+                      {resumeSessionId ? "Resume Exam" : "Start Exam"}
                     </>
                   )}
                 </Button>

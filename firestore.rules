@@ -149,9 +149,34 @@ service cloud.firestore {
       allow delete: if isTeacherOrAdmin();
     }
 
-    // Live Video Signaling collection (WebRTC P2P for Zoom-style monitoring)
-    match /liveVideoSignaling/{signalingId}/{allPaths=**} {
-      allow read, write: if isAuthenticated();
+    // ============ Live Exam Video (see lib/services/liveVideo.ts) ============
+
+    // WebRTC signaling: the student publishes offers/ICE, each watching teacher
+    // registers a presence document under `viewers` and answers there.
+    match /liveVideoSignaling/{sessionId} {
+      allow read: if isAuthenticated();
+      // Only the broadcasting student (or staff) may own the room document.
+      allow create, update: if isTeacherOrAdmin() ||
+        (isAuthenticated() && request.resource.data.studentId == request.auth.uid);
+      allow delete: if isTeacherOrAdmin() ||
+        (isAuthenticated() && resource.data.studentId == request.auth.uid);
+
+      match /viewers/{viewerId}/{allPaths=**} {
+        // Signaling payloads are ephemeral SDP/ICE blobs; both peers need
+        // read/write access to complete the handshake.
+        allow read, write: if isAuthenticated();
+      }
+    }
+
+    // Firestore frame relay — the transport that makes live video work without
+    // a VPS/TURN server. Written by the student, read by teachers/admins.
+    match /liveFrames/{sessionId} {
+      allow read: if isTeacherOrAdmin() ||
+        (isAuthenticated() && resource.data.studentId == request.auth.uid);
+      allow create, update: if isAuthenticated() &&
+        request.resource.data.studentId == request.auth.uid;
+      allow delete: if isTeacherOrAdmin() ||
+        (isAuthenticated() && resource.data.studentId == request.auth.uid);
     }
     
     // Exam Logs collection

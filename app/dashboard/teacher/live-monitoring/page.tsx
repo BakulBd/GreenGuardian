@@ -43,6 +43,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
+import LiveVideoTile from "@/components/LiveVideoTile";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
@@ -424,18 +425,15 @@ export default function LiveMonitoringPage() {
                       >
                         {/* Thumbnail / Camera View */}
                         <div className="relative aspect-video bg-gray-900">
-                          {session.latestSnapshot?.snapshotUrl ? (
-                            <img 
-                              src={session.latestSnapshot.snapshotUrl} 
-                              alt={session.studentName}
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <div className="absolute inset-0 flex items-center justify-center">
-                              <Camera className="h-10 w-10 text-gray-600" />
-                            </div>
-                          )}
-                          
+                          <LiveVideoTile
+                            sessionId={session.sessionId}
+                            studentName={session.studentName}
+                            fallbackSnapshotUrl={session.latestSnapshot?.snapshotUrl}
+                            quality="thumb"
+                            viewerName={user?.name || user?.email}
+                            hideBadge
+                          />
+
                           {/* Risk Badge Overlay */}
                           <div className="absolute top-2 right-2">
                             <Badge className={getRiskColor(session.riskLevel)}>
@@ -506,17 +504,14 @@ export default function LiveMonitoringPage() {
                           <div className="flex flex-col md:flex-row md:items-center gap-4">
                             {/* Thumbnail */}
                             <div className="relative w-24 h-18 flex-shrink-0 bg-gray-900 rounded overflow-hidden">
-                              {session.latestSnapshot?.snapshotUrl ? (
-                                <img 
-                                  src={session.latestSnapshot.snapshotUrl} 
-                                  alt={session.studentName}
-                                  className="w-full h-full object-cover"
-                                />
-                              ) : (
-                                <div className="absolute inset-0 flex items-center justify-center">
-                                  <Camera className="h-6 w-6 text-gray-600" />
-                                </div>
-                              )}
+                              <LiveVideoTile
+                                sessionId={session.sessionId}
+                                studentName={session.studentName}
+                                fallbackSnapshotUrl={session.latestSnapshot?.snapshotUrl}
+                                quality="thumb"
+                                viewerName={user?.name || user?.email}
+                                hideBadge
+                              />
                               <div className={`absolute top-1 left-1 w-2 h-2 rounded-full ${session.isOnline ? "bg-green-500" : "bg-gray-400"}`} />
                             </div>
                             
@@ -623,39 +618,21 @@ export default function LiveMonitoringPage() {
 
                   <Card>
                     <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">Live Snapshot</CardTitle>
+                      <CardTitle className="text-sm">Live Camera</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      {selectedStudent.latestSnapshot?.snapshotUrl ? (
-                        <img
-                          src={selectedStudent.latestSnapshot.snapshotUrl}
-                          alt="Live camera"
-                          className="w-full rounded-lg border object-cover"
+                      <div className="w-full aspect-video rounded-lg border overflow-hidden">
+                        <LiveVideoTile
+                          sessionId={selectedStudent.sessionId}
+                          studentName={selectedStudent.studentName}
+                          fallbackSnapshotUrl={selectedStudent.latestSnapshot?.snapshotUrl}
+                          quality="high"
+                          viewerName={user?.name || user?.email}
                         />
-                      ) : (
-                        <div className="flex h-56 items-center justify-center rounded-lg border bg-gray-50 text-gray-500">
-                          No live snapshot yet
-                        </div>
-                      )}
+                      </div>
                     </CardContent>
                   </Card>
-                  
-                  {/* Latest Camera View */}
-                  {selectedStudent.latestSnapshot?.snapshotUrl && (
-                    <Card>
-                      <CardHeader className="pb-2">
-                        <CardTitle className="text-sm">Latest Camera View</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <img 
-                          src={selectedStudent.latestSnapshot.snapshotUrl}
-                          alt="Latest snapshot"
-                          className="w-full max-w-md mx-auto rounded-lg"
-                        />
-                      </CardContent>
-                    </Card>
-                  )}
-                  
+
                   {/* Recent Alerts */}
                   {selectedStudent.alertReasons.length > 0 && (
                     <Card className="border-red-200">

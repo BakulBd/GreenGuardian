@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { collection, query, where, getDocs, limit } from "firebase/firestore";
+import { collection, query, where, getDocs, doc, getDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import Link from "next/link";
 
@@ -50,6 +50,8 @@ interface ExamSession {
 export default function StudentDashboardPage() {
   const [availableExams, setAvailableExams] = useState<Exam[]>([]);
   const [recentSessions, setRecentSessions] = useState<ExamSession[]>([]);
+  /** Every attempt by this student — drives stats and attempt locking. */
+  const [allSessions, setAllSessions] = useState<ExamSession[]>([]);
   const [stats, setStats] = useState({
     totalExams: 0,
     completed: 0,
@@ -88,34 +90,44 @@ export default function StudentDashboardPage() {
         });
       setAvailableExams(exams);
 
-      // Load user's exam sessions
-      const sessionsQuery = query(
-        collection(db, "examSessions"),
-        where("studentId", "==", user.id),
-        limit(10)
+      // Load ALL of this student's sessions. The old query capped at 10 without
+      // an ordering, so stats were computed from an arbitrary subset and an
+      // older attempt could be missed entirely.
+      const sessionsSnapshot = await getDocs(
+        query(collection(db, "examSessions"), where("studentId", "==", user.id))
       );
-      const sessionsSnapshot = await getDocs(sessionsQuery);
-      const sessionsUnsorted = await Promise.all(
-        sessionsSnapshot.docs.map(async (doc) => {
-          const session = { id: doc.id, ...doc.data() } as ExamSession;
-          // Get exam title
-          const examDoc = await getDocs(
-            query(collection(db, "exams"), where("__name__", "==", session.examId))
-          );
-          if (!examDoc.empty) {
-            session.examTitle = examDoc.docs[0].data().title;
-          }
-          return session;
+
+      // Resolve exam titles in one pass instead of one query per session.
+      const titleById = new Map(exams.map((e) => [e.id, e.title]));
+      const missingExamIds = Array.from(
+        new Set(
+          sessionsSnapshot.docs
+            .map((d) => (d.data() as any).examId)
+            .filter((id: string) => id && !titleById.has(id))
+        )
+      );
+      await Promise.all(
+        missingExamIds.map(async (examId: string) => {
+          const examDoc = await getDoc(doc(db, "exams", examId));
+          if (examDoc.exists()) titleById.set(examId, (examDoc.data() as any).title);
         })
       );
-      const sessions = sessionsUnsorted.sort((a, b) => {
-        const aMs = a.startTime?.toDate?.()?.getTime?.() ?? 0;
-        const bMs = b.startTime?.toDate?.()?.getTime?.() ?? 0;
-        return bMs - aMs;
-      });
-      setRecentSessions(sessions);
 
-      // Calculate stats
+      const sessions = sessionsSnapshot.docs
+        .map((d) => {
+          const session = { id: d.id, ...d.data() } as ExamSession;
+          session.examTitle = session.examTitle || titleById.get(session.examId) || "Exam";
+          return session;
+        })
+        .sort((a, b) => {
+          const aMs = a.startTime?.toDate?.()?.getTime?.() ?? 0;
+          const bMs = b.startTime?.toDate?.()?.getTime?.() ?? 0;
+          return bMs - aMs;
+        });
+      setAllSessions(sessions);
+      setRecentSessions(sessions.slice(0, 10));
+
+      // Calculate stats over every attempt, not just the visible ten
       const completedSessions = sessions.filter(
         (s) => s.status === "submitted" || s.status === "auto-submitted" || s.status === "completed"
       );
@@ -141,9 +153,16 @@ export default function StudentDashboardPage() {
     }
   };
 
-  const hasAttempted = (examId: string) => {
-    return recentSessions.some(s => s.examId === examId);
-  };
+  const isSubmittedStatus = (status: string) =>
+    status === "submitted" || status === "auto-submitted" || status === "completed";
+
+  /** Finished attempt → exam is locked. */
+  const hasAttempted = (examId: string) =>
+    allSessions.some((s) => s.examId === examId && isSubmittedStatus(s.status));
+
+  /** Unfinished attempt → the student must be able to go back in and finish. */
+  const canResume = (examId: string) =>
+    allSessions.some((s) => s.examId === examId && !isSubmittedStatus(s.status));
 
   const [selectedSession, setSelectedSession] = useState<ExamSession | null>(null);
   const [showResultModal, setShowResultModal] = useState(false);
@@ -296,11 +315,17 @@ export default function StudentDashboardPage() {
                         className="w-full mt-4"
                         onClick={() => router.push(`/exam/${exam.id}`)}
                         disabled={hasAttempted(exam.id)}
+                        variant={canResume(exam.id) && !hasAttempted(exam.id) ? "secondary" : "default"}
                       >
                         {hasAttempted(exam.id) ? (
                           <>
                             <CheckCircle className="mr-2 h-4 w-4" />
                             Attempted
+                          </>
+                        ) : canResume(exam.id) ? (
+                          <>
+                            <PlayCircle className="mr-2 h-4 w-4" />
+                            Resume Exam
                           </>
                         ) : (
                           <>

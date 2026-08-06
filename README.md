@@ -523,6 +523,29 @@ npm start
 Maximum: 100 points
 ```
 
+### 7. Live Exam Video (teacher "Watch Live")
+
+Zoom-style live student video with **no VPS and no media server** — it works the
+same on localhost and on the deployed (Vercel) site. Three transports are layered
+and the teacher UI shows whichever is alive:
+
+1. **WebRTC P2P** (`LIVE HD`) — real browser-to-browser video, signalled through
+   Firestore, one peer connection per watching teacher.
+2. **Firestore frame relay** (`LIVE`) — small JPEG frames pushed through a
+   realtime listener. Needs no P2P connectivity, so a picture always appears.
+3. **BroadcastChannel** — two tabs in the same browser (local testing).
+
+Frames are only relayed while a teacher is actually watching, and the rate drops
+to a heartbeat once WebRTC connects, to stay inside the Firebase free tier.
+
+> **Deploying:** run `npm run firebase:deploy:rules` — the `liveFrames` and
+> `liveVideoSignaling/viewers` rules are required or live video is denied in
+> production. Optionally set `NEXT_PUBLIC_TURN_URLS` /
+> `NEXT_PUBLIC_TURN_USERNAME` / `NEXT_PUBLIC_TURN_CREDENTIAL` to give students
+> behind strict NATs full-rate P2P video.
+>
+> Full design notes and the system audit: [`docs/EXAM_SYSTEM_ANALYSIS.md`](docs/EXAM_SYSTEM_ANALYSIS.md).
+
 ## 🎨 UI Theme
 
 The application uses a custom green theme:
