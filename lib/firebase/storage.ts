@@ -18,6 +18,18 @@ export interface UploadResult {
 
 const COMPRESSIBLE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
+/**
+ * Ceiling for the inline (data-URL) fallback.
+ *
+ * When Cloud Storage is unavailable — it is not enabled on every Firebase
+ * project, and CORS or a captive network can block it — uploads fall back to a
+ * base64 data URL that ends up inside a Firestore document. Firestore rejects
+ * documents over 1 MiB, and base64 inflates a file by ~33%, so anything above
+ * this would produce an "invalid-argument" error at submit time and lose the
+ * student's work. Failing here instead gives a message they can act on.
+ */
+const MAX_INLINE_FALLBACK_BYTES = 600 * 1024;
+
 const fileToDataUrl = async (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -112,6 +124,17 @@ export const uploadFile = async (
 
   const resolveInlineFallback = async (reason?: any) => {
     console.warn("Storage upload failed or CORS/Network blocked, activating resilient inline storage fallback:", reason);
+
+    if (uploadFileCandidate.size > MAX_INLINE_FALLBACK_BYTES) {
+      throw new Error(
+        `Upload failed and "${file.name}" (${Math.round(
+          uploadFileCandidate.size / 1024
+        )} KB) is too large to store inline. Enable Firebase Storage for this project, or upload a file under ${Math.round(
+          MAX_INLINE_FALLBACK_BYTES / 1024
+        )} KB.`
+      );
+    }
+
     const dataUrl = await fileToDataUrl(uploadFileCandidate);
     return {
       url: dataUrl,

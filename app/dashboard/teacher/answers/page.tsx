@@ -34,7 +34,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { doc, getDoc, collection, query, where, getDocs, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { getSimilarityLevel, getSimilarityColor, SIMILARITY_THRESHOLDS, performSimilarityCheck } from "@/lib/utils/similarity";
-import { analyzeSubmittedAnswer, detectAIContent } from "@/lib/utils/gemini";
+import { analyzeSubmittedAnswer, detectAIContent } from "@/lib/utils/ai-client";
 import { formatDate } from "@/lib/utils/helpers";
 import { getQuestionsByExam, getExamsByTeacher, getAnswersByTeacher } from "@/lib/firebase/exams";
 import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";

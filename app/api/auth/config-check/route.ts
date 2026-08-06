@@ -6,10 +6,25 @@ export const dynamic = "force-dynamic";
 
 /**
  * Diagnostics endpoint: reports which server-side config is present/missing so
- * registration failures can be diagnosed quickly. Safe to call from the browser
- * (it only reveals boolean presence + projectId, never secrets).
+ * registration failures can be diagnosed quickly.
+ *
+ * It never returns secret values, but the shape of the deployment (which
+ * credential source is in use, whether SMTP is live) is still information an
+ * attacker can use, so in production it requires a shared token supplied via
+ * the CONFIG_CHECK_TOKEN environment variable. In development it is open.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  if (process.env.NODE_ENV === "production") {
+    const expected = process.env.CONFIG_CHECK_TOKEN;
+    const provided =
+      request.headers.get("x-config-check-token") ||
+      new URL(request.url).searchParams.get("token");
+
+    if (!expected || provided !== expected) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+  }
+
   const hasServiceAccountFile = (() => {
     try {
       const p = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.join(process.cwd(), "serviceAccountKey.json");

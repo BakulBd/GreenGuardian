@@ -46,7 +46,7 @@ import {
   calculateBehaviorScore,
   getBehaviorLevel,
 } from "@/lib/utils/helpers";
-import { analyzeSubmittedAnswer } from "@/lib/utils/gemini";
+import { analyzeSubmittedAnswer } from "@/lib/utils/ai-client";
 import { performSimilarityCheck } from "@/lib/utils/similarity";
 import { startStudentLiveBroadcast } from "@/lib/services/liveVideo";
 import CameraPermission from "@/components/CameraPermission";
@@ -130,12 +130,22 @@ const toMillis = (value: any): number => {
 export default function ExamClient() {
   const params = useParams();
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, loading: authLoading, initialized } = useAuth();
   const { toast } = useToast();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const snapshotIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Timers, keyboard handlers and the warning watcher fire from effects that must
+  // not re-subscribe on every keystroke. Calling `handleSubmit`/`addWarning`
+  // directly from them captured a stale closure — an auto-submit (time up, too
+  // many warnings) then posted the answers as they were when the effect was
+  // created, i.e. usually empty. These refs always hold the current version.
+  const handleSubmitRef = useRef<(auto?: boolean, reason?: string) => Promise<void>>(
+    async () => {}
+  );
+  const addWarningRef = useRef<(reason: string) => void>(() => {});
 
   const [exam, setExam] = useState<Exam | null>(null);
   const [loading, setLoading] = useState(true);
@@ -165,12 +175,32 @@ export default function ExamClient() {
 
   const maxWarnings = 5;
 
+  // Route protection: the exam page renders outside DashboardLayout, so it has
+  // to guard itself. Without this an unauthenticated visitor sat on the loading
+  // spinner forever (every Firestore read was denied) instead of being sent to
+  // the login page.
+  useEffect(() => {
+    if (!initialized || authLoading) return;
+    if (!user) {
+      router.replace(`/login?next=/exam/${params.id ?? ""}`);
+      return;
+    }
+    if (user.role !== "student") {
+      toast({
+        title: "Students only",
+        description: "Only student accounts can sit an exam.",
+        variant: "destructive",
+      });
+      router.replace(user.role === "teacher" ? "/dashboard/teacher" : "/dashboard/admin");
+    }
+  }, [initialized, authLoading, user, router, params.id, toast]);
+
   // Load exam data (waits for the user so a previous attempt can be resolved)
   useEffect(() => {
-    if (params.id && user?.id) {
+    if (params.id && user?.id && user.role === "student") {
       loadExam(params.id as string);
     }
-  }, [params.id, user?.id]);
+  }, [params.id, user?.id, user?.role]);
 
   // Timer
   useEffect(() => {
@@ -180,7 +210,7 @@ export default function ExamClient() {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(timer);
-          handleSubmit(true);
+          handleSubmitRef.current(true, "Time expired");
           return 0;
         }
         return prev - 1;
@@ -196,7 +226,7 @@ export default function ExamClient() {
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        addWarning("Tab switch detected");
+        addWarningRef.current("Tab switch detected");
       }
     };
 
@@ -643,7 +673,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         });
 
         if (pending.count >= maxWarnings) {
-          handleSubmit(true, "Too many warnings");
+          handleSubmitRef.current(true, "Too many warnings");
         }
       }
     }
@@ -1356,6 +1386,12 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
     }
   };
 
+  // Keep the latest implementations reachable from long-lived effects.
+  useEffect(() => {
+    handleSubmitRef.current = handleSubmit;
+    addWarningRef.current = addWarning;
+  });
+
   const formatTime = (seconds: number) => {
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
@@ -1598,7 +1634,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
                 </div>
                 <CardTitle className="text-2xl">Ready to Start!</CardTitle>
                 <CardDescription>
-                  Camera is set up and working. You're all set to begin the exam.
+                  Camera is set up and working. You&apos;re all set to begin the exam.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">

@@ -180,47 +180,103 @@ export async function getTeacherNotices(teacherId: string): Promise<Notice[]> {
   }
 }
 
+/** Newest first, tolerating notices that predate the `publishedAt` field. */
+function sortNoticesByRecency(notices: Notice[]): Notice[] {
+  const millis = (value: any): number => {
+    if (!value) return 0;
+    if (typeof value?.toMillis === "function") return value.toMillis();
+    if (typeof value?.toDate === "function") return value.toDate().getTime();
+    const parsed = new Date(value).getTime();
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+  return notices.sort(
+    (a, b) =>
+      millis(b.publishedAt ?? b.createdAt) - millis(a.publishedAt ?? a.createdAt)
+  );
+}
+
 /**
- * Get all published notices targeted to a specific student based on their profile.
+ * Get all published notices targeted to a specific student.
+ *
+ * Deliberately built from several narrow equality queries rather than "fetch
+ * every published notice and filter in the browser":
+ *  • Privacy — a student never downloads notices addressed to someone else,
+ *    which lets the security rules stay strict (see `firestore.rules`).
+ *  • Cost — only matching documents are read, which matters on the Spark plan.
+ *  • Robustness — equality-only queries need no composite index, and sorting in
+ *    memory means notices missing `publishedAt` are still returned (an
+ *    `orderBy("publishedAt")` query silently drops them).
  */
 export async function getStudentNotices(student: User): Promise<Notice[]> {
-  try {
-    const q = query(
-      collection(db, "notices"),
-      where("status", "==", "published"),
-      orderBy("publishedAt", "desc")
-    );
-    const snapshot = await getDocs(q);
-    const allNotices = snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as Notice));
+  const noticesRef = collection(db, "notices");
+  const published = where("status", "==", "published");
 
-    // Filter notices that target this student
-    const studentNotices = allNotices.filter((notice) => {
-      switch (notice.targetType) {
-        case "all":
-          return true;
-        case "course":
-          return (
-            notice.targetCourseId != null &&
-            student.courses != null &&
-            student.courses.includes(notice.targetCourseId)
-          );
-        case "batch":
-          return notice.targetBatch === student.batch;
-        case "section":
-          return notice.targetSection === student.section;
-        case "semester":
-          return notice.targetBatch === student.batch;
-        case "individual":
-          return (
-            notice.targetStudentIds != null &&
-            notice.targetStudentIds.includes(student.id)
-          );
-        default:
-          return false;
-      }
+  const queries = [
+    query(noticesRef, published, where("targetType", "==", "all")),
+    query(
+      noticesRef,
+      published,
+      where("targetType", "==", "individual"),
+      where("targetStudentIds", "array-contains", student.id)
+    ),
+  ];
+
+  if (student.batch) {
+    // "semester" notices are targeted by batch as well.
+    queries.push(
+      query(
+        noticesRef,
+        published,
+        where("targetType", "in", ["batch", "semester"]),
+        where("targetBatch", "==", student.batch)
+      )
+    );
+  }
+
+  if (student.section) {
+    queries.push(
+      query(
+        noticesRef,
+        published,
+        where("targetType", "==", "section"),
+        where("targetSection", "==", student.section)
+      )
+    );
+  }
+
+  const studentCourses = (student.courses || []).filter(Boolean).slice(0, 30);
+  for (let i = 0; i < studentCourses.length; i += 10) {
+    // Firestore allows at most 10 values in an `in` filter.
+    queries.push(
+      query(
+        noticesRef,
+        published,
+        where("targetType", "==", "course"),
+        where("targetCourseId", "in", studentCourses.slice(i, i + 10))
+      )
+    );
+  }
+
+  try {
+    const snapshots = await Promise.all(
+      queries.map((q) =>
+        getDocs(q).catch((error) => {
+          // One failing branch (e.g. a missing profile field) must not hide
+          // every other notice from the student.
+          console.warn("[Notices] Student notice query failed:", error?.code || error);
+          return null;
+        })
+      )
+    );
+
+    const byId = new Map<string, Notice>();
+    snapshots.forEach((snapshot) => {
+      snapshot?.docs.forEach((d) => {
+        byId.set(d.id, { ...d.data(), id: d.id } as Notice);
+      });
     });
 
-    return studentNotices;
+    return sortNoticesByRecency(Array.from(byId.values()));
   } catch (error: any) {
     console.error("[Notices] Error getting student notices:", error);
     throw new Error("Failed to load notices.");
@@ -270,27 +326,27 @@ try {
  */
 export async function deleteNotice(noticeId: string): Promise<void> {
   try {
-    // Delete associated notice reads
-    const readsQuery = query(
-      collection(db, "noticeReads"),
-      where("noticeId", "==", noticeId)
-    );
-    const readsSnapshot = await getDocs(readsQuery);
-    const deletePromises = readsSnapshot.docs.map((d) =>
-      deleteDoc(doc(db, "noticeReads", d.id))
-    );
-    await Promise.all(deletePromises);
+    // Clean up the child records first, but never let a partial cleanup block
+    // the deletion itself — that used to leave teachers unable to delete a
+    // notice at all once a single student had read it.
+    const cleanUp = async (collectionName: "noticeReads" | "notifications") => {
+      try {
+        const snapshot = await getDocs(
+          query(collection(db, collectionName), where("noticeId", "==", noticeId))
+        );
+        await Promise.all(
+          snapshot.docs.map((d) =>
+            deleteDoc(doc(db, collectionName, d.id)).catch((error) => {
+              console.warn(`[Notices] Could not delete ${collectionName}/${d.id}:`, error?.code);
+            })
+          )
+        );
+      } catch (error: any) {
+        console.warn(`[Notices] Could not clean up ${collectionName}:`, error?.code || error);
+      }
+    };
 
-    // Delete associated notifications for this notice
-    const notifQuery = query(
-      collection(db, "notifications"),
-      where("noticeId", "==", noticeId)
-    );
-    const notifSnapshot = await getDocs(notifQuery);
-    const notifDeletePromises = notifSnapshot.docs.map((d) =>
-      deleteDoc(doc(db, "notifications", d.id))
-    );
-    await Promise.all(notifDeletePromises);
+    await Promise.all([cleanUp("noticeReads"), cleanUp("notifications")]);
 
     // Delete the notice
     await deleteDoc(doc(db, "notices", noticeId));

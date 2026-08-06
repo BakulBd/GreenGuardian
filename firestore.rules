@@ -294,8 +294,21 @@ service cloud.firestore {
 
     // Notices collection
     match /notices/{noticeId} {
-      // Students can read published notices
-      allow read: if isStudent() && resource.data.status == 'published';
+      // Students can only read PUBLISHED notices that are actually addressed to
+      // them. These conditions mirror the queries in getStudentNotices() — keep
+      // the two in sync or student notice lists will fail with permission-denied.
+      allow read: if isStudent() &&
+                     resource.data.status == 'published' && (
+                       resource.data.targetType == 'all' ||
+                       (resource.data.targetType == 'individual' &&
+                        request.auth.uid in resource.data.get('targetStudentIds', [])) ||
+                       (resource.data.targetType in ['batch', 'semester'] &&
+                        resource.data.get('targetBatch', '') == getUserData().get('batch', '')) ||
+                       (resource.data.targetType == 'section' &&
+                        resource.data.get('targetSection', '') == getUserData().get('section', '')) ||
+                       (resource.data.targetType == 'course' &&
+                        resource.data.get('targetCourseId', '') in getUserData().get('courses', []))
+                     );
       // Teachers can read their own notices (draft or published)
       allow read: if isTeacher() && resource.data.teacherId == request.auth.uid;
       // Admins can read all notices
@@ -324,16 +337,19 @@ service cloud.firestore {
       allow read: if isAdmin();
       // Students can mark notices as read
       allow create: if isStudent() && request.resource.data.studentId == request.auth.uid;
+      // Staff clean these up when a notice is deleted (without this, deleting a
+      // notice that anyone had read failed with permission-denied).
+      allow delete: if isTeacherOrAdmin();
     }
 
 // Notifications collection
     match /notifications/{notificationId} {
       // Users can read their own notifications
       allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      // Admins can read all
-      allow read: if isAdmin();
-      // Teachers can create notifications when publishing notices
-      allow create: if isTeacher() && 
+      // Staff can read them to report delivery and to clean up deleted notices
+      allow read: if isTeacherOrAdmin();
+      // Teachers and admins create notifications when publishing notices
+      allow create: if isTeacherOrAdmin() &&
                        request.resource.data.type == 'notice' &&
                        request.resource.data.userId != null &&
                        request.resource.data.noticeId != null;
@@ -342,7 +358,8 @@ service cloud.firestore {
                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
       // Admin can manage
       allow update: if isAdmin();
-      allow delete: if isAdmin();
+      // Staff remove a notice's notifications when the notice is deleted.
+      allow delete: if isTeacherOrAdmin();
     }
 
     // ============ Teacher Assignment Module ============

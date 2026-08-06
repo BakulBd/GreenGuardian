@@ -78,7 +78,7 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
         router.replace("/login");
       }
     }
-  }, [initialized, loading, user, role, router]);
+  }, [initialized, authLoading, user, role, router]);
 
   // Show loading state while auth is initializing or user profile is syncing
   if (!initialized || loading || (!user && auth.currentUser)) {

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { Shield, Mail, Lock, Eye, EyeOff, Loader2 } from "lucide-react";
@@ -15,6 +15,7 @@ import { useAuth } from "@/contexts/AuthContext";
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { toast } = useToast();
   const { user, loading: authLoading, initialized } = useAuth();
   const [loading, setLoading] = useState(false);
@@ -24,17 +25,31 @@ export default function LoginPage() {
     password: "",
   });
 
+  /**
+   * Where to send someone after a successful sign-in.
+   *
+   * Guarded pages redirect here with `?next=`, so a student who opened an exam
+   * link while logged out lands on that exam rather than the dashboard. Only
+   * same-site paths are honoured — accepting an absolute URL here would turn
+   * the login page into an open redirect.
+   */
+  const destinationFor = useCallback(
+    (role: string, approved?: boolean) => {
+      const next = searchParams?.get("next");
+      if (next && next.startsWith("/") && !next.startsWith("//")) return next;
+
+      if (role === "admin") return "/dashboard/admin";
+      if (role === "teacher") return approved ? "/dashboard/teacher" : "/pending-approval";
+      return "/dashboard/student";
+    },
+    [searchParams]
+  );
+
   useEffect(() => {
     if (initialized && !authLoading && user) {
-      if (user.role === "admin") {
-        router.replace("/dashboard/admin");
-      } else if (user.role === "teacher") {
-        router.replace(user.approved ? "/dashboard/teacher" : "/pending-approval");
-      } else {
-        router.replace("/dashboard/student");
-      }
+      router.replace(destinationFor(user.role, user.approved));
     }
-  }, [user, authLoading, initialized, router]);
+  }, [user, authLoading, initialized, router, destinationFor]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,18 +77,13 @@ export default function LoginPage() {
         description: `Welcome back, ${user.name}!`,
       });
 
-      // Redirect based on role
-      if (user.role === "admin") {
-        router.push("/dashboard/admin");
-      } else if (user.role === "teacher") {
-        if (user.approved) {
-          router.push("/dashboard/teacher");
-        } else {
-          router.push("/pending-approval");
-        }
-      } else {
-        router.push("/dashboard/student");
-      }
+      // Honour ?next= when present, otherwise land on the role's dashboard.
+      // A teacher awaiting approval always goes to the holding page.
+      router.push(
+        user.role === "teacher" && !user.approved
+          ? "/pending-approval"
+          : destinationFor(user.role, user.approved)
+      );
     } catch (error: any) {
       let message = error?.message || "Something went wrong";
       toast({

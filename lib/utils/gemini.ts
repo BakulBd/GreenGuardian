@@ -13,13 +13,18 @@ const GEMINI_MODELS = [
   "gemini-1.5-pro",
 ];
 
-// Initialize Gemini AI with API key (supports client & server side env vars)
+/**
+ * Initialize the Gemini client.
+ *
+ * SERVER ONLY. The key must never be exposed with a NEXT_PUBLIC_ prefix — that
+ * inlines it into the JavaScript sent to every browser, where anyone can read
+ * it and spend the project's quota. Browser code calls `/api/ocr` instead
+ * (see `lib/utils/ai-client.ts`).
+ */
 export const getGeminiClient = () => {
-  const apiKey =
-    process.env.NEXT_PUBLIC_GEMINI_API_KEY ||
-    process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.warn("Gemini API key not configured");
+    console.warn("Gemini API key not configured (set GEMINI_API_KEY)");
     return null;
   }
   return new GoogleGenerativeAI(apiKey);
@@ -31,7 +36,7 @@ export const getGeminiClient = () => {
 async function generateContentWithFallback(contents: any) {
   const genAI = getGeminiClient();
   if (!genAI) {
-    throw new Error("Gemini API key not configured. Please set NEXT_PUBLIC_GEMINI_API_KEY or GEMINI_API_KEY.");
+    throw new Error("Gemini API key not configured. Set GEMINI_API_KEY on the server.");
   }
 
   let lastError: any = null;
@@ -73,19 +78,29 @@ export async function urlToBase64(url: string): Promise<{ base64: string; mimeTy
   if (!response.ok) {
     throw new Error(`Failed to fetch file from URL: ${response.statusText}`);
   }
-  const blob = await response.blob();
-  const mimeType = blob.type || (url.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/png");
-  
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      const base64 = result.includes(",") ? result.split(",")[1] : result;
-      resolve({ base64, mimeType });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
+
+  // NOTE: this runs inside the /api/ocr route handler, i.e. in Node — the
+  // previous FileReader implementation was browser-only and threw there.
+  const arrayBuffer = await response.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+
+  let base64: string;
+  if (typeof Buffer !== "undefined") {
+    base64 = Buffer.from(bytes).toString("base64");
+  } else {
+    let binary = "";
+    const chunkSize = 0x8000; // avoid "too many arguments" on large files
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    base64 = btoa(binary);
+  }
+
+  const contentType = (response.headers.get("content-type") || "").split(";")[0].trim();
+  const mimeType =
+    contentType || (url.toLowerCase().includes(".pdf") ? "application/pdf" : "image/png");
+
+  return { base64, mimeType };
 }
 
 export interface ExtractionResult {
