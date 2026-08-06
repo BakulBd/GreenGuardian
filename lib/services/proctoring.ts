@@ -1,17 +1,18 @@
 // Live Proctoring Service
 // Handles real-time video streaming and proctoring data synchronization
 
-import { 
-  doc, 
-  updateDoc, 
-  onSnapshot, 
-  collection, 
-  query, 
-  where, 
-  orderBy, 
+import {
+  doc,
+  updateDoc,
+  onSnapshot,
+  collection,
+  query,
+  where,
+  orderBy,
   serverTimestamp,
   addDoc,
   getDocs,
+  increment,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { ref, uploadString, getDownloadURL } from "firebase/storage";
@@ -236,17 +237,12 @@ export async function logProctoringEvent(
       penalty,
       timestamp: serverTimestamp(),
     });
-    
-    // Update session with event count
+
+    // Bump the per-type counter atomically. (Re-counting the whole collection
+    // on every event used to cost one query per violation per student.)
     const sessionRef = doc(db, "examSessions", event.sessionId);
     await updateDoc(sessionRef, {
-      [`proctoring.eventCounts.${event.eventType}`]: (await getDocs(
-        query(
-          collection(db, "proctoringEvents"),
-          where("sessionId", "==", event.sessionId),
-          where("eventType", "==", event.eventType)
-        )
-      )).size,
+      [`proctoring.eventCounts.${event.eventType}`]: increment(1),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -313,8 +309,29 @@ export async function uploadSnapshot(
   }
 }
 
+/** A session is treated as "online" while it has reported activity recently. */
+export const SESSION_ONLINE_WINDOW_MS = 90_000;
+/** Sessions with no activity for this long are abandoned and leave the grid. */
+export const SESSION_ABANDONED_WINDOW_MS = 30 * 60_000;
+/** How often the per-session event list may be re-fetched (read throttling). */
+const EVENTS_CACHE_TTL_MS = 20_000;
+
+function toDateSafe(value: any): Date {
+  if (!value) return new Date(0);
+  if (typeof value?.toDate === "function") return value.toDate();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? new Date(0) : parsed;
+}
+
 /**
- * Subscribe to live sessions for an exam (teacher view)
+ * Subscribe to live sessions for an exam (teacher view).
+ *
+ * Two behaviours matter here and both used to be wrong:
+ *  • Ghost students — every never-submitted session, however old, was shown as
+ *    "live" forever. Sessions are now filtered by real activity.
+ *  • Read amplification — the violation list was re-queried for every student on
+ *    every single snapshot (a session writes every ~5s, so a 30-student exam
+ *    burned through the Firestore quota in minutes). Results are now cached.
  */
 export function subscribeToLiveSessions(
   examId: string,
@@ -323,85 +340,119 @@ export function subscribeToLiveSessions(
   const sessionsQuery = (examId && examId !== "all")
     ? query(collection(db, "examSessions"), where("examId", "==", examId))
     : query(collection(db, "examSessions"));
-  
-  const unsubscribe = onSnapshot(sessionsQuery, async (snapshot) => {
-    const activeDocs = snapshot.docs.filter((doc) => {
-      const status = doc.data().status;
-      return status === "in-progress" || status === "started" || !doc.data().submitted;
-    });
 
-    const sessionsPromises = activeDocs.map(async (docSnapshot) => {
-      const data = docSnapshot.data();
-      let recentEventsLimited: ProctoringEvent[] = [];
+  const eventsCache = new Map<string, { fetchedAt: number; events: ProctoringEvent[] }>();
+  let cancelled = false;
 
-      try {
-        const eventsQuery = query(
-          collection(db, "proctoringEvents"),
-          where("sessionId", "==", docSnapshot.id)
-        );
-        const eventsSnapshot = await getDocs(eventsQuery);
-        const recentEvents: ProctoringEvent[] = eventsSnapshot.docs.map(e => ({
-          ...e.data(),
-          timestamp: e.data().timestamp?.toDate?.() || new Date(),
-        })) as ProctoringEvent[];
-        recentEvents.sort((a, b) => {
-          const aMs = new Date(a.timestamp as any).getTime();
-          const bMs = new Date(b.timestamp as any).getTime();
-          return bMs - aMs;
-        });
-        recentEventsLimited = recentEvents.slice(0, 10);
-      } catch (err) {
-        // Handle missing index or query error gracefully
-      }
-      
-      const hasAlert = recentEventsLimited.some(
-        e => e.severity === 'critical' || e.severity === 'high'
+  async function loadEvents(sessionId: string): Promise<ProctoringEvent[]> {
+    const cached = eventsCache.get(sessionId);
+    if (cached && Date.now() - cached.fetchedAt < EVENTS_CACHE_TTL_MS) {
+      return cached.events;
+    }
+
+    try {
+      const eventsSnapshot = await getDocs(
+        query(collection(db, "proctoringEvents"), where("sessionId", "==", sessionId))
       );
-      const alertReasons = recentEventsLimited
-        .filter(e => e.severity === 'critical' || e.severity === 'high')
-        .map(e => e.message)
-        .slice(0, 3);
-      
-      const proctoring = data.proctoring || {};
-      const behaviorScore = data.behaviorScore ?? proctoring.behaviorScore ?? 100;
-      const warningCount = data.warnings ?? proctoring.suspiciousEvents ?? 0;
-      
-      let riskLevel: 'low' | 'medium' | 'high' | 'critical';
-      if (behaviorScore >= 85) riskLevel = 'low';
-      else if (behaviorScore >= 65) riskLevel = 'medium';
-      else if (behaviorScore >= 40) riskLevel = 'high';
-      else riskLevel = 'critical';
-      
-      return {
-        sessionId: docSnapshot.id,
-        studentId: data.studentId,
-        studentName: data.studentName || 'Unknown Student',
-        examId: data.examId,
-        isOnline: proctoring.isOnline ?? true,
-        startTime: data.startTime?.toDate?.() || new Date(),
-        lastActivityAt: data.updatedAt?.toDate?.() || new Date(),
-        behaviorScore,
-        warningCount,
-        riskLevel,
-        latestSnapshot: proctoring.lastSnapshot,
-        recentEvents: recentEventsLimited,
-        hasAlert,
-        alertReasons,
-      } as LiveStudentSession;
-    });
-    
-    const sessions = await Promise.all(sessionsPromises);
+      const events = eventsSnapshot.docs
+        .map((e) => ({
+          ...e.data(),
+          timestamp: toDateSafe(e.data().timestamp),
+        }) as ProctoringEvent)
+        .sort(
+          (a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime()
+        )
+        .slice(0, 10);
 
-    // Sort by risk level (critical first)
+      eventsCache.set(sessionId, { fetchedAt: Date.now(), events });
+      return events;
+    } catch {
+      // Missing index / permission hiccup — keep whatever we had.
+      return cached?.events ?? [];
+    }
+  }
+
+  const unsubscribe = onSnapshot(sessionsQuery, async (snapshot) => {
+    const now = Date.now();
+
+    const activeDocs = snapshot.docs.filter((docSnapshot) => {
+      const data = docSnapshot.data();
+      if (data.submitted === true) return false;
+
+      const status = data.status;
+      if (status && status !== "in-progress" && status !== "started") return false;
+
+      // Drop long-abandoned sessions so the grid only shows real attendees.
+      const lastActivity = toDateSafe(data.updatedAt || data.startTime).getTime();
+      return lastActivity === 0 || now - lastActivity < SESSION_ABANDONED_WINDOW_MS;
+    });
+
+    const sessions = await Promise.all(
+      activeDocs.map(async (docSnapshot) => {
+        const data = docSnapshot.data();
+        const recentEvents = await loadEvents(docSnapshot.id);
+
+        const hasAlert = recentEvents.some(
+          (e) => e.severity === "critical" || e.severity === "high"
+        );
+        const alertReasons = recentEvents
+          .filter((e) => e.severity === "critical" || e.severity === "high")
+          .map((e) => e.message)
+          .slice(0, 3);
+
+        const proctoring = data.proctoring || {};
+        const behaviorScore = data.behaviorScore ?? proctoring.behaviorScore ?? 100;
+        const warningCount = data.warnings ?? proctoring.suspiciousEvents ?? 0;
+
+        let riskLevel: "low" | "medium" | "high" | "critical";
+        if (behaviorScore >= 85) riskLevel = "low";
+        else if (behaviorScore >= 65) riskLevel = "medium";
+        else if (behaviorScore >= 40) riskLevel = "high";
+        else riskLevel = "critical";
+
+        // Online is derived from the heartbeat, not from a flag the student's
+        // browser has no chance to clear when the tab is closed.
+        const lastActivityAt = toDateSafe(data.updatedAt || data.startTime);
+        const isOnline =
+          lastActivityAt.getTime() > 0
+            ? now - lastActivityAt.getTime() < SESSION_ONLINE_WINDOW_MS
+            : proctoring.isOnline ?? true;
+
+        return {
+          sessionId: docSnapshot.id,
+          studentId: data.studentId,
+          studentName: data.studentName || "Unknown Student",
+          examId: data.examId,
+          isOnline,
+          startTime: toDateSafe(data.startTime) || new Date(),
+          lastActivityAt,
+          behaviorScore,
+          warningCount,
+          riskLevel,
+          latestSnapshot: proctoring.lastSnapshot,
+          recentEvents,
+          hasAlert,
+          alertReasons,
+        } as LiveStudentSession;
+      })
+    );
+
+    if (cancelled) return;
+
+    // Online students first, then by risk (critical first).
+    const riskOrder = { critical: 0, high: 1, medium: 2, low: 3 };
     sessions.sort((a, b) => {
-      const riskOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+      if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
       return riskOrder[a.riskLevel] - riskOrder[b.riskLevel];
     });
-    
+
     onUpdate(sessions);
   });
-  
-  return unsubscribe;
+
+  return () => {
+    cancelled = true;
+    unsubscribe();
+  };
 }
 
 /**

@@ -38,7 +38,8 @@ import {
   XCircle,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
-import { connectTeacherToStudentStream, subscribeToLocalLiveVideo } from "@/lib/services/webrtcSignaling";
+import LiveVideoTile from "@/components/LiveVideoTile";
+import { LiveTransport } from "@/lib/services/liveVideo";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
@@ -54,77 +55,6 @@ import {
 } from "@/lib/services/proctoring";
 import { getBehaviorLevel } from "@/lib/utils/helpers";
 
-function StudentVideoTile({ session, refreshKey }: { session: LiveStudentSession; refreshKey: number }) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [hasRemoteStream, setHasRemoteStream] = useState(false);
-  const [localLiveFrame, setLocalLiveFrame] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!session.sessionId) return;
-
-    // 1. Listen to BroadcastChannel live video stream for zero-latency local PC streaming
-    const unsubLocal = subscribeToLocalLiveVideo(session.sessionId, (frameUrl) => {
-      setLocalLiveFrame(frameUrl);
-    });
-
-    // 2. Listen to WebRTC P2P remote stream
-    let cleanupWebRTC: (() => void) | null = null;
-    connectTeacherToStudentStream(session.sessionId, (remoteStream) => {
-      if (videoRef.current) {
-        videoRef.current.srcObject = remoteStream;
-        videoRef.current.play().catch(console.error);
-        setHasRemoteStream(true);
-      }
-    }).then((c) => {
-      cleanupWebRTC = c;
-    });
-
-    return () => {
-      unsubLocal();
-      if (cleanupWebRTC) cleanupWebRTC();
-    };
-  }, [session.sessionId]);
-
-  return (
-    <div className="relative w-full h-full bg-gray-900 overflow-hidden">
-      {/* HTML5 WebRTC Video Stream */}
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        className={`w-full h-full object-cover ${hasRemoteStream ? "block" : "hidden"}`}
-      />
-
-      {/* Local Inter-Tab Live Stream Frame */}
-      {!hasRemoteStream && localLiveFrame && (
-        <img
-          src={localLiveFrame}
-          alt={`${session.studentName} live stream`}
-          className="w-full h-full object-cover"
-        />
-      )}
-
-      {/* Firestore Snapshot Fallback (Proof Evidence) */}
-      {!hasRemoteStream && !localLiveFrame && (
-        session.latestSnapshot?.snapshotUrl ? (
-          <img
-            key={refreshKey}
-            src={session.latestSnapshot.snapshotUrl}
-            alt={`${session.studentName} snapshot`}
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-600">
-            <CameraOff className="h-10 w-10 mb-2" />
-            <span className="text-xs">No camera feed</span>
-          </div>
-        )
-      )}
-    </div>
-  );
-}
-
 // Grid helper: determine columns based on student count
 function getGridCols(count: number): string {
   if (count <= 1) return "grid-cols-1";
@@ -132,9 +62,6 @@ function getGridCols(count: number): string {
   if (count <= 9) return "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3";
   return "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4";
 }
-
-// Refresh interval for polling latest snapshots (ms)
-const SNAPSHOT_POLL_INTERVAL = 2000;
 
 export default function TeacherWatchLivePage() {
   const { user } = useAuth();
@@ -155,10 +82,17 @@ export default function TeacherWatchLivePage() {
   const [studentWarningScreenshots, setStudentWarningScreenshots] = useState<WarningScreenshot[]>([]);
   const [showDetailDialog, setShowDetailDialog] = useState(false);
 
-  // Snapshot refresh counter to force re-render for live feed
-  const [refreshKey, setRefreshKey] = useState(0);
+  // Which transport each tile is currently receiving video on.
+  const [transports, setTransports] = useState<Record<string, LiveTransport>>({});
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
+
+  const trackTransport = useCallback(
+    (sessionId: string) => (transport: LiveTransport) => {
+      setTransports((prev) => (prev[sessionId] === transport ? prev : { ...prev, [sessionId]: transport }));
+    },
+    []
+  );
 
   useEffect(() => {
     if (user) {
@@ -170,15 +104,6 @@ export default function TeacherWatchLivePage() {
       }
     };
   }, [user]);
-
-  // Poll for snapshot updates every 2 seconds for live feed feel
-  useEffect(() => {
-    if (!selectedExamId) return;
-    const interval = setInterval(() => {
-      setRefreshKey((prev) => prev + 1);
-    }, SNAPSHOT_POLL_INTERVAL);
-    return () => clearInterval(interval);
-  }, [selectedExamId]);
 
   useEffect(() => {
     if (selectedExamId) {
@@ -269,10 +194,16 @@ export default function TeacherWatchLivePage() {
     }
   };
 
+  // Camera status now reflects the *actual* live transport, so the badge is
+  // meaningful on the deployed site (not just "a snapshot exists").
   const getCameraStatus = (session: LiveStudentSession) => {
+    const transport = transports[session.sessionId] || "none";
+    if (transport === "webrtc") return { label: "Live HD", color: "bg-green-500 animate-pulse", icon: Camera };
+    if (transport === "relay" || transport === "local")
+      return { label: "Live", color: "bg-green-500 animate-pulse", icon: Camera };
     if (!session.isOnline) return { label: "Offline", color: "bg-gray-400", icon: WifiOff };
     if (!session.latestSnapshot?.snapshotUrl) return { label: "Camera Off", color: "bg-yellow-400", icon: CameraOff };
-    return { label: "Live", color: "bg-green-500 animate-pulse", icon: Camera };
+    return { label: "Snapshot", color: "bg-yellow-400", icon: Camera };
   };
 
   // Fullscreen viewer component
@@ -309,21 +240,18 @@ export default function TeacherWatchLivePage() {
           </div>
         </div>
 
-        {/* Video Feed */}
+        {/* Video Feed — high quality stream for the focused student */}
         <div className="flex-1 flex items-center justify-center p-4">
-          {fullscreenStudent.latestSnapshot?.snapshotUrl ? (
-            <img
-              key={refreshKey} // Force re-render on refresh
-              src={fullscreenStudent.latestSnapshot.snapshotUrl}
-              alt={`${fullscreenStudent.studentName} live feed`}
-              className="max-w-full max-h-full object-contain rounded-lg"
+          <div className="w-full h-full max-w-5xl rounded-lg overflow-hidden">
+            <LiveVideoTile
+              sessionId={fullscreenStudent.sessionId}
+              studentName={fullscreenStudent.studentName}
+              fallbackSnapshotUrl={fullscreenStudent.latestSnapshot?.snapshotUrl}
+              quality="high"
+              viewerName={user?.name || user?.email}
+              onTransportChange={trackTransport(fullscreenStudent.sessionId)}
             />
-          ) : (
-            <div className="text-gray-500 flex flex-col items-center">
-              <CameraOff className="h-16 w-16 mb-4" />
-              <p className="text-xl">Camera is off or no feed available</p>
-            </div>
-          )}
+          </div>
         </div>
 
         {/* Bottom Bar */}
@@ -509,7 +437,15 @@ export default function TeacherWatchLivePage() {
                         >
                           {/* Camera Feed Area */}
                           <div className="relative aspect-video bg-gray-900 group">
-                            <StudentVideoTile session={session} refreshKey={refreshKey} />
+                            <LiveVideoTile
+                              sessionId={session.sessionId}
+                              studentName={session.studentName}
+                              fallbackSnapshotUrl={session.latestSnapshot?.snapshotUrl}
+                              quality="thumb"
+                              viewerName={user?.name || user?.email}
+                              hideBadge
+                              onTransportChange={trackTransport(session.sessionId)}
+                            />
 
                             {/* Overlay badges */}
                             <div className="absolute top-2 left-2 flex items-center gap-1.5">
@@ -717,7 +653,7 @@ export default function TeacherWatchLivePage() {
 
               <Tabs defaultValue="snapshot" className="mt-4">
                 <TabsList className="w-full justify-start">
-                  <TabsTrigger value="snapshot">Live Snapshot</TabsTrigger>
+                  <TabsTrigger value="snapshot">Live Video</TabsTrigger>
                   <TabsTrigger value="events">
                     Events ({studentEvents.length})
                   </TabsTrigger>
@@ -732,24 +668,16 @@ export default function TeacherWatchLivePage() {
                 <TabsContent value="snapshot" className="mt-4">
                   <Card>
                     <CardContent className="pt-4">
-                      {selectedStudent.latestSnapshot?.snapshotUrl ? (
-                        <div className="relative">
-                          <img
-                            src={selectedStudent.latestSnapshot.snapshotUrl}
-                            alt="Live snapshot"
-                            className="w-full max-w-2xl mx-auto rounded-lg border"
-                          />
-                          <Badge className="absolute top-2 right-2 bg-green-500/80 text-white">
-                            <Activity className="h-3 w-3 mr-1 animate-pulse" />
-                            Live
-                          </Badge>
-                        </div>
-                      ) : (
-                        <div className="flex h-64 items-center justify-center rounded-lg border bg-gray-50 text-gray-500">
-                          <CameraOff className="h-8 w-8 mr-2" />
-                          No live snapshot available
-                        </div>
-                      )}
+                      <div className="w-full max-w-2xl mx-auto aspect-video rounded-lg border overflow-hidden">
+                        <LiveVideoTile
+                          sessionId={selectedStudent.sessionId}
+                          studentName={selectedStudent.studentName}
+                          fallbackSnapshotUrl={selectedStudent.latestSnapshot?.snapshotUrl}
+                          quality="high"
+                          viewerName={user?.name || user?.email}
+                          onTransportChange={trackTransport(selectedStudent.sessionId)}
+                        />
+                      </div>
                     </CardContent>
                   </Card>
                 </TabsContent>

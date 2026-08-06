@@ -54,7 +54,12 @@ export default function TeacherDashboard() {
     }
   };
 
-  const activeExams = exams.filter((e) => e.status === "active").length;
+  // Exams are created with status "published"; "active" is only set when a
+  // teacher explicitly activates one. Counting just "active" reported 0 for
+  // every live exam.
+  const activeExams = exams.filter(
+    (e) => e.status === "active" || e.status === "published"
+  ).length;
 
   return (
     <DashboardLayout role="teacher">

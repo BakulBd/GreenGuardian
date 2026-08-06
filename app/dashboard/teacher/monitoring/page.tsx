@@ -22,6 +22,7 @@ import {
   Image as ImageIcon
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
+import LiveVideoTile from "@/components/LiveVideoTile";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
@@ -275,18 +276,14 @@ export default function TeacherMonitoringPage() {
                             
                             {/* Snapshot Display */}
                             <div className="bg-black flex-shrink-0 relative h-32 md:h-auto md:w-48 flex items-center justify-center">
-                              {session.latestSnapshot?.snapshotUrl ? (
-                                <img 
-                                  src={session.latestSnapshot.snapshotUrl} 
-                                  alt="Proctoring Snapshot" 
-                                  className="h-full w-full object-cover"
-                                />
-                              ) : (
-                                <div className="text-gray-500 flex flex-col items-center">
-                                  <ImageIcon className="w-8 h-8 mb-2 opacity-50" />
-                                  <span className="text-xs">No Snapshot</span>
-                                </div>
-                              )}
+                              <LiveVideoTile
+                                sessionId={session.sessionId}
+                                studentName={session.studentName}
+                                fallbackSnapshotUrl={session.latestSnapshot?.snapshotUrl}
+                                quality="thumb"
+                                viewerName={user?.name || user?.email}
+                                hideBadge
+                              />
                               <div className="absolute top-2 right-2">
                                 <div className={`w-3 h-3 rounded-full border border-white ${session.isOnline ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
                               </div>
