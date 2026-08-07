@@ -1,4 +1,4 @@
-import { collection, getDocs, doc, setDoc, getDoc, serverTimestamp, query, orderBy, onSnapshot, where } from "firebase/firestore";
+import { collection, getDocs, query, orderBy, onSnapshot, where } from "firebase/firestore";
 import { db } from "../firebase/config";
 
 export interface Department {
@@ -23,28 +23,6 @@ export interface Batch {
 export interface Section {
   id: string;
   name: string;
-}
-
-export interface CourseAssignment {
-  courseId: string;
-  courseName: string;
-  batch: string;
-  section: string;
-}
-
-export interface TeacherCourseMapping {
-  teacherId: string;
-  assignments: CourseAssignment[];
-}
-
-export interface StudentCourseMapping {
-  studentId: string;
-  studentCode?: string; // e.g. 0182220005101001
-  department: string;
-  batch: string;
-  section: string;
-  sections: string[]; // e.g. ["D1", "D2", "D3"] or all
-  courses: string[]; // course IDs or course names
 }
 
 export const DEFAULT_DEPARTMENT: Department = {
@@ -87,54 +65,6 @@ export const DEFAULT_SECTIONS: Section[] = [
   { id: "D4", name: "D4" },
   { id: "D5", name: "D5" },
 ];
-
-/**
- * Generate full default assignment for a teacher: All CSE courses, All batches, All sections
- */
-export function getDefaultTeacherAssignments(): CourseAssignment[] {
-  const assignments: CourseAssignment[] = [];
-  for (const course of DEFAULT_COURSES) {
-    for (const batch of DEFAULT_BATCHES) {
-      for (const section of DEFAULT_SECTIONS) {
-        assignments.push({
-          courseId: course.id,
-          courseName: course.name,
-          batch: batch.name,
-          section: section.name,
-        });
-      }
-    }
-  }
-  return assignments;
-}
-
-/**
- * Fetch assigned courses for a teacher, returning default full assignments if not customized
- */
-export async function getTeacherAssignments(teacherId: string): Promise<CourseAssignment[]> {
-  try {
-    const docRef = doc(db, "teacher_courses", teacherId);
-    const snap = await getDoc(docRef);
-    if (snap.exists() && snap.data().assignments?.length > 0) {
-      return snap.data().assignments as CourseAssignment[];
-    }
-  } catch (error) {
-    console.warn("Could not fetch custom teacher assignments, using defaults:", error);
-  }
-  return getDefaultTeacherAssignments();
-}
-
-/**
- * Save custom assignments for a teacher
- */
-export async function saveTeacherAssignments(teacherId: string, assignments: CourseAssignment[]): Promise<void> {
-  const docRef = doc(db, "teacher_courses", teacherId);
-  await setDoc(docRef, {
-    teacherId,
-    assignments,
-    updatedAt: serverTimestamp(),
-  }, { merge: true });
-}
 
 // ===================== Dynamic Firestore Catalog =====================
 // These helpers load Courses/Batches/Sections from Firestore collections

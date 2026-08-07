@@ -141,27 +141,67 @@ export async function resolveAssignmentStudentIds(
   return group;
 }
 
+/**
+ * Resolve the exact set of student IDs a teacher may target for a given
+ * Course+Batch+Section, using the teacher's own `teacher_assignments` row
+ * for that group (including any individual-student subset override). Used
+ * by exam creation to materialize `Exam.targetStudentIds` so exam
+ * visibility is driven by the same admin-assignment data as "My Courses"
+ * and notices, instead of a free-text course/batch/section match.
+ */
+export async function computeAssignmentTargetStudentIds(
+  teacherId: string,
+  courseId: string,
+  batchId: string,
+  sectionId: string
+): Promise<string[]> {
+  const assignments = await getAssignmentsByTeacher(teacherId);
+  const match = assignments.find(
+    (a) => a.courseId === courseId && a.batchId === batchId && a.sectionId === sectionId
+  );
+  if (!match) return [];
+
+  const students = await resolveAssignmentStudentIds(
+    courseId,
+    match.batchName || "",
+    match.sectionName || "",
+    match.studentIds
+  );
+  return students.map((s) => s.id);
+}
+
 // ===================== Denormalized student -> teacher sync =====================
 
 /**
- * Recomputes and writes `users/{studentId}.assignedTeacherIds` from the
- * current `teacher_student_mapping` rows for each given student. This is the
- * field Firestore security rules and notice/notification queries check to
- * guarantee teacher communication only reaches assigned students (Task 10) —
- * cheap to check in a rule, unlike a live query against the mapping
- * collection. Always derives the full set fresh, so it's safe to call after
- * any create/update/remove without separately tracking deltas.
+ * Recomputes and writes `users/{studentId}.assignedTeacherIds` from ALL
+ * current sources of teacher access for each given student:
+ *   1. `teacher_student_mapping` rows (admin Course/Batch/Section assignment)
+ *   2. `classroomMembers` rows (classroom join-by-code or teacher-added)
+ *
+ * This is the field Firestore security rules and notice/notification/exam
+ * queries check to guarantee teacher communication only reaches assigned
+ * students — cheap to check in a rule, unlike a live query against the
+ * mapping/membership collections. Always derives the full set fresh from
+ * both live sources, so it's safe to call after any create/update/remove on
+ * EITHER source without separately tracking deltas or reference counts: a
+ * student who loses one source (e.g. leaves a classroom) keeps the teacher
+ * in this list as long as the other source (e.g. an admin assignment, or a
+ * different classroom with the same teacher) still grants it.
  */
-async function syncAssignedTeacherIds(studentIds: string[]): Promise<void> {
+export async function recomputeAssignedTeacherIds(studentIds: string[]): Promise<void> {
   const uniqueIds = Array.from(new Set(studentIds.filter(Boolean)));
   await Promise.all(
     uniqueIds.map(async (studentId) => {
       try {
-        const mappingsSnap = await getDocs(
-          query(collection(db, MAPPINGS_COLLECTION), where("studentId", "==", studentId))
-        );
+        const [mappingsSnap, membershipsSnap] = await Promise.all([
+          getDocs(query(collection(db, MAPPINGS_COLLECTION), where("studentId", "==", studentId))),
+          getDocs(query(collection(db, "classroomMembers"), where("studentId", "==", studentId))),
+        ]);
         const teacherIds = Array.from(
-          new Set(mappingsSnap.docs.map((d) => d.data().teacherId).filter(Boolean))
+          new Set([
+            ...mappingsSnap.docs.map((d) => d.data().teacherId),
+            ...membershipsSnap.docs.map((d) => d.data().teacherId),
+          ].filter(Boolean))
         );
         await updateDoc(doc(db, "users", studentId), {
           assignedTeacherIds: teacherIds,
@@ -195,7 +235,7 @@ export async function backfillAllAssignedTeacherIds(): Promise<{ studentsUpdated
     new Set(mappingsSnap.docs.map((d) => d.data().studentId).filter(Boolean))
   ) as string[];
 
-  await syncAssignedTeacherIds(studentIds);
+  await recomputeAssignedTeacherIds(studentIds);
   return { studentsUpdated: studentIds.length };
 }
 
@@ -369,7 +409,7 @@ export async function createTeacherAssignment(
   }
 
   await batch.commit();
-  await syncAssignedTeacherIds(students.map((s) => s.id));
+  await recomputeAssignedTeacherIds(students.map((s) => s.id));
 
   // Log history (best-effort, after commit)
   await logAssignmentHistory({
@@ -485,9 +525,9 @@ export async function updateTeacherAssignment(
   await batch.commit();
   // Union of old + new: students dropped from this assignment need their
   // assignedTeacherIds recomputed (they may still be covered by another
-  // assignment to the same teacher, or not — syncAssignedTeacherIds derives
+  // assignment to the same teacher, or not — recomputeAssignedTeacherIds derives
   // the correct answer fresh either way.
-  await syncAssignedTeacherIds([...oldStudentIds, ...students.map((s) => s.id)]);
+  await recomputeAssignedTeacherIds([...oldStudentIds, ...students.map((s) => s.id)]);
 
   await logAssignmentHistory({
     assignmentId,
@@ -538,7 +578,7 @@ export async function removeTeacherAssignment(
 
   batch.delete(assignmentRef);
   await batch.commit();
-  await syncAssignedTeacherIds(studentIds);
+  await recomputeAssignedTeacherIds(studentIds);
 
   await logAssignmentHistory({
     assignmentId,
@@ -592,14 +632,25 @@ export async function getAssignedCourses(teacherId: string): Promise<TeacherAssi
   return Array.from(seen.values());
 }
 
-/**
- * Get unique batch+section groups assigned to a teacher, grouped by course.
- */
-export async function getAssignedBatchesSections(
-  teacherId: string
-): Promise<{ courseId: string; courseName: string; courseCode?: string; batches: { batchId: string; batchName: string; sections: { sectionId: string; sectionName: string }[] }[] }[]> {
-  const assignments = await getAssignmentsByTeacher(teacherId);
+export interface AssignedCatalogEntry {
+  courseId: string;
+  courseName: string;
+  courseCode?: string;
+  batches: {
+    batchId: string;
+    batchName: string;
+    sections: { sectionId: string; sectionName: string }[];
+  }[];
+}
 
+/**
+ * Pure grouping of a teacher's assignments into a Course -> Batch -> Section
+ * tree. Shared by the one-shot `getAssignedBatchesSections` query and the
+ * realtime `subscribeToAssignedCatalog` subscription below, so exam/notice/
+ * classroom pickers that need "only what this teacher is actually assigned
+ * to" all derive it the same way.
+ */
+export function groupAssignmentsByCourse(assignments: TeacherAssignment[]): AssignedCatalogEntry[] {
   const courseMap = new Map<string, { courseId: string; courseName: string; courseCode?: string; batches: Map<string, Set<string>> }>();
   assignments.forEach((a) => {
     if (!courseMap.has(a.courseId)) {
@@ -626,6 +677,16 @@ export async function getAssignedBatchesSections(
       };
     }).sort((x, y) => x.batchName.localeCompare(y.batchName)),
   }));
+}
+
+/**
+ * Get unique batch+section groups assigned to a teacher, grouped by course.
+ */
+export async function getAssignedBatchesSections(
+  teacherId: string
+): Promise<AssignedCatalogEntry[]> {
+  const assignments = await getAssignmentsByTeacher(teacherId);
+  return groupAssignmentsByCourse(assignments);
 }
 
 /**
@@ -679,6 +740,21 @@ export function subscribeToTeacherAssignments(
     callback(docToData<TeacherAssignment>(snapshot));
   }, (error) => {
     console.error("[Assignments] Teacher assignments subscription error:", error);
+  });
+}
+
+/**
+ * Realtime Course -> Batch -> Section tree scoped to what THIS teacher was
+ * actually assigned by an admin. This is the picker data source for exam
+ * creation, notice creation, and classroom Course/Batch/Section bulk-add —
+ * a teacher can only ever target students within a group they were assigned.
+ */
+export function subscribeToAssignedCatalog(
+  teacherId: string,
+  callback: (grouped: AssignedCatalogEntry[]) => void
+): () => void {
+  return subscribeToTeacherAssignments(teacherId, (assignments) => {
+    callback(groupAssignmentsByCourse(assignments));
   });
 }
 

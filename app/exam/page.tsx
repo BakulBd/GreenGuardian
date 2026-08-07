@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Shield, FileText, Clock, ChevronRight, LogOut } from "lucide-react";
-import { subscribeToPublishedExams } from "@/lib/firebase/exams";
+import { subscribeToStudentVisibleExams } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
 import { useAuth } from "@/hooks/useAuth";
@@ -34,31 +34,12 @@ export default function ExamPage() {
     }
 
     // Realtime feed (Feature 5): a newly published exam appears without a
-    // manual refresh, and the assignment filter re-runs on every snapshot.
-    const unsubscribe = subscribeToPublishedExams((allExams) => {
-      const assignedTeacherIds = user.assignedTeacherIds || [];
-      const availableExams = allExams.filter((e) => {
-        // A student only sees exams from teachers an admin assigned them
-        // to (Task 10) — see lib/firebase/assignments.ts.
-        if (e.teacherId && !assignedTeacherIds.includes(e.teacherId)) {
-          return false;
-        }
-
-        const studentBatch = user.batch;
-        const studentSections = user.sections || (user.section ? [user.section] : null);
-
-        // If exam specifies batch and student has batch, must match
-        if (e.batch && studentBatch && e.batch !== studentBatch) {
-          return false;
-        }
-
-        // If exam specifies section and student has section list, must match
-        if (e.section && studentSections && !studentSections.includes(e.section)) {
-          return false;
-        }
-
-        return true;
-      });
+    // manual refresh. Visibility itself is enforced server-side (see
+    // firestore.rules `exams` read rule) via `targetStudentIds`, resolved
+    // at exam-creation time from the teacher's Course/Batch/Section
+    // assignment — this query can only ever return exams this student is
+    // actually allowed to see.
+    const unsubscribe = subscribeToStudentVisibleExams(user.id, (availableExams) => {
       setExams(availableExams);
       setLoading(false);
     });

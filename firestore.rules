@@ -89,9 +89,23 @@ service cloud.firestore {
     
     // Exams collection
     match /exams/{examId} {
-      // Students can read published/active exams
-      allow read: if isAuthenticated();
-      
+      // Teachers can read their own exams (any status).
+      allow read: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      // Admins can read any exam.
+      allow read: if isAdmin();
+      // Students can only read a published/active exam they were specifically
+      // targeted for — `targetStudentIds` is resolved at creation time from
+      // the teacher's Course+Batch+Section assignment (see
+      // computeAssignmentTargetStudentIds in lib/firebase/assignments.ts) and
+      // is exactly what subscribeToStudentVisibleExams() queries, so this
+      // rule can never reject that query. Exams created before this field
+      // existed stay invisible until an admin runs the one-time
+      // backfillExamTargetStudentIds() — same fail-closed-until-backfilled
+      // tradeoff already used for `assignedTeacherIds`.
+      allow read: if isStudent() &&
+                     resource.data.status in ['published', 'active'] &&
+                     request.auth.uid in resource.data.get('targetStudentIds', []);
+
       // Teachers can create exams
       allow create: if isTeacher() && isActiveUser() &&
                        request.resource.data.teacherId == request.auth.uid &&
@@ -484,13 +498,26 @@ service cloud.firestore {
     match /classroomMembers/{memberId} {
       allow read: if isTeacherOrAdmin() ||
         (isAuthenticated() && resource.data.studentId == request.auth.uid);
-      // Task 10, reused: a student may only join a classroom whose teacher
-      // is one an admin actually assigned them to — this is the "no
-      // leakage even with the code" guarantee.
+      // Self-join by code: classroom membership is its own access boundary
+      // now (no separate admin Course/Batch/Section assignment required —
+      // see lib/firebase/classrooms.ts#joinClassroomByCode). The submitted
+      // `teacherId` must match the classroom's real owner so the
+      // denormalized field recomputeAssignedTeacherIds() relies on can't be
+      // spoofed.
       allow create: if isStudent() && isActiveUser() &&
         request.resource.data.studentId == request.auth.uid &&
         memberId == request.resource.data.classroomId + '_' + request.auth.uid &&
-        get(/databases/$(database)/documents/classrooms/$(request.resource.data.classroomId)).data.teacherId in getUserData().get('assignedTeacherIds', []) &&
+        request.resource.data.teacherId == get(/databases/$(database)/documents/classrooms/$(request.resource.data.classroomId)).data.teacherId &&
+        get(/databases/$(database)/documents/classrooms/$(request.resource.data.classroomId)).data.status == 'active';
+      // Teacher-initiated add (manual, or Course/Batch/Section bulk-add) —
+      // only the classroom's own teacher, or an admin, may add a student
+      // this way.
+      allow create: if (
+          (isTeacher() && get(/databases/$(database)/documents/classrooms/$(request.resource.data.classroomId)).data.teacherId == request.auth.uid) ||
+          isAdmin()
+        ) &&
+        memberId == request.resource.data.classroomId + '_' + request.resource.data.studentId &&
+        request.resource.data.teacherId == get(/databases/$(database)/documents/classrooms/$(request.resource.data.classroomId)).data.teacherId &&
         get(/databases/$(database)/documents/classrooms/$(request.resource.data.classroomId)).data.status == 'active';
       // Student leaves, or teacher/admin removes them.
       allow delete: if isTeacherOrAdmin() ||

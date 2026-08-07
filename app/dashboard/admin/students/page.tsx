@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,8 @@ import { registerUser } from "@/lib/firebase/auth";
 import { User as UserType } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
 import { useToast } from "@/components/ui/use-toast";
-import { DEFAULT_DEPARTMENT, DEFAULT_BATCHES, DEFAULT_SECTIONS, DEFAULT_COURSES } from "@/lib/academics/catalog";
+import { DEFAULT_DEPARTMENT } from "@/lib/academics/catalog";
+import { useAcademicCatalog } from "@/hooks/useAcademicCatalog";
 import AccountStatusControl from "@/components/AccountStatusControl";
 import { doc, setDoc, serverTimestamp, collection, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
@@ -29,6 +30,23 @@ export default function StudentsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [teacherNamesByStudent, setTeacherNamesByStudent] = useState<Map<string, string[]>>(new Map());
   const { toast } = useToast();
+  const catalog = useAcademicCatalog();
+
+  // Batches/sections are course-scoped in Firestore (one BatchDoc per
+  // course+name), but a student's batch/section fields are flat strings —
+  // dedupe by name so the dropdown doesn't repeat "241" once per course.
+  const departmentNames = useMemo(() => {
+    const names = Array.from(new Set(catalog.courses.map((c) => c.departmentName).filter(Boolean))) as string[];
+    return names.length > 0 ? names : [DEFAULT_DEPARTMENT.name];
+  }, [catalog.courses]);
+  const batchNames = useMemo(() => {
+    const names = Array.from(new Set(catalog.batches.map((b) => b.name).filter(Boolean)));
+    return names.sort();
+  }, [catalog.batches]);
+  const sectionNames = useMemo(() => {
+    const names = Array.from(new Set(catalog.sections.map((s) => s.name).filter(Boolean)));
+    return names.sort();
+  }, [catalog.sections]);
 
   // Add Student Form State
   const [formData, setFormData] = useState({
@@ -339,7 +357,9 @@ export default function StudentsPage() {
                         value={formData.department}
                         onChange={(e) => setFormData({ ...formData, department: e.target.value })}
                       >
-                        <option value={DEFAULT_DEPARTMENT.name}>{DEFAULT_DEPARTMENT.name}</option>
+                        {departmentNames.map((d) => (
+                          <option key={d} value={d}>{d}</option>
+                        ))}
                       </select>
                     </div>
 
@@ -350,8 +370,8 @@ export default function StudentsPage() {
                         value={formData.batch}
                         onChange={(e) => setFormData({ ...formData, batch: e.target.value })}
                       >
-                        {DEFAULT_BATCHES.map((b) => (
-                          <option key={b.id} value={b.name}>Batch {b.name}</option>
+                        {batchNames.map((name) => (
+                          <option key={name} value={name}>Batch {name}</option>
                         ))}
                       </select>
                     </div>
@@ -363,8 +383,8 @@ export default function StudentsPage() {
                         value={formData.section}
                         onChange={(e) => setFormData({ ...formData, section: e.target.value })}
                       >
-                        {DEFAULT_SECTIONS.map((s) => (
-                          <option key={s.id} value={s.name}>Section {s.name}</option>
+                        {sectionNames.map((name) => (
+                          <option key={name} value={name}>Section {name}</option>
                         ))}
                       </select>
                     </div>
@@ -414,7 +434,9 @@ export default function StudentsPage() {
                         value={editData.department}
                         onChange={(e) => setEditData({ ...editData, department: e.target.value })}
                       >
-                        <option value={DEFAULT_DEPARTMENT.name}>{DEFAULT_DEPARTMENT.name}</option>
+                        {departmentNames.map((d) => (
+                          <option key={d} value={d}>{d}</option>
+                        ))}
                       </select>
                     </div>
 
@@ -425,8 +447,8 @@ export default function StudentsPage() {
                         value={editData.batch}
                         onChange={(e) => setEditData({ ...editData, batch: e.target.value })}
                       >
-                        {DEFAULT_BATCHES.map((b) => (
-                          <option key={b.id} value={b.name}>{b.name}</option>
+                        {batchNames.map((name) => (
+                          <option key={name} value={name}>{name}</option>
                         ))}
                       </select>
                     </div>
@@ -438,8 +460,8 @@ export default function StudentsPage() {
                         value={editData.section}
                         onChange={(e) => setEditData({ ...editData, section: e.target.value })}
                       >
-                        {DEFAULT_SECTIONS.map((s) => (
-                          <option key={s.id} value={s.name}>{s.name}</option>
+                        {sectionNames.map((name) => (
+                          <option key={name} value={name}>{name}</option>
                         ))}
                       </select>
                     </div>

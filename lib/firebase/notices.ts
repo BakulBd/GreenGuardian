@@ -442,6 +442,29 @@ export async function publishNoticeWithNotifications(
   }
 }
 
+/**
+ * Email fan-out when a teacher publishes a notice, mirroring
+ * notifyExamPublished / notifyClassroom. In-app notifications are already
+ * written by publishNoticeWithNotifications above — this only adds the
+ * email leg via /api/notices/notify (Admin SDK, re-reads each recipient's
+ * current email server-side).
+ */
+export async function notifyNoticePublished(noticeId: string, studentIds: string[]): Promise<void> {
+  if (studentIds.length === 0) return;
+  const { auth } = await import("./config");
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) return;
+  const res = await fetch("/api/notices/notify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ noticeId, studentIds }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Notice notify failed (${res.status})`);
+  }
+}
+
 // ===================== Notice Reads (Read Status) =====================
 
 /**

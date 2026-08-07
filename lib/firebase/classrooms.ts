@@ -26,6 +26,7 @@ import {
   ClassroomAttachment,
   User,
 } from "../types";
+import { recomputeAssignedTeacherIds, getStudentGroup } from "./assignments";
 
 const CLASSROOMS = "classrooms";
 const MEMBERS = "classroomMembers";
@@ -190,13 +191,14 @@ export type JoinClassroomResult =
   | { success: false; error: string };
 
 /**
- * Join a classroom by code. Validates, in order: code exists, classroom is
- * active, student is not already a member, and — the actual security
- * boundary, enforced again server-side by firestore.rules — the classroom's
- * teacher is one this student is actually assigned to (Task 10's
- * `assignedTeacherIds`). A student who knows a code for a teacher they
- * aren't assigned to is rejected here AND would be denied by the rules even
- * if this check were bypassed.
+ * Join a classroom by code. Classroom membership is its own source of
+ * truth for teacher access — joining does NOT require a pre-existing admin
+ * Course/Batch/Section assignment (that used to be a hard, undocumented
+ * dependency between two unrelated features and was why "join by code"
+ * looked broken for any student the admin hadn't separately assigned).
+ * Any student with a valid, active code may join; doing so denormalizes
+ * `teacherId` on the membership and recomputes the student's
+ * `assignedTeacherIds` so exam/notice visibility picks it up immediately.
  */
 export async function joinClassroomByCode(code: string, student: User): Promise<JoinClassroomResult> {
   const trimmed = code.trim().toUpperCase();
@@ -209,23 +211,21 @@ export async function joinClassroomByCode(code: string, student: User): Promise<
   const existing = await getDoc(doc(db, MEMBERS, memberId(classroom.id, student.id)));
   if (existing.exists()) return { success: false, error: "You have already joined this classroom." };
 
-  const assignedTeacherIds = student.assignedTeacherIds || [];
-  if (!assignedTeacherIds.includes(classroom.teacherId)) {
-    return { success: false, error: "You are not assigned to this teacher, so you cannot join this classroom." };
-  }
-
   try {
     const batch = writeBatch(db);
     batch.set(doc(db, MEMBERS, memberId(classroom.id, student.id)), stripUndefined({
       classroomId: classroom.id,
+      teacherId: classroom.teacherId,
       studentId: student.id,
       studentName: student.name,
       studentEmail: student.email,
       studentCode: student.studentCode,
+      addedVia: "code",
       joinedAt: serverTimestamp(),
     }));
     batch.update(doc(db, CLASSROOMS, classroom.id), { studentCount: increment(1), updatedAt: serverTimestamp() });
     await batch.commit();
+    await recomputeAssignedTeacherIds([student.id]);
     return { success: true, classroomId: classroom.id, classroomName: classroom.name };
   } catch (error: any) {
     return { success: false, error: error.code === "permission-denied" ? "You are not allowed to join this classroom." : (error.message || "Failed to join classroom.") };
@@ -237,10 +237,82 @@ export async function leaveClassroom(classroomId: string, studentId: string): Pr
   batch.delete(doc(db, MEMBERS, memberId(classroomId, studentId)));
   batch.update(doc(db, CLASSROOMS, classroomId), { studentCount: increment(-1), updatedAt: serverTimestamp() });
   await batch.commit();
+  // Recompute rather than blindly unassign — the student may still be
+  // linked to this teacher via an admin assignment or another classroom.
+  await recomputeAssignedTeacherIds([studentId]);
 }
 
 export async function removeClassroomMember(classroomId: string, studentId: string): Promise<void> {
   return leaveClassroom(classroomId, studentId);
+}
+
+/**
+ * Teacher-initiated: add a single student directly to a classroom (no code
+ * needed). Requires the caller to already know the student's `User` record
+ * (looked up by the UI, e.g. via search).
+ */
+export async function addStudentToClassroom(classroom: Pick<Classroom, "id" | "teacherId">, student: User): Promise<void> {
+  const existing = await getDoc(doc(db, MEMBERS, memberId(classroom.id, student.id)));
+  if (existing.exists()) throw new Error(`${student.name} is already a member of this classroom.`);
+
+  const batch = writeBatch(db);
+  batch.set(doc(db, MEMBERS, memberId(classroom.id, student.id)), stripUndefined({
+    classroomId: classroom.id,
+    teacherId: classroom.teacherId,
+    studentId: student.id,
+    studentName: student.name,
+    studentEmail: student.email,
+    studentCode: student.studentCode,
+    addedVia: "teacher",
+    joinedAt: serverTimestamp(),
+  }));
+  batch.update(doc(db, CLASSROOMS, classroom.id), { studentCount: increment(1), updatedAt: serverTimestamp() });
+  await batch.commit();
+  await recomputeAssignedTeacherIds([student.id]);
+}
+
+/**
+ * Teacher-initiated bulk add: every student currently in a Course+Batch+
+ * Section group (reusing the same resolution as admin Assignments — see
+ * lib/firebase/assignments.ts#getStudentGroup) is added as a classroom
+ * member in one pass. Students already in the classroom are skipped.
+ */
+export async function addStudentsToClassroomByGroup(
+  classroom: Pick<Classroom, "id" | "teacherId">,
+  courseId: string,
+  batchName: string,
+  sectionName: string
+): Promise<{ added: number; alreadyMembers: number }> {
+  const [group, existingMembers] = await Promise.all([
+    getStudentGroup(courseId, batchName, sectionName),
+    getClassroomMembers(classroom.id),
+  ]);
+  const existingIds = new Set(existingMembers.map((m) => m.studentId));
+  const toAdd = group.filter((s) => !existingIds.has(s.id));
+  if (toAdd.length === 0) return { added: 0, alreadyMembers: group.length };
+
+  const CHUNK = 400; // stay under Firestore's 500-write batch limit alongside the studentCount update
+  for (let i = 0; i < toAdd.length; i += CHUNK) {
+    const chunk = toAdd.slice(i, i + CHUNK);
+    const batch = writeBatch(db);
+    for (const student of chunk) {
+      batch.set(doc(db, MEMBERS, memberId(classroom.id, student.id)), stripUndefined({
+        classroomId: classroom.id,
+        teacherId: classroom.teacherId,
+        studentId: student.id,
+        studentName: student.name,
+        studentEmail: student.email,
+        studentCode: student.studentCode,
+        addedVia: "teacher",
+        joinedAt: serverTimestamp(),
+      }));
+    }
+    batch.update(doc(db, CLASSROOMS, classroom.id), { studentCount: increment(chunk.length), updatedAt: serverTimestamp() });
+    await batch.commit();
+  }
+
+  await recomputeAssignedTeacherIds(toAdd.map((s) => s.id));
+  return { added: toAdd.length, alreadyMembers: group.length - toAdd.length };
 }
 
 export async function isClassroomMember(classroomId: string, studentId: string): Promise<boolean> {

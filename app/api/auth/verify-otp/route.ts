@@ -214,6 +214,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Mint a custom token so the browser can sign into this account
+    // immediately — without this, the client's Firebase Auth session stays
+    // null after verification and every post-verify redirect (dashboard /
+    // pending-approval) bounces straight back to /login.
+    let customToken: string | undefined;
+    try {
+      customToken = await adminAuth.createCustomToken(uid);
+    } catch (err) {
+      console.error("Failed to mint custom token after verification:", err);
+    }
+
     return NextResponse.json({
       success: true,
       user: {
@@ -223,6 +234,7 @@ export async function POST(req: NextRequest) {
         role: consumed.role,
         approved: !isTeacher,
       },
+      customToken,
     });
   }
 
@@ -304,6 +316,10 @@ export async function POST(req: NextRequest) {
       role: consumed.role,
       approved: !isTeacher,
     },
+    // No Admin SDK here, so no custom token can be minted. The client already
+    // holds the plaintext password from the registration form — tell it to
+    // sign in with that instead so it doesn't bounce back to /login.
+    needsPasswordSignIn: true,
   });
 }
 
