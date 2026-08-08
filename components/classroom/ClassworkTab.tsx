@@ -76,12 +76,19 @@ export default function ClassworkTab({ classroom, isTeacher, currentUser }: Clas
   const [attachments, setAttachments] = useState<UploadResult[]>([]);
 
   useEffect(() => {
-    const unsub = subscribeToClasswork(classroom.id, (data) => {
-      setItems(data);
-      setLoading(false);
-    });
+    // Students may only read published classwork (firestore.rules); querying
+    // without that filter is denied for the whole list, so it must be part of
+    // the query rather than a post-hoc client filter.
+    const unsub = subscribeToClasswork(
+      classroom.id,
+      (data) => {
+        setItems(data);
+        setLoading(false);
+      },
+      { publishedOnly: !isTeacher }
+    );
     return () => unsub();
-  }, [classroom.id]);
+  }, [classroom.id, isTeacher]);
 
   const resetForm = () => {
     setForm({ type: "assignment", title: "", instructions: "", dueDate: "", totalMarks: "", externalLink: "" });

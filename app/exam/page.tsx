@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Shield, FileText, Clock, ChevronRight, LogOut } from "lucide-react";
+import { Shield, FileText, Clock, ChevronRight, LogOut, ArrowLeft } from "lucide-react";
 import { subscribeToStudentVisibleExams } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
@@ -40,7 +40,18 @@ export default function ExamPage() {
     // assignment — this query can only ever return exams this student is
     // actually allowed to see.
     const unsubscribe = subscribeToStudentVisibleExams(user.id, (availableExams) => {
-      setExams(availableExams);
+      // Apply the same scheduling window the dashboard uses. Without it this
+      // page listed — and offered a live "Start Exam" button for — exams that
+      // hadn't opened yet or had already closed, so the two lists disagreed
+      // and a student could start an exam early via this route.
+      const now = new Date();
+      setExams(
+        availableExams.filter((e) => {
+          if (e.startDate && new Date(e.startDate as any) > now) return false;
+          if (e.endDate && new Date(e.endDate as any) < now) return false;
+          return true;
+        })
+      );
       setLoading(false);
     });
 
@@ -68,8 +79,16 @@ export default function ExamPage() {
             <span className="text-2xl font-bold text-gray-900">GreenGuardian</span>
           </div>
           {user && (
-            <div className="flex items-center space-x-4">
-              <span className="text-sm text-gray-600">Welcome, {user.name}</span>
+            <div className="flex items-center space-x-2 sm:space-x-4">
+              <span className="text-sm text-gray-600 hidden sm:inline">Welcome, {user.name}</span>
+              {/* This page renders outside DashboardLayout, so without an
+                  explicit link back the only exits were browser-back or Logout. */}
+              <Link href="/dashboard/student">
+                <Button variant="outline" size="sm">
+                  <ArrowLeft className="h-4 w-4 mr-2" />
+                  Dashboard
+                </Button>
+              </Link>
               <Button variant="outline" size="sm" onClick={handleLogout}>
                 <LogOut className="h-4 w-4 mr-2" />
                 Logout

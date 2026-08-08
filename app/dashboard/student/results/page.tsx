@@ -75,10 +75,13 @@ export default function StudentResultsPage() {
   useEffect(() => {
     if (!user) return;
 
-    const unsubResults = subscribeToResults(user.id, (updatedResults) => {
-      setResults(updatedResults);
-      deriveFilterOptions(updatedResults);
-      setLoading(false);
+    // `subscribeToResults` watches ONLY the `results` collection, which nothing
+    // in the app currently writes. getStudentResults() additionally synthesizes
+    // results from the student's submitted exam sessions — so assigning the
+    // raw snapshot here used to wipe every exam result off the page the moment
+    // the listener fired. Re-run the full merge instead of overwriting.
+    const unsubResults = subscribeToResults(user.id, () => {
+      loadResults();
     });
 
     const unsubWarnings = subscribeToWarnings(user.id, (updatedWarnings) => {

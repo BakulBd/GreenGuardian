@@ -64,15 +64,24 @@ export default function ExamReviewPage() {
     try {
       setLoading(true);
 
-      const examDoc = await getDoc(doc(db, "exams", examId));
-      if (!examDoc.exists()) {
-        throw new Error("Exam not found");
+      // The exam doc is best-effort ONLY. A student's own submission must stay
+      // reviewable after the teacher archives the exam or changes its target
+      // group — both of which revoke read access to the exam document. The
+      // authoritative question set comes from the snapshot stored on the
+      // answer doc at submit time; the live exam is just nicer metadata.
+      let examData: Exam | null = null;
+      try {
+        const examDoc = await getDoc(doc(db, "exams", examId));
+        if (examDoc.exists()) {
+          examData = { id: examDoc.id, ...examDoc.data() } as Exam;
+          setExam(examData);
+        }
+      } catch {
+        // permission-denied (exam closed/retargeted) — fall back to the snapshot.
       }
-      const examData = { id: examDoc.id, ...examDoc.data() } as Exam;
-      setExam(examData);
 
       // Review is shown by default; a teacher can explicitly turn it off.
-      if (examData.settings?.allowReview === false) {
+      if (examData?.settings?.allowReview === false) {
         toast({
           title: "Review Not Available",
           description: "The teacher has disabled reviews for this exam.",
@@ -154,6 +163,22 @@ export default function ExamReviewPage() {
       }
 
       setAnswerData(answerDocData);
+
+      // If the live exam was unreadable, rebuild just enough of it from the
+      // submission snapshot so the review still renders every question.
+      if (!examData) {
+        const snapshot = Array.isArray(answerDocData.questionSnapshot)
+          ? answerDocData.questionSnapshot
+          : [];
+        setExam({
+          id: examId,
+          title: answerDocData.examTitle || "Exam Review",
+          courseName: answerDocData.courseName || "",
+          totalMarks: answerDocData.totalMarks ?? answerDocData.grading?.totalMarks ?? 0,
+          questions: snapshot,
+          settings: { allowReview: true },
+        } as unknown as Exam);
+      }
     } catch (error) {
       console.error("Error loading review:", error);
       toast({

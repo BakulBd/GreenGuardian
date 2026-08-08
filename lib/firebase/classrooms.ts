@@ -26,7 +26,33 @@ import {
   ClassroomAttachment,
   User,
 } from "../types";
-import { recomputeAssignedTeacherIds, getStudentGroup } from "./assignments";
+import { getStudentGroup } from "./assignments";
+
+/**
+ * Ask the server to recompute `users/{id}.assignedTeacherIds` for these
+ * students from both admin assignments and classroom memberships.
+ *
+ * This cannot run on the client: students may not read
+ * `teacher_student_mapping` and teachers may not write another user's doc,
+ * so a client-side recompute would silently drop admin assignments (or fail
+ * outright) and leave the student unable to see notices/exams. Failures are
+ * surfaced to the caller so join/add can report honestly.
+ */
+async function syncClassroomAccess(studentIds: string[]): Promise<void> {
+  if (studentIds.length === 0) return;
+  const currentUser = auth.currentUser;
+  if (!currentUser) return;
+  const token = await currentUser.getIdToken();
+  const res = await fetch("/api/classroom/sync-access", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ studentIds }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Access sync failed (${res.status})`);
+  }
+}
 
 const CLASSROOMS = "classrooms";
 const MEMBERS = "classroomMembers";
@@ -225,11 +251,29 @@ export async function joinClassroomByCode(code: string, student: User): Promise<
     }));
     batch.update(doc(db, CLASSROOMS, classroom.id), { studentCount: increment(1), updatedAt: serverTimestamp() });
     await batch.commit();
-    await recomputeAssignedTeacherIds([student.id]);
-    return { success: true, classroomId: classroom.id, classroomName: classroom.name };
   } catch (error: any) {
-    return { success: false, error: error.code === "permission-denied" ? "You are not allowed to join this classroom." : (error.message || "Failed to join classroom.") };
+    // Log the real cause — collapsing every permission-denied into one
+    // friendly string previously made this failure undiagnosable in prod.
+    console.error("[Classrooms] Join failed:", error?.code, error?.message);
+    return {
+      success: false,
+      error:
+        error?.code === "permission-denied"
+          ? "You are not allowed to join this classroom."
+          : error?.message || "Failed to join classroom.",
+    };
   }
+
+  // Membership is already committed at this point — a sync failure must not
+  // be reported as a failed join. It only means teacher content may take a
+  // moment (or an admin re-sync) to appear.
+  try {
+    await syncClassroomAccess([student.id]);
+  } catch (syncError) {
+    console.warn("[Classrooms] Joined, but access sync failed:", syncError);
+  }
+
+  return { success: true, classroomId: classroom.id, classroomName: classroom.name };
 }
 
 export async function leaveClassroom(classroomId: string, studentId: string): Promise<void> {
@@ -239,7 +283,7 @@ export async function leaveClassroom(classroomId: string, studentId: string): Pr
   await batch.commit();
   // Recompute rather than blindly unassign — the student may still be
   // linked to this teacher via an admin assignment or another classroom.
-  await recomputeAssignedTeacherIds([studentId]);
+  await syncClassroomAccess([studentId]);
 }
 
 export async function removeClassroomMember(classroomId: string, studentId: string): Promise<void> {
@@ -268,7 +312,7 @@ export async function addStudentToClassroom(classroom: Pick<Classroom, "id" | "t
   }));
   batch.update(doc(db, CLASSROOMS, classroom.id), { studentCount: increment(1), updatedAt: serverTimestamp() });
   await batch.commit();
-  await recomputeAssignedTeacherIds([student.id]);
+  await syncClassroomAccess([student.id]);
 }
 
 /**
@@ -311,7 +355,7 @@ export async function addStudentsToClassroomByGroup(
     await batch.commit();
   }
 
-  await recomputeAssignedTeacherIds(toAdd.map((s) => s.id));
+  await syncClassroomAccess(toAdd.map((s) => s.id));
   return { added: toAdd.length, alreadyMembers: group.length - toAdd.length };
 }
 
@@ -531,15 +575,35 @@ export async function deleteClasswork(itemId: string): Promise<void> {
   await deleteDoc(doc(db, CLASSWORK, itemId));
 }
 
-export function subscribeToClasswork(classroomId: string, callback: (items: ClassworkItem[]) => void): () => void {
-  const q = query(collection(db, CLASSWORK), where("classroomId", "==", classroomId));
+/**
+ * Classwork feed. Students MUST pass `publishedOnly` — the security rule only
+ * lets a non-teacher read published items, and Firestore rejects a list query
+ * it can't prove is entirely readable. Querying without the status filter as a
+ * student was denied outright, and because the error path never invoked the
+ * callback the tab sat on a spinner forever instead of showing an empty state.
+ */
+export function subscribeToClasswork(
+  classroomId: string,
+  callback: (items: ClassworkItem[]) => void,
+  options?: { publishedOnly?: boolean; onError?: (error: any) => void }
+): () => void {
+  const constraints = [where("classroomId", "==", classroomId)];
+  if (options?.publishedOnly) {
+    constraints.push(where("status", "==", "published"));
+  }
+  const q = query(collection(db, CLASSWORK), ...constraints);
   return onSnapshot(
     q,
     (snap) => {
       const items = snap.docs.map((d) => ({ ...d.data(), id: d.id } as ClassworkItem));
       callback(items.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
     },
-    (error) => console.warn("[Classrooms] Classwork subscription error:", error.code || error)
+    (error) => {
+      console.warn("[Classrooms] Classwork subscription error:", error.code || error);
+      // Always resolve the caller's loading state, even on failure.
+      callback([]);
+      options?.onError?.(error);
+    }
   );
 }
 

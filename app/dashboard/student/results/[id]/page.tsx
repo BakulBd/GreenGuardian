@@ -76,13 +76,20 @@ export default function ResultDetailPage() {
 
       setResult(resultData);
 
-      // Load related warnings for this student
-      const warningsData = await getStudentWarnings(user.id);
-      // Filter warnings that relate to this result or are active
-      const relatedWarnings = warningsData.filter(
-        (w) => w.relatedResultId === resultId || w.status === "active"
-      );
-      setWarnings(relatedWarnings);
+      // Warnings are supplementary — never let them fail the whole page. This
+      // query needs a (studentId, dateIssued) composite index; without it the
+      // FAILED_PRECONDITION used to bubble up and render "Failed to load
+      // result details" even though the result itself had loaded fine.
+      try {
+        const warningsData = await getStudentWarnings(user.id);
+        const relatedWarnings = warningsData.filter(
+          (w) => w.relatedResultId === resultId || w.status === "active"
+        );
+        setWarnings(relatedWarnings);
+      } catch (warningError) {
+        console.warn("Could not load related warnings:", warningError);
+        setWarnings([]);
+      }
     } catch (error) {
       console.error("Error loading result details:", error);
       setError("Failed to load result details.");

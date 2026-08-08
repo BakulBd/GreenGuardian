@@ -382,6 +382,17 @@ export default function ExamClient() {
   // The heartbeat is what drives the teacher's online/offline indicator, and the
   // autosave means a crashed or refreshed browser resumes with its answers.
   const answersRef = useRef(answers);
+  /**
+   * Full question set (including `correctAnswer` and `marks`) captured once at
+   * load time, purely so submission never needs a SECOND read of the exam doc.
+   * That re-read used to happen mid-submit and would throw permission-denied —
+   * losing the student's entire submission — the moment a teacher closed the
+   * exam or edited its target group while someone was still writing.
+   * This is not a new disclosure: the same payload already reaches the browser
+   * in the initial load below (server-side grading is the real fix, tracked in
+   * docs/KNOWN_LIMITATIONS.md).
+   */
+  const gradingQuestionsRef = useRef<Array<{ id: string; text?: string; type?: string; options?: string[]; correctAnswer?: string; marks?: number; negativeMarks?: number; explanation?: string }>>([]);
   useEffect(() => {
     answersRef.current = answers;
   }, [answers]);
@@ -605,6 +616,21 @@ export default function ExamClient() {
       if (examData.shuffleQuestions && examData.questions) {
         examData.questions = [...examData.questions].sort(() => Math.random() - 0.5);
       }
+
+      // Capture the gradable question set (with answers/marks) BEFORE stripping
+      // it for render, so handleSubmit can grade without re-reading the exam.
+      gradingQuestionsRef.current = Array.isArray(examData.questions)
+        ? examData.questions.map((q: any) => ({
+            id: q.id,
+            text: q.text,
+            type: q.type,
+            options: q.options,
+            correctAnswer: q.correctAnswer,
+            marks: q.marks,
+            negativeMarks: q.negativeMarks,
+            explanation: q.explanation,
+          }))
+        : [];
 
       // Remove correct answers from questions
       if (examData.questions) {
@@ -1302,22 +1328,26 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         accuracy: number;
         obtainedMarks: number;
         totalMarks: number;
+        pendingManualReview: number;
       } | null = null;
 
       if (exam.examMode === "online" || !exam.examMode) {
-        const examDocForGrading = await getDoc(doc(db, "exams", exam.id));
-        const gradingQuestions = (examDocForGrading.data()?.questions || []) as Array<{
-          id: string;
-          correctAnswer?: string;
-          marks?: number;
-        }>;
+        // Graded from the snapshot captured at load — never a second network
+        // read, so a teacher closing/editing the exam mid-attempt can no
+        // longer wipe out the student's submission.
+        const gradingQuestions = gradingQuestionsRef.current;
         const normalize = (value: unknown) => String(value ?? "").trim().toLowerCase();
+        // Only option-based questions can be auto-graded; free-text answers
+        // are left for the teacher, and must not be counted as "wrong".
+        const isAutoGradable = (type?: string) =>
+          !type || ["mcq", "multiple-choice", "true-false"].includes(type);
 
         let correctAnswers = 0;
         let wrongAnswers = 0;
         let attemptedAnswers = 0;
         let obtainedMarks = 0;
         let totalMarks = 0;
+        let pendingManualReview = 0;
 
         for (const question of gradingQuestions) {
           const marks = Number(question.marks || 0);
@@ -1329,22 +1359,34 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
           }
 
           attemptedAnswers += 1;
+
+          if (!isAutoGradable(question.type)) {
+            // Short/long/code answers await the teacher. Counting them as
+            // "wrong" used to make the summary contradict the per-question
+            // review, which labels them "Manually Graded".
+            pendingManualReview += 1;
+            continue;
+          }
+
           if (normalize(submittedAnswer) === normalize(question.correctAnswer)) {
             correctAnswers += 1;
             obtainedMarks += marks;
           } else {
             wrongAnswers += 1;
+            obtainedMarks -= Number(question.negativeMarks || 0);
           }
         }
 
+        const autoGraded = correctAnswers + wrongAnswers;
         gradingSummary = {
           correctAnswers,
           wrongAnswers,
           attemptedAnswers,
           totalQuestions: gradingQuestions.length,
-          accuracy: attemptedAnswers > 0 ? Math.round((correctAnswers / attemptedAnswers) * 100) : 0,
-          obtainedMarks,
+          accuracy: autoGraded > 0 ? Math.round((correctAnswers / autoGraded) * 100) : 0,
+          obtainedMarks: Math.max(0, obtainedMarks),
           totalMarks,
+          pendingManualReview,
         };
       }
 
@@ -1383,6 +1425,12 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
       // For online mode, include answers object
       if (exam.examMode === "online" || !exam.examMode) {
         answerData.answers = answers;
+        // Snapshot the questions alongside the answers so /exam/[id]/review
+        // can render a full review from this document alone. Without it the
+        // review page depends on the live exam doc, and a student loses access
+        // to their OWN past result as soon as the teacher archives the exam or
+        // changes its target course/batch/section.
+        answerData.questionSnapshot = gradingQuestionsRef.current;
       } else {
         // For upload mode, include answer files and mark background OCR status
         answerData.answerFiles = answerFiles;

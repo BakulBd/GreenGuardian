@@ -68,9 +68,15 @@ service cloud.firestore {
                        request.resource.data.role == 'student' && request.resource.data.approved == true ||
                        request.resource.data.role == 'teacher' && request.resource.data.approved == false);
       
-      // Users can update their own profile (except role and approved status)
-      allow update: if isUser(userId) && 
-                       !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'approved', 'rejected', 'id']);
+      // Users can update their own profile (except role/approval status and
+      // access-control fields). `assignedTeacherIds` MUST stay server-owned:
+      // it is what the notices and exam rules trust to decide which teacher's
+      // content a student may read, so a self-writable value would let any
+      // student grant themselves another teacher's communications. It is
+      // written only by the Admin SDK via /api/classroom/sync-access and the
+      // admin assignment flow.
+      allow update: if isUser(userId) &&
+                       !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'approved', 'rejected', 'id', 'assignedTeacherIds', 'status']);
       
       // Admins can update any user (for approval/rejection)
       allow update: if isAdmin();
@@ -93,17 +99,22 @@ service cloud.firestore {
       allow read: if isTeacher() && resource.data.teacherId == request.auth.uid;
       // Admins can read any exam.
       allow read: if isAdmin();
-      // Students can only read a published/active exam they were specifically
-      // targeted for — `targetStudentIds` is resolved at creation time from
-      // the teacher's Course+Batch+Section assignment (see
-      // computeAssignmentTargetStudentIds in lib/firebase/assignments.ts) and
-      // is exactly what subscribeToStudentVisibleExams() queries, so this
-      // rule can never reject that query. Exams created before this field
+      // Students can only read an exam they were specifically targeted for —
+      // `targetStudentIds` is resolved at creation time from the teacher's
+      // Course+Batch+Section assignment (see computeAssignmentTargetStudentIds
+      // in lib/firebase/assignments.ts). Exams created before this field
       // existed stay invisible until an admin runs the one-time
       // backfillExamTargetStudentIds() — same fail-closed-until-backfilled
       // tradeoff already used for `assignedTeacherIds`.
+      //
+      // `completed`/`archived` are included deliberately: a student must be
+      // able to re-open /exam/{id}/review after the teacher closes the exam,
+      // and ExamClient re-reads the exam doc while grading a submission. The
+      // listing query (subscribeToStudentVisibleExams) filters to
+      // published/active itself, so a closed exam still never appears as
+      // startable — this only keeps already-earned results readable.
       allow read: if isStudent() &&
-                     resource.data.status in ['published', 'active'] &&
+                     resource.data.status in ['published', 'active', 'completed', 'archived'] &&
                      request.auth.uid in resource.data.get('targetStudentIds', []);
 
       // Teachers can create exams
@@ -123,8 +134,15 @@ service cloud.firestore {
     
     // Questions collection
     match /questions/{questionId} {
-      // Students can read questions of exams they're taking
-      allow read: if isAuthenticated();
+      // Staff can read any question (needed by the exam builder/review UIs).
+      allow read: if isTeacherOrAdmin();
+      // A student may only read questions belonging to an exam they were
+      // actually targeted for. This used to be `isAuthenticated()`, which let
+      // any signed-in student pull `correctAnswer` for EVERY exam in the
+      // system — including drafts and other sections — straight out of this
+      // collection, completely bypassing the exams read rule.
+      allow read: if isStudent() &&
+                     request.auth.uid in get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.get('targetStudentIds', []);
       
       // Teachers can create questions for their exams
       allow create: if isTeacher() && 
@@ -488,6 +506,17 @@ service cloud.firestore {
       allow create: if isTeacher() && isActiveUser() && request.resource.data.teacherId == request.auth.uid;
       allow update, delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
       allow update, delete: if isAdmin();
+      // A joining/leaving student must be able to move the roster counter by
+      // exactly one. joinClassroomByCode/leaveClassroom commit the member doc
+      // and this counter in a single atomic batch — without this branch the
+      // WHOLE batch was rejected, which is why joining and leaving both
+      // failed with a misleading "not allowed to join" error.
+      allow update: if isStudent() && isActiveUser() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['studentCount', 'updatedAt']) &&
+        request.resource.data.studentCount is int &&
+        request.resource.data.studentCount >= 0 &&
+        (request.resource.data.studentCount == resource.data.get('studentCount', 0) + 1 ||
+         request.resource.data.studentCount == resource.data.get('studentCount', 0) - 1);
     }
 
     // Classroom membership ("People" tab / joined students). Document id is
@@ -496,8 +525,13 @@ service cloud.firestore {
     // which this rule doesn't grant to students) and lets other collections
     // cheaply check "is this student a member" via exists().
     match /classroomMembers/{memberId} {
+      // Staff, the member themself, or any fellow member of the same
+      // classroom (so the People tab roster loads for students — previously
+      // a student's roster query was denied outright and the tab silently
+      // rendered "No students found").
       allow read: if isTeacherOrAdmin() ||
-        (isAuthenticated() && resource.data.studentId == request.auth.uid);
+        (isAuthenticated() && resource.data.studentId == request.auth.uid) ||
+        isClassroomMember(resource.data.classroomId);
       // Self-join by code: classroom membership is its own access boundary
       // now (no separate admin Course/Batch/Section assignment required —
       // see lib/firebase/classrooms.ts#joinClassroomByCode). The submitted
