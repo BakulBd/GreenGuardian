@@ -87,8 +87,9 @@ export default function RegisterPage() {
       // `password` is only used, if present, as a last-resort client sign-in
       // after verification when no Admin SDK custom token is available (see
       // verify-email/page.tsx) — it's cleared from storage as soon as it's used.
+      const cleanEmail = formData.email.trim().toLowerCase();
       const session = {
-        email: formData.email,
+        email: cleanEmail,
         password: formData.password,
         verificationToken: data.verificationToken,
         role: formData.role,
@@ -105,11 +106,11 @@ export default function RegisterPage() {
 
       toast({
         title: "Verification Code Sent",
-        description: `We sent a 6-digit code to ${formData.email}. Please verify to complete registration.`,
+        description: `We sent a 6-digit code to ${cleanEmail}. Please verify to complete registration.`,
       });
 
       // Redirect to the email verification page.
-      router.push(`/verify-email?email=${encodeURIComponent(formData.email)}`);
+      router.push(`/verify-email?email=${encodeURIComponent(cleanEmail)}`);
     } catch (error: any) {
       toast({
         title: "Error",

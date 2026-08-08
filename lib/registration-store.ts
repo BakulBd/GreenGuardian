@@ -38,9 +38,22 @@ export interface PendingRegistration {
 // ---------------------------------------------------------------------------
 // Admin SDK (Firestore) mode
 // ---------------------------------------------------------------------------
+function parseTimestamp(val: any): number {
+  if (!val) return 0;
+  if (typeof val?.toMillis === "function") return val.toMillis();
+  if (typeof val?.getTime === "function") return val.getTime();
+  if (typeof val === "number") return val;
+  if (typeof val === "string") {
+    const t = new Date(val).getTime();
+    return isNaN(t) ? 0 : t;
+  }
+  return 0;
+}
+
 function toAdminRecord(doc: FirebaseFirestore.DocumentSnapshot<any>): PendingRegistration | null {
   if (!doc.exists) return null;
   const d = doc.data();
+  if (!d) return null;
   return {
     email: d.email,
     name: d.name,
@@ -48,12 +61,12 @@ function toAdminRecord(doc: FirebaseFirestore.DocumentSnapshot<any>): PendingReg
     role: d.role,
     otpHash: d.otpHash,
     verificationToken: d.verificationToken,
-    expiresAt: d.expiresAt?.toMillis?.() || 0,
+    expiresAt: parseTimestamp(d.expiresAt),
     sendCount: d.sendCount || 0,
     attempts: d.attempts || 0,
-    lastSentAt: d.lastSentAt?.toMillis?.() || 0,
-    createdAt: d.createdAt?.toMillis?.() || Date.now(),
-    updatedAt: d.updatedAt?.toMillis?.() || Date.now(),
+    lastSentAt: parseTimestamp(d.lastSentAt),
+    createdAt: parseTimestamp(d.createdAt) || Date.now(),
+    updatedAt: parseTimestamp(d.updatedAt) || Date.now(),
   };
 }
 
@@ -111,7 +124,7 @@ export function registrationStoreEnabled(): boolean {
 }
 
 export async function getPending(email: string): Promise<PendingRegistration | null> {
-  const cleanEmail = email.toLowerCase();
+  const cleanEmail = email.toLowerCase().trim();
   if (isAdminSdkConfigured()) {
     try {
       const db = getAdminDb();
@@ -134,7 +147,7 @@ export async function getPending(email: string): Promise<PendingRegistration | n
 }
 
 export async function upsertPending(rec: PendingRegistration): Promise<void> {
-  const email = rec.email.toLowerCase();
+  const email = rec.email.toLowerCase().trim();
   memoryStore.set(email, { ...rec, email });
 
   if (isAdminSdkConfigured()) {
@@ -154,7 +167,6 @@ export async function upsertPending(rec: PendingRegistration): Promise<void> {
         createdAt: rec.createdAt ? new Date(rec.createdAt) : new Date(),
         updatedAt: new Date(rec.updatedAt),
       });
-      return;
     } catch (e) {
       console.warn("[registration-store] Admin upsert failed, stored in memory & file:", e);
     }
@@ -185,7 +197,7 @@ export async function consumePending(email: string, expectedOtpHash: string): Pr
 }
 
 export async function deletePending(email: string): Promise<void> {
-  const cleanEmail = email.toLowerCase();
+  const cleanEmail = email.toLowerCase().trim();
   memoryStore.delete(cleanEmail);
   if (isAdminSdkConfigured()) {
     try {
