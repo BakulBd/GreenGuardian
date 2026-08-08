@@ -185,9 +185,32 @@ const teacherMenuItems = [
 
           {/* User Info */}
           <div className="px-6 py-4 border-b bg-gray-50">
-            <p className="text-sm font-medium text-gray-900">{user.name}</p>
-            <p className="text-xs text-gray-500">{user.email}</p>
-            <p className="text-xs text-primary-600 mt-1 capitalize">{user.role}</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-gray-900 truncate">{user.name}</p>
+              <span className="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800">
+                {user.role}
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 truncate mt-0.5">{user.email}</p>
+            {user.role === "student" && (user.batch || user.section) && (
+              <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                {user.batch && (
+                  <span className="text-[11px] font-medium px-2 py-0.5 bg-blue-50 text-blue-700 rounded-md border border-blue-200">
+                    Batch {user.batch}
+                  </span>
+                )}
+                {user.section && (
+                  <span className="text-[11px] font-medium px-2 py-0.5 bg-purple-50 text-purple-700 rounded-md border border-purple-200">
+                    Sec {user.section}
+                  </span>
+                )}
+              </div>
+            )}
+            {user.department && (
+              <p className="text-[11px] text-gray-600 mt-1.5 font-medium truncate">
+                🏢 {user.department}
+              </p>
+            )}
           </div>
 
           {/* Menu Items */}
@@ -261,7 +284,7 @@ const teacherMenuItems = [
             </button>
 <div className="flex items-center space-x-4">
               <span className="text-sm text-gray-600 hidden sm:inline">Welcome back, {user.name}!</span>
-              {role === "student" && <NotificationBell userId={user.id} />}
+              {user?.id && <NotificationBell userId={user.id} />}
               <Link href="/profile">
                 <Button variant="outline" size="sm" className="flex items-center gap-2">
                   {user.avatarUrl ? (

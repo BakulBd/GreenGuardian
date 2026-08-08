@@ -26,6 +26,7 @@ import { collection, query, where, getDocs, doc, getDoc } from "firebase/firesto
 import { db } from "@/lib/firebase/config";
 import { subscribeToStudentVisibleExams } from "@/lib/firebase/exams";
 import Link from "next/link";
+import StudentOnboardingModal from "@/components/StudentOnboardingModal";
 
 interface Exam {
   id: string;
@@ -211,13 +212,47 @@ export default function StudentDashboardPage() {
     );
   }
 
+  const needsOnboarding = !!user && (!user.batch || !user.section);
+
   return (
     <DashboardLayout role="student">
+      {user && (
+        <StudentOnboardingModal
+          isOpen={needsOnboarding}
+          user={user}
+          onSuccess={() => loadData()}
+        />
+      )}
+
       <div className="space-y-6">
         {/* Header */}
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Student Dashboard</h1>
-          <p className="text-gray-600 mt-1">View your exams and track your progress</p>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Student Dashboard</h1>
+            <p className="text-gray-600 mt-1">View your exams and track your progress</p>
+          </div>
+
+          {user && user.batch && user.section && (
+            <div className="flex items-center gap-2 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200/80 rounded-2xl px-4 py-2 text-xs font-medium text-emerald-900 shadow-sm">
+              <School className="h-4 w-4 text-emerald-600 flex-shrink-0" />
+              <div>
+                <span className="font-semibold">{user.department || "CSE"}</span>
+                <span className="mx-1 text-emerald-400">•</span>
+                <span>Batch {user.batch}</span>
+                <span className="mx-1 text-emerald-400">•</span>
+                <span>Section {user.section}</span>
+                {user.studentCode && (
+                  <>
+                    <span className="mx-1 text-emerald-400">•</span>
+                    <span className="font-mono text-emerald-700">ID: {user.studentCode}</span>
+                  </>
+                )}
+              </div>
+              <Link href="/profile" className="ml-2 text-emerald-700 hover:text-emerald-900 underline font-semibold text-[11px]">
+                Edit
+              </Link>
+            </div>
+          )}
         </div>
 
         {/* Stats */}

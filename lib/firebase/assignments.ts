@@ -108,9 +108,17 @@ export async function getStudentGroup(
       const studentSections = s.sections && s.sections.length > 0 ? s.sections : s.section ? [s.section] : [];
       if (!studentSections.includes(sectionName)) return false;
 
-      // Course membership: student.courses[] may contain courseId or course name
+      // Course membership: student.courses[] may contain string IDs, course codes, or object records
       if (s.courses && s.courses.length > 0) {
-        return s.courses.includes(courseId);
+        return s.courses.some((c: any) => {
+          if (typeof c === "string") {
+            return c === courseId || c.toLowerCase() === courseId.toLowerCase();
+          }
+          if (typeof c === "object" && c !== null) {
+            return c.courseId === courseId || c.id === courseId || c.code === courseId;
+          }
+          return false;
+        });
       }
 
       // If no course list is set on the student, treat as matching (legacy data)
@@ -223,8 +231,17 @@ export async function resyncStudentAssignments(studentId: string): Promise<{
     if (!a.sectionName || !studentSections.includes(a.sectionName)) return false;
     // A student with no explicit course list is treated as enrolled in every
     // course for their batch/section — same rule getStudentGroup() applies.
-    if (student.courses && student.courses.length > 0 && !student.courses.includes(a.courseId)) {
-      return false;
+    if (student.courses && student.courses.length > 0) {
+      const isEnrolled = student.courses.some((c: any) => {
+        if (typeof c === "string") {
+          return c === a.courseId || c.toLowerCase() === a.courseId.toLowerCase();
+        }
+        if (typeof c === "object" && c !== null) {
+          return c.courseId === a.courseId || c.id === a.courseId || c.code === a.courseId;
+        }
+        return false;
+      });
+      if (!isEnrolled) return false;
     }
     // An assignment pinned to specific students only covers those students.
     if (a.studentIds && a.studentIds.length > 0 && !a.studentIds.includes(studentId)) {

@@ -159,6 +159,8 @@ export async function getCurrentUser(): Promise<User | null> {
   return userDoc.data() as User;
 }
 
+import { resyncStudentAssignments } from "./assignments";
+
 export async function updateUserProfile(
   userId: string,
   data: Partial<User>
@@ -167,6 +169,14 @@ export async function updateUserProfile(
     ...data,
     updatedAt: serverTimestamp(),
   });
+
+  if (data.batch || data.section || data.sections || data.courses) {
+    try {
+      await resyncStudentAssignments(userId);
+    } catch (e) {
+      console.warn("[Auth] Failed to resync student assignments on profile update:", e);
+    }
+  }
 }
 
 export async function approveTeacher(userId: string): Promise<void> {

@@ -435,6 +435,31 @@ export function subscribeToStudentClassrooms(studentId: string, callback: (class
   );
 }
 
+export async function getSuggestedClassroomsForStudent(student: User): Promise<Classroom[]> {
+  if (!student || (!student.section && !student.batch)) return [];
+  try {
+    const q = query(collection(db, CLASSROOMS), where("status", "==", "active"));
+    const snap = await getDocs(q);
+    const joinedSnap = await getDocs(query(collection(db, MEMBERS), where("studentId", "==", student.id)));
+    const joinedIds = new Set(joinedSnap.docs.map((d) => d.data().classroomId as string));
+
+    const studentSections = student.sections && student.sections.length > 0 ? student.sections : student.section ? [student.section] : [];
+
+    const suggested = snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as Classroom))
+      .filter((c) => {
+        if (joinedIds.has(c.id)) return false;
+        if (c.section && studentSections.includes(c.section)) return true;
+        return false;
+      });
+
+    return suggested;
+  } catch (err) {
+    console.warn("[Classrooms] Failed to fetch suggested classrooms:", err);
+    return [];
+  }
+}
+
 // ===================== Stream (posts + comments) =====================
 
 export interface CreatePostInput {

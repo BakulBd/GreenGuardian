@@ -1,8 +1,34 @@
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 
-export function formatDate(date: Date | string): string {
-  const d = typeof date === "string" ? new Date(date) : date;
+function parseDateInput(date: any): Date | null {
+  if (!date) return null;
+  try {
+    if (typeof date?.toDate === "function") {
+      return date.toDate();
+    }
+    if (typeof date?.toMillis === "function") {
+      return new Date(date.toMillis());
+    }
+    if (typeof date === "object") {
+      const sec = date.seconds ?? date._seconds;
+      if (typeof sec === "number") {
+        return new Date(sec > 10000000000 ? sec : sec * 1000);
+      }
+    }
+    if (typeof date === "number") {
+      return new Date(date > 10000000000 ? date : date * 1000);
+    }
+    const d = new Date(date);
+    return isNaN(d.getTime()) ? null : d;
+  } catch {
+    return null;
+  }
+}
+
+export function formatDate(date: any): string {
+  const d = parseDateInput(date);
+  if (!d || d.getFullYear() < 2000) return "N/A";
   return new Intl.DateTimeFormat("en-US", {
     year: "numeric",
     month: "short",
@@ -10,8 +36,9 @@ export function formatDate(date: Date | string): string {
   }).format(d);
 }
 
-export function formatDateTime(date: Date | string): string {
-  const d = typeof date === "string" ? new Date(date) : date;
+export function formatDateTime(date: any): string {
+  const d = parseDateInput(date);
+  if (!d || d.getFullYear() < 2000) return "N/A";
   return new Intl.DateTimeFormat("en-US", {
     year: "numeric",
     month: "short",

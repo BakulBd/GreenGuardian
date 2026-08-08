@@ -35,7 +35,9 @@ export type ProctoringEventType =
   | 'window_blur'
   | 'copy_attempt'
   | 'paste_attempt'
-  | 'suspicious_keyboard';
+  | 'suspicious_keyboard'
+  | 'low_light_detected'
+  | 'sunglasses_detected';
 
 // Proctoring event severity
 export const EVENT_SEVERITY: Record<ProctoringEventType, 'low' | 'medium' | 'high' | 'critical'> = {
@@ -52,6 +54,8 @@ export const EVENT_SEVERITY: Record<ProctoringEventType, 'low' | 'medium' | 'hig
   'copy_attempt': 'medium',
   'paste_attempt': 'medium',
   'suspicious_keyboard': 'medium',
+  'low_light_detected': 'medium',
+  'sunglasses_detected': 'high',
 };
 
 // Score penalties for each event type (more practical real-world values)
@@ -69,6 +73,8 @@ export const EVENT_PENALTIES: Record<ProctoringEventType, number> = {
   'copy_attempt': 5,      // Deliberate action
   'paste_attempt': 6,     // More serious
   'suspicious_keyboard': 3, // Might be habit
+  'low_light_detected': 3,  // Environmental issue
+  'sunglasses_detected': 6, // Intentional face/eye obstruction
 };
 
 // Interface for proctoring snapshot (sent periodically)
@@ -336,6 +342,84 @@ export function captureVideoFrame(
     return canvas.toDataURL('image/jpeg', quality);
   } catch (error) {
     console.error("Failed to capture video frame:", error);
+    return null;
+  }
+}
+
+export interface FrameAnalysisResult {
+  lowLight: boolean;
+  averageBrightness: number;
+  sunglassesDetected: boolean;
+}
+
+/**
+ * Real-time webcam frame analysis for lighting conditions and face/eye obstructions (sunglasses)
+ */
+export function analyzeFrameLightingAndCoverage(
+  videoElement: HTMLVideoElement
+): FrameAnalysisResult | null {
+  if (!videoElement || videoElement.readyState < 2) return null;
+  try {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    canvas.width = 120;
+    canvas.height = 90;
+    ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data;
+
+    let totalLuminance = 0;
+    const pixelCount = data.length / 4;
+
+    let eyeRegionLuminance = 0;
+    let eyeRegionPixels = 0;
+    let faceRegionLuminance = 0;
+    let faceRegionPixels = 0;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      // ITU-R BT.601 perceived luminance
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      totalLuminance += lum;
+
+      const pixelIdx = i / 4;
+      const x = pixelIdx % canvas.width;
+      const y = Math.floor(pixelIdx / canvas.width);
+
+      // Eye region approximation: upper-center box
+      if (x >= 35 && x <= 85 && y >= 25 && y <= 50) {
+        eyeRegionLuminance += lum;
+        eyeRegionPixels++;
+      }
+      // Lower face region approximation: center box
+      if (x >= 35 && x <= 85 && y >= 50 && y <= 75) {
+        faceRegionLuminance += lum;
+        faceRegionPixels++;
+      }
+    }
+
+    const avgLuminance = totalLuminance / pixelCount;
+    // Under 35 / 255 luminance indicates severely dim / dark room lighting
+    const lowLight = avgLuminance < 35;
+
+    const avgEyeLum = eyeRegionPixels > 0 ? eyeRegionLuminance / eyeRegionPixels : avgLuminance;
+    const avgFaceLum = faceRegionPixels > 0 ? faceRegionLuminance / faceRegionPixels : avgLuminance;
+
+    // Sunglasses / Dark Eye Cover: Eye area significantly darker than face (<0.52 ratio) while face is lit
+    const sunglassesDetected = !lowLight && avgFaceLum > 45 && (avgEyeLum / Math.max(avgFaceLum, 1)) < 0.52 && avgEyeLum < 35;
+
+    return {
+      lowLight,
+      averageBrightness: Math.round(avgLuminance),
+      sunglassesDetected,
+    };
+  } catch (error) {
+    console.error("Frame lighting analysis failed:", error);
     return null;
   }
 }

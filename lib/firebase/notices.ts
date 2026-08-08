@@ -247,11 +247,12 @@ export async function getStudentNotices(student: User): Promise<Notice[]> {
       queries.push(query(noticesRef, published, byTeacher, where("targetType", "==", "semester"), where("targetBatch", "==", student.batch)));
     }
 
-    if (student.section) {
+    const studentSections = student.sections && student.sections.length > 0 ? student.sections : student.section ? [student.section] : [];
+    studentSections.forEach((sec) => {
       queries.push(
-        query(noticesRef, published, byTeacher, where("targetType", "==", "section"), where("targetSection", "==", student.section))
+        query(noticesRef, published, byTeacher, where("targetType", "==", "section"), where("targetSection", "==", sec))
       );
-    }
+    });
 
     const studentCourses = (student.courses || []).filter(Boolean).slice(0, 30);
     for (let i = 0; i < studentCourses.length; i += 10) {

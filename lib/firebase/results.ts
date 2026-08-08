@@ -52,13 +52,19 @@ export async function getStudentResults(
   try {
     const sQuery = query(
       collection(db, "examSessions"),
-      where("studentId", "==", studentId),
-      where("submitted", "==", true)
+      where("studentId", "==", studentId)
     );
     const sSnapshot = await getDocs(sQuery);
 
     for (const docSnap of sSnapshot.docs) {
       const sData = docSnap.data();
+      const isSubmitted =
+        sData.submitted === true ||
+        sData.status === "submitted" ||
+        sData.status === "auto-submitted" ||
+        sData.status === "completed";
+
+      if (!isSubmitted) continue;
 
       // Avoid duplicate if already present in results collection
       if (sData.examId && processedExamIds.has(sData.examId)) {

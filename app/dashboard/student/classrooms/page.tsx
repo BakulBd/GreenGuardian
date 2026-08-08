@@ -10,8 +10,9 @@ import { Badge } from "@/components/ui/badge";
 import { Plus, School, Users, Hash, LogOut, X, Loader2, BookOpen } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { subscribeToStudentClassrooms, joinClassroomByCode, leaveClassroom } from "@/lib/firebase/classrooms";
+import { subscribeToStudentClassrooms, joinClassroomByCode, leaveClassroom, getSuggestedClassroomsForStudent } from "@/lib/firebase/classrooms";
 import { Classroom } from "@/lib/types";
+import { Sparkles, ArrowRight } from "lucide-react";
 
 export default function StudentClassroomsPage() {
   const { user } = useAuth();
@@ -19,10 +20,12 @@ export default function StudentClassroomsPage() {
   const router = useRouter();
 
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
+  const [suggestedClassrooms, setSuggestedClassrooms] = useState<Classroom[]>([]);
   const [loading, setLoading] = useState(true);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinCode, setJoinCode] = useState("");
   const [joining, setJoining] = useState(false);
+  const [joiningSuggestedId, setJoiningSuggestedId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -30,6 +33,11 @@ export default function StudentClassroomsPage() {
       setClassrooms(data);
       setLoading(false);
     });
+
+    getSuggestedClassroomsForStudent(user).then((sug) => {
+      setSuggestedClassrooms(sug);
+    });
+
     return () => unsub();
   }, [user]);
 
@@ -48,6 +56,22 @@ export default function StudentClassroomsPage() {
       }
     } finally {
       setJoining(false);
+    }
+  };
+
+  const handleJoinSuggested = async (c: Classroom) => {
+    if (!user) return;
+    setJoiningSuggestedId(c.id);
+    try {
+      const result = await joinClassroomByCode(c.code, user);
+      if (result.success) {
+        toast({ title: "Joined Classroom!", description: `You're now in ${c.name}.` });
+        setSuggestedClassrooms((prev) => prev.filter((item) => item.id !== c.id));
+      } else {
+        toast({ title: "Could Not Join", description: result.error, variant: "destructive" });
+      }
+    } finally {
+      setJoiningSuggestedId(null);
     }
   };
 
@@ -85,6 +109,53 @@ export default function StudentClassroomsPage() {
             Join Classroom
           </Button>
         </div>
+
+        {/* Suggested Classrooms Section */}
+        {suggestedClassrooms.length > 0 && (
+          <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-green-50 border border-emerald-200/80 rounded-2xl p-5 space-y-4 shadow-sm">
+            <div className="flex items-center gap-2">
+              <div className="p-2 bg-emerald-600 text-white rounded-xl">
+                <Sparkles className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-emerald-950">
+                  Recommended Classrooms for Section {user?.section}
+                </h3>
+                <p className="text-xs text-emerald-700">
+                  These active classrooms match your enrolled batch & section. Click to join instantly.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {suggestedClassrooms.map((sc) => (
+                <div
+                  key={sc.id}
+                  className="bg-white border border-emerald-100 rounded-xl p-4 flex flex-col justify-between shadow-sm hover:shadow-md transition-all"
+                >
+                  <div>
+                    <h4 className="font-bold text-sm text-slate-900 truncate">{sc.name}</h4>
+                    <p className="text-xs text-slate-500 mt-0.5">{sc.subject} • Section {sc.section}</p>
+                    <p className="text-[11px] text-emerald-700 mt-1 font-medium">Instructor: {sc.teacherName}</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => handleJoinSuggested(sc)}
+                    disabled={joiningSuggestedId === sc.id}
+                    className="mt-3 w-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold h-8 rounded-lg"
+                  >
+                    {joiningSuggestedId === sc.id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                    ) : (
+                      <Users className="h-3.5 w-3.5 mr-1" />
+                    )}
+                    Join Class
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {classrooms.length === 0 ? (
           <Card>

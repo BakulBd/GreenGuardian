@@ -178,12 +178,18 @@ function AnswerReviewContent() {
             const chunk = examIds.slice(i, i + 30);
             const q = query(
               collection(db, "examSessions"),
-              where("examId", "in", chunk),
-              where("submitted", "==", true)
+              where("examId", "in", chunk)
             );
             const sSnapshot = await getDocs(q);
             sSnapshot.docs.forEach((docSnap) => {
               const sData = docSnap.data();
+              const isSubmitted =
+                sData.submitted === true ||
+                sData.status === "submitted" ||
+                sData.status === "auto-submitted" ||
+                sData.status === "completed";
+
+              if (!isSubmitted) return;
               fetchedAnswers.push({
                 id: docSnap.id,
                 sessionId: docSnap.id,

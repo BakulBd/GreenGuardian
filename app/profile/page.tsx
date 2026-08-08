@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Shield, User, Mail, Calendar, ArrowLeft, Save, Loader2, Camera, Lock, Eye, EyeOff, KeyRound, Phone } from "lucide-react";
+import { Shield, User, Mail, Calendar, ArrowLeft, Save, Loader2, Camera, Lock, Eye, EyeOff, KeyRound, Phone, GraduationCap, School, BookOpen, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,10 +13,14 @@ import { useAuth } from "@/contexts/AuthContext";
 import { updateUserProfile, changePassword } from "@/lib/firebase/auth";
 import { uploadFile } from "@/lib/firebase/storage";
 import { validateStrongPassword } from "@/lib/utils/validation";
+import { formatDate } from "@/lib/utils/helpers";
+import { useAcademicCatalog } from "@/hooks/useAcademicCatalog";
+import { DEFAULT_DEPARTMENT } from "@/lib/academics/catalog";
 import Navbar from "@/components/Navbar";
 
 export default function ProfilePage() {
   const { user, loading: authLoading, initialized } = useAuth();
+  const catalog = useAcademicCatalog();
   const router = useRouter();
   const { toast } = useToast();
   const [saving, setSaving] = useState(false);
@@ -25,6 +29,13 @@ export default function ProfilePage() {
   const [avatarUrl, setAvatarUrl] = useState("");
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Student Academic State
+  const [department, setDepartment] = useState(DEFAULT_DEPARTMENT.name);
+  const [batch, setBatch] = useState("");
+  const [section, setSection] = useState("");
+  const [studentCode, setStudentCode] = useState("");
+  const [savingAcademic, setSavingAcademic] = useState(false);
 
   // Change password
   const [currentPassword, setCurrentPassword] = useState("");
@@ -40,6 +51,10 @@ export default function ProfilePage() {
       setName(user.name || "");
       setPhone(user.phone || "");
       setAvatarUrl(user.avatarUrl || "");
+      setDepartment(user.department || DEFAULT_DEPARTMENT.name);
+      setBatch(user.batch || "");
+      setSection(user.section || "");
+      setStudentCode(user.studentCode || "");
     }
   }, [user]);
 
@@ -300,14 +315,7 @@ export default function ProfilePage() {
                     <Label>Account Created</Label>
                     <div className="flex items-center gap-2 text-sm text-gray-600">
                       <Calendar className="h-4 w-4" />
-                      <span>
-                        {user.createdAt 
-                          ? (typeof user.createdAt === "object" && "seconds" in user.createdAt
-                              ? new Date((user.createdAt as any).seconds * 1000).toLocaleDateString()
-                              : new Date(user.createdAt as unknown as string).toLocaleDateString())
-                          : "Unknown"
-                        }
-                      </span>
+                      <span>{user.createdAt ? formatDate(user.createdAt) : "Unknown"}</span>
                     </div>
                   </div>
 
@@ -327,6 +335,135 @@ export default function ProfilePage() {
                 </form>
               </CardContent>
             </Card>
+
+            {/* Academic Information (Students) */}
+            {user.role === "student" && (
+              <Card className="mt-6">
+                <CardHeader>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <GraduationCap className="h-5 w-5 text-emerald-600" /> Academic Enrollment
+                  </CardTitle>
+                  <CardDescription>
+                    Update your Department, Batch, and Section to automatically connect your teachers, exams, and classrooms.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      setSavingAcademic(true);
+                      try {
+                        await updateUserProfile(user.id, {
+                          department: department || DEFAULT_DEPARTMENT.name,
+                          batch,
+                          section,
+                          sections: [section],
+                          studentCode: studentCode.trim(),
+                        });
+                        toast({
+                          title: "Academic Info Updated",
+                          description: `Saved Batch ${batch} / Section ${section}. Teacher assignments updated.`,
+                        });
+                      } catch (err: any) {
+                        toast({
+                          title: "Update Failed",
+                          description: err.message || "Failed to update academic profile.",
+                          variant: "destructive",
+                        });
+                      } finally {
+                        setSavingAcademic(false);
+                      }
+                    }}
+                    className="space-y-6"
+                  >
+                    <div className="space-y-2">
+                      <Label htmlFor="academicDepartment">Department</Label>
+                      <select
+                        id="academicDepartment"
+                        value={department}
+                        onChange={(e) => setDepartment(e.target.value)}
+                        className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-ring outline-none"
+                      >
+                        {Array.from(
+                          new Set(
+                            [
+                              DEFAULT_DEPARTMENT.name,
+                              ...catalog.courses.map((c) => c.departmentName).filter(Boolean),
+                            ] as string[]
+                          )
+                        ).map((dept) => (
+                          <option key={dept} value={dept}>
+                            {dept}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="academicBatch">Batch</Label>
+                        <select
+                          id="academicBatch"
+                          value={batch}
+                          onChange={(e) => setBatch(e.target.value)}
+                          className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-ring outline-none"
+                        >
+                          <option value="">Select Batch</option>
+                          {Array.from(new Set(catalog.batches.map((b) => b.name).filter(Boolean)))
+                            .sort()
+                            .map((b) => (
+                              <option key={b} value={b}>
+                                Batch {b}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label htmlFor="academicSection">Section</Label>
+                        <select
+                          id="academicSection"
+                          value={section}
+                          onChange={(e) => setSection(e.target.value)}
+                          className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-ring outline-none"
+                        >
+                          <option value="">Select Section</option>
+                          {Array.from(new Set(catalog.sections.map((s) => s.name).filter(Boolean)))
+                            .sort()
+                            .map((s) => (
+                              <option key={s} value={s}>
+                                Section {s}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="studentCodeInput">Student ID / Code</Label>
+                      <Input
+                        id="studentCodeInput"
+                        value={studentCode}
+                        onChange={(e) => setStudentCode(e.target.value)}
+                        placeholder="e.g. 0182220005101001"
+                      />
+                    </div>
+
+                    <Button type="submit" disabled={savingAcademic} className="w-full">
+                      {savingAcademic ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving Academic Info...
+                        </>
+                      ) : (
+                        <>
+                          <Save className="mr-2 h-4 w-4" /> Save Academic Info
+                        </>
+                      )}
+                    </Button>
+                  </form>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Change Password */}
             <Card className="mt-6">

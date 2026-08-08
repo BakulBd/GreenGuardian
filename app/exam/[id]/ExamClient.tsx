@@ -56,7 +56,7 @@ import { startStudentLiveBroadcast } from "@/lib/services/liveVideo";
 import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
-import { captureVideoFrame, sendProctoringSnapshot, captureAndUploadWarningScreenshot } from "@/lib/services/proctoring";
+import { captureVideoFrame, sendProctoringSnapshot, captureAndUploadWarningScreenshot, analyzeFrameLightingAndCoverage } from "@/lib/services/proctoring";
 import { isOptionBasedQuestion } from "@/lib/utils/questionTypes";
 
 interface Question {
@@ -769,7 +769,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
 
       return newCount;
     });
-  }, [sessionId, user, maxWarnings, violationCounts, exam?.id]);
+  }, [sessionId, user, maxWarnings, violationCounts, exam]);
 
   // Effect to show toast notifications for warnings (avoids setState during render)
   useEffect(() => {
@@ -783,7 +783,11 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         });
 
         if (pending.count >= maxWarnings) {
-          handleSubmitRef.current(true, "Too many warnings");
+          toast({
+            title: `Proctoring Alert (${pending.count}/${maxWarnings})`,
+            description: "Maximum warning threshold reached. Your exam attempt has been flagged for teacher review.",
+            variant: "destructive",
+          });
         }
       }
     }
@@ -1091,6 +1095,14 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
               const videoWidth = videoRef.current.videoWidth || 640;
               const videoHeight = videoRef.current.videoHeight || 480;
               
+              // Real-time lighting & sunglasses / face covering analysis
+              const lightingCheck = analyzeFrameLightingAndCoverage(videoRef.current);
+              if (lightingCheck?.lowLight) {
+                addWarning("Low room lighting detected. Please illuminate your face.");
+              } else if (lightingCheck?.sunglassesDetected) {
+                addWarning("Sunglasses or face covering detected. Please remove sunglasses.");
+              }
+
               // Use smart detection with cooldowns to reduce false positives
               if (shouldTriggerWarning(result, videoWidth, videoHeight, "no_face")) {
                 addWarning("No face detected");
