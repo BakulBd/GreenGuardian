@@ -12,6 +12,7 @@ import {
   LogOut,
   Shield,
   UserCheck,
+  KeyRound,
   User,
   Menu,
   X,
@@ -298,6 +299,25 @@ const teacherMenuItems = [
             </div>
           </div>
         </header>
+
+        {/* Temporary-password reminder.
+            An admin can hand out a temporary password (Admin -> Students /
+            Teachers -> Reset Password). This is the only thing that tells the
+            user to replace it; it clears itself once they do. */}
+        {user.mustChangePassword && (
+          <div className="mx-6 mt-6 flex flex-col sm:flex-row sm:items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+            <KeyRound className="h-5 w-5 text-amber-600 shrink-0" />
+            <p className="flex-1 text-sm text-amber-900">
+              You&apos;re signed in with a temporary password set by an administrator.
+              Please choose your own password now.
+            </p>
+            <Link href="/profile">
+              <Button size="sm" className="bg-amber-600 hover:bg-amber-700">
+                Change Password
+              </Button>
+            </Link>
+          </div>
+        )}
 
         {/* Page Content */}
         <main className="p-6">{children}</main>

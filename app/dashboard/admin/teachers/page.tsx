@@ -13,6 +13,7 @@ import { deleteUser } from "@/lib/firebase/firestore";
 import { User as UserType } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
 import AccountStatusControl from "@/components/AccountStatusControl";
+import ResetPasswordControl from "@/components/ResetPasswordControl";
 
 export default function TeachersPage() {
   const [teachers, setTeachers] = useState<UserType[]>([]);
@@ -292,12 +293,19 @@ export default function TeachersPage() {
                           {formatDate(teacher.createdAt as any)}
                         </td>
                         <td className="py-3 px-4 text-right">
-                          <AccountStatusControl
-                            userId={teacher.id}
-                            userName={teacher.name}
-                            status={teacher.status}
-                            onChanged={loadTeachers}
-                          />
+                          <div className="flex flex-wrap items-center justify-end gap-1.5">
+                            <AccountStatusControl
+                              userId={teacher.id}
+                              userName={teacher.name}
+                              status={teacher.status}
+                              onChanged={loadTeachers}
+                            />
+                            <ResetPasswordControl
+                              userId={teacher.id}
+                              userName={teacher.name}
+                              userEmail={teacher.email}
+                            />
+                          </div>
                         </td>
                         <td className="py-3 px-4 text-right">
                           <Button

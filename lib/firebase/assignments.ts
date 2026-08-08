@@ -15,6 +15,7 @@ import {
   limit,
   arrayUnion,
   arrayRemove,
+  deleteField,
   QuerySnapshot,
   DocumentData,
 } from "firebase/firestore";
@@ -29,6 +30,7 @@ import {
   BatchDoc,
   SectionDoc,
 } from "../types";
+import { sameName } from "../academics/ids";
 
 const ASSIGNMENTS_COLLECTION = "teacher_assignments";
 const MAPPINGS_COLLECTION = "teacher_student_mapping";
@@ -166,9 +168,21 @@ export async function computeAssignmentTargetStudentIds(
   sectionId: string
 ): Promise<string[]> {
   const assignments = await getAssignmentsByTeacher(teacherId);
-  const match = assignments.find(
-    (a) => a.courseId === courseId && a.batchId === batchId && a.sectionId === sectionId
-  );
+
+  // Match on id OR name for batch and section.
+  //
+  // Catalog IDs became deterministic (`241`, `241_D3`) when batches went
+  // global, and scripts/migrate-catalog.mjs rewrites assignments to match.
+  // Exams created before that still carry the old value — often the bare
+  // section name, "D3" — so an id-only comparison would stop resolving them
+  // and silently return an empty target list, making the exam invisible to
+  // everyone. Comparing both forms keeps old and new records interoperable.
+  const matches = (a: TeacherAssignment) =>
+    a.courseId === courseId &&
+    (sameName(a.batchId, batchId) || sameName(a.batchName, batchId)) &&
+    (sameName(a.sectionId, sectionId) || sameName(a.sectionName, sectionId));
+
+  const match = assignments.find(matches);
   if (!match) return [];
 
   const students = await resolveAssignmentStudentIds(
@@ -401,28 +415,70 @@ export async function recomputeAssignedTeacherIds(studentIds: string[]): Promise
 }
 
 /**
- * One-time backfill for `users.assignedTeacherIds` (Feature 5 bug fix).
+ * Full rebuild of the roster: re-derives every student's mapping rows AND
+ * `assignedTeacherIds` from live assignment + classroom data.
  *
  * Root cause of "published exams / notices are not visible": the denormalized
- * `assignedTeacherIds` field (Task 10) is only kept in sync going forward —
- * written when an assignment is created/updated/removed. Any assignment that
- * already existed before that sync logic shipped has a `teacher_student_mapping`
- * row but no corresponding field on the student's `users` doc, so every
- * exam-visibility and notice-visibility check (which reads that field) sees an
- * empty list and hides everything, even though the student IS assigned.
+ * `assignedTeacherIds` field (Task 10) is only written when an assignment is
+ * created/updated/removed. Exam and notice visibility — in both the queries and
+ * the security rules — reads that field, so any student it misses sees an empty
+ * list and receives nothing, even though an assignment covers their group.
  *
- * Recomputes the field for every student who has at least one mapping row.
- * Safe to run repeatedly — it fully derives the field from the mapping
- * collection each time, so it can't double-apply or drift.
+ * This iterates EVERY student, not only those that already have a
+ * `teacher_student_mapping` row. That distinction is the whole point: a student
+ * who registered (or was moved into a section) after their teacher's assignment
+ * was created has no mapping row at all, so a mapping-driven pass skipped
+ * exactly the students who were broken. `resyncStudentAssignments` creates the
+ * missing rows first, then recomputes the field.
+ *
+ * Safe to run repeatedly — everything is derived fresh, so it can't
+ * double-apply or drift. Returns a breakdown so the admin UI can report what
+ * actually changed rather than a meaningless total.
  */
-export async function backfillAllAssignedTeacherIds(): Promise<{ studentsUpdated: number }> {
-  const mappingsSnap = await getDocs(collection(db, MAPPINGS_COLLECTION));
-  const studentIds = Array.from(
-    new Set(mappingsSnap.docs.map((d) => d.data().studentId).filter(Boolean))
-  ) as string[];
+export async function backfillAllAssignedTeacherIds(): Promise<{
+  studentsUpdated: number;
+  studentsLinked: number;
+  linksCreated: number;
+  linksRemoved: number;
+  unassigned: number;
+}> {
+  const studentsSnap = await getDocs(
+    query(collection(db, "users"), where("role", "==", "student"))
+  );
 
-  await recomputeAssignedTeacherIds(studentIds);
-  return { studentsUpdated: studentIds.length };
+  let linksCreated = 0;
+  let linksRemoved = 0;
+  let studentsLinked = 0;
+
+  // Sequential on purpose: resyncStudentAssignments issues several reads and a
+  // batched write per student, and firing all of them at once on a large cohort
+  // reliably trips Firestore's client-side concurrency limits.
+  for (const studentDoc of studentsSnap.docs) {
+    try {
+      const { gained, lost } = await resyncStudentAssignments(studentDoc.id);
+      linksCreated += gained.length;
+      linksRemoved += lost.length;
+    } catch (error) {
+      console.warn(`[Assignments] Resync failed for student ${studentDoc.id}:`, error);
+    }
+  }
+
+  // Re-read to count who ended up with coverage, rather than trusting the
+  // in-memory snapshot we started from.
+  const afterSnap = await getDocs(
+    query(collection(db, "users"), where("role", "==", "student"))
+  );
+  afterSnap.docs.forEach((d) => {
+    if (((d.data().assignedTeacherIds as string[]) || []).length > 0) studentsLinked++;
+  });
+
+  return {
+    studentsUpdated: studentsSnap.size,
+    studentsLinked,
+    linksCreated,
+    linksRemoved,
+    unassigned: studentsSnap.size - studentsLinked,
+  };
 }
 
 // ===================== Duplicate Validation =====================
@@ -546,13 +602,25 @@ export async function createTeacherAssignment(
   const sectionName = input.sectionName || sectionDoc?.name || "";
   const teacherName = input.teacherName || (await getTeacherName(input.teacherId));
 
-  // Resolve the student set
+  // Resolve the student set. Any individual pin is intersected with the real
+  // group, and it is that intersection we persist — storing the raw selection
+  // would let an assignment claim students who are not in its own
+  // course+batch+section, which then matches nobody on the next roster sync.
   const students = await resolveAssignmentStudentIds(
     input.courseId,
     batchName,
     sectionName,
     input.studentIds
   );
+
+  const wantsPin = !!input.studentIds && input.studentIds.length > 0;
+  const resolvedPin = students.map((s) => s.id);
+  if (wantsPin && resolvedPin.length === 0) {
+    throw new Error(
+      `None of the selected students are in ${courseName} ${batchName}/${sectionName}. ` +
+        "Clear the individual selection to assign the whole section."
+    );
+  }
 
   const assignmentDoc: Record<string, any> = stripUndefined({
     teacherId: input.teacherId,
@@ -564,7 +632,7 @@ export async function createTeacherAssignment(
     batchName,
     sectionId: input.sectionId,
     sectionName,
-    studentIds: input.studentIds && input.studentIds.length > 0 ? input.studentIds : undefined,
+    studentIds: wantsPin ? resolvedPin : undefined,
     createdByAdmin: input.createdByAdminId,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -698,13 +766,29 @@ export async function updateTeacherAssignment(
   const sectionName = input.sectionName || existing.sectionName || sectionDoc?.name || "";
   const teacherName = input.teacherName || existing.teacherName || (await getTeacherName(teacherId));
 
-  // Resolve final students
+  // Resolve final students.
+  //
+  // `resolveAssignmentStudentIds` intersects any pin with the real group, so
+  // `students` is always correct — but the STORED `studentIds` was not, and
+  // that is what every later roster sync reads.
   const students = await resolveAssignmentStudentIds(
     courseId,
     batchName,
     sectionName,
     input.studentIds
   );
+
+  const wantsPin = !!input.studentIds && input.studentIds.length > 0;
+  // Store the intersection, never the raw input: a pin naming students outside
+  // this course+batch+section is not a narrower assignment, it's a broken one.
+  const resolvedPin = students.map((s) => s.id);
+
+  if (wantsPin && resolvedPin.length === 0) {
+    throw new Error(
+      `None of the selected students are in ${courseName} ${batchName}/${sectionName}. ` +
+        "Clear the individual selection to assign the whole section."
+    );
+  }
 
   // Re-sync mappings in a batch
   const batch = writeBatch(db);
@@ -729,7 +813,16 @@ export async function updateTeacherAssignment(
     batchName,
     sectionId,
     sectionName,
-    studentIds: input.studentIds && input.studentIds.length > 0 ? input.studentIds : undefined,
+    // `deleteField()`, not `undefined`.
+    //
+    // stripUndefined() removes undefined keys, and an absent key in an
+    // update() means "leave this field alone" — so an assignment that had once
+    // been pinned to individual students could NEVER be widened back to the
+    // whole section. Worse, moving the assignment to a different batch/section
+    // kept the old pin, leaving it pinned to students who were no longer in the
+    // group: the assignment then matched nobody at all, and every student in it
+    // silently lost their teacher on the next roster sync.
+    studentIds: wantsPin ? resolvedPin : deleteField(),
     updatedAt: serverTimestamp(),
   }));
 

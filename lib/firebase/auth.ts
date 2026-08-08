@@ -236,6 +236,19 @@ export async function changePassword(
     const credential = EmailAuthProvider.credential(firebaseUser.email, currentPassword);
     await reauthenticateWithCredential(firebaseUser, credential);
     await updatePassword(firebaseUser, newPassword);
+
+    // Clear the "must change password" flag an admin-issued temporary password
+    // sets. Best-effort: the password change itself already succeeded, and
+    // failing here would be a confusing thing to report back.
+    try {
+      await updateDoc(doc(db, "users", firebaseUser.uid), {
+        mustChangePassword: false,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (flagError) {
+      console.warn("[Auth] Could not clear mustChangePassword flag:", flagError);
+    }
+
     return { success: true };
   } catch (error: any) {
     let errorMessage = error.message || "Failed to change password.";

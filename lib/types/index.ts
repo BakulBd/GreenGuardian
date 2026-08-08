@@ -24,6 +24,13 @@ export interface User {
   statusReason?: string;
   statusUpdatedAt?: FirestoreDate;
   statusUpdatedBy?: string;
+  // Set when an admin issues a temporary password (Admin -> Reset Password ->
+  // "Set a temporary password"). Cleared by changePassword(). Drives the
+  // reminder banner in DashboardLayout.
+  mustChangePassword?: boolean;
+  passwordResetAt?: FirestoreDate;
+  passwordResetRequestedAt?: FirestoreDate;
+  passwordResetBy?: string;
   // Academic fields
   studentCode?: string; // Student ID e.g. 0182220005101001
   department?: string; // e.g. "CSE"
@@ -50,19 +57,41 @@ export interface CourseDoc {
   updatedAt: FirestoreDate;
 }
 
+/**
+ * A batch (intake cohort, e.g. "241") is GLOBAL, not per-course.
+ *
+ * It used to carry a `courseId`, which meant batch "241" existed as a separate
+ * document under every course — while a student carries a single `batch: "241"`
+ * string, so nothing could say which of those documents they were in. The
+ * duplication also made the catalog 671 documents, over Firestore's 500-write
+ * batch limit, so seeding it always threw.
+ *
+ * Document IDs are deterministic (`batches/241`) rather than random, so the id
+ * and the name can never drift apart and seeding is naturally idempotent.
+ * `courseId` is retained as optional purely so pre-migration documents still
+ * deserialize; nothing reads it.
+ */
 export interface BatchDoc {
   id: string;
-  courseId: string;
   name: string;
+  /** @deprecated Legacy per-course batches. Ignored — see scripts/migrate-catalog.mjs. */
+  courseId?: string;
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
 }
 
+/**
+ * A section (e.g. "D1") belongs to exactly one batch. Document ID is
+ * `{batchId}_{name}` — section names repeat across batches, so the batch has to
+ * be part of the identity.
+ */
 export interface SectionDoc {
   id: string;
   batchId: string;
-  courseId: string;
+  batchName: string;
   name: string;
+  /** @deprecated Legacy per-course sections. Ignored — see scripts/migrate-catalog.mjs. */
+  courseId?: string;
   createdAt: FirestoreDate;
   updatedAt: FirestoreDate;
 }

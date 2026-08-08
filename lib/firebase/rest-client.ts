@@ -112,34 +112,81 @@ export async function restLookupEmail(email: string): Promise<boolean> {
   }
 }
 
+/**
+ * Delete an Auth account using its own idToken. Used to roll back a half-built
+ * account when the Firestore profile write fails, so a retry with the same
+ * email doesn't hit "email already exists".
+ */
+export async function restDeleteUser(idToken: string): Promise<void> {
+  if (!WEB_API_KEY) return;
+  await fetch(`${IDENTITY_TOOLKIT}/accounts:delete?key=${encodeURIComponent(WEB_API_KEY)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idToken }),
+  }).catch(() => {});
+}
+
+/** True when `users/{uid}` already exists (read with the user's own idToken). */
+export async function restUserDocExists(uid: string, idToken: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${FIRESTORE_REST}/users/${encodeURIComponent(uid)}`, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Write a Firestore document using the user's idToken (bypasses rules). */
 export async function restWriteUserDoc(
   uid: string,
   userData: Record<string, any>,
   idToken: string
 ): Promise<void> {
+  /** Firestore REST typed value. Arrays matter here: `sections` and
+   *  `assignedTeacherIds` are both arrays, and the previous catch-all
+   *  `String(v)` would have stored them as the literal text "" or "a,b". */
+  const toValue = (v: any): Record<string, any> => {
+    if (v instanceof Date) return { timestampValue: v.toISOString() };
+    if (Array.isArray(v)) {
+      return v.length === 0
+        ? { arrayValue: {} }
+        : { arrayValue: { values: v.map(toValue) } };
+    }
+    if (typeof v === "boolean") return { booleanValue: v };
+    if (typeof v === "number") {
+      return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+    }
+    if (typeof v === "string") return { stringValue: v };
+    if (v === null || v === undefined) return { nullValue: null };
+    if (typeof v === "object") {
+      const inner: Record<string, any> = {};
+      for (const [k, val] of Object.entries(v)) inner[k] = toValue(val);
+      return { mapValue: { fields: inner } };
+    }
+    return { stringValue: String(v) };
+  };
+
   const fields: Record<string, any> = {};
   for (const [k, v] of Object.entries(userData)) {
-    if (v instanceof Date) {
-      fields[k] = { timestampValue: v.toISOString() };
-    } else if (typeof v === "boolean") {
-      fields[k] = { booleanValue: v };
-    } else if (typeof v === "number") {
-      fields[k] = { integerValue: String(v) };
-    } else if (typeof v === "string") {
-      fields[k] = { stringValue: v };
-    } else if (v === null || v === undefined) {
-      fields[k] = { nullValue: null };
-    } else {
-      fields[k] = { stringValue: String(v) };
-    }
+    fields[k] = toValue(v);
   }
-  // `allowMissing=true` tells Firestore this is an upsert (create if missing,
-  // otherwise update). Without it, a PATCH on a non-existent document is
-  // treated as an update, which Firestore rules DENY because there is no
-  // existing `resource.data` to validate against — causing a 403.
+  // Firestore's REST `documents.patch` is already an upsert: it creates the
+  // document when it does not exist, and rules then evaluate the write as a
+  // `create` (resource == null). There is NO `allowMissing` query parameter on
+  // this endpoint — sending one makes Firestore reject the whole request with
+  // `400 INVALID_ARGUMENT: Unknown name "allowMissing"`, which is what silently
+  // broke every REST-path registration (the Auth user was created, the profile
+  // write 400'd, and the user was left orphaned).
+  //
+  // The updateMask is derived from the payload so callers can't drift out of
+  // sync with a hardcoded field list.
+  const mask = Object.keys(fields)
+    .map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`)
+    .join("&");
   const res = await fetch(
-    `${FIRESTORE_REST}/users/${uid}?allowMissing=true&updateMask.fieldPaths=id&updateMask.fieldPaths=name&updateMask.fieldPaths=email&updateMask.fieldPaths=role&updateMask.fieldPaths=approved&updateMask.fieldPaths=rejected&updateMask.fieldPaths=emailVerified&updateMask.fieldPaths=createdAt&updateMask.fieldPaths=updatedAt`,
+    `${FIRESTORE_REST}/users/${encodeURIComponent(uid)}?${mask}`,
     {
       method: "PATCH",
       headers: {

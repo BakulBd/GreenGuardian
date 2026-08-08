@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAcademicCatalog } from "@/hooks/useAcademicCatalog";
+import { auth } from "@/lib/firebase/config";
 import { getUsersByRole } from "@/lib/firebase/firestore";
 import {
   createTeacherAssignment,
@@ -20,7 +21,6 @@ import {
   getAssignmentHistory,
   subscribeToAllAssignments,
   getStudentGroup,
-  backfillAllAssignedTeacherIds,
 } from "@/lib/firebase/assignments";
 import { TeacherAssignment, TeacherStudentMapping, AssignmentHistory, User } from "@/lib/types";
 import {
@@ -73,6 +73,12 @@ export default function AdminAssignmentsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [teacherFilter, setTeacherFilter] = useState("all");
 
+  // Students who currently have no teacher at all. A notice or exam published
+  // to "all" reaches nobody in this list, and nothing else in the admin panel
+  // made that visible — the notice just appeared to send successfully.
+  const [uncoveredStudents, setUncoveredStudents] = useState<User[]>([]);
+  const [coverageLoading, setCoverageLoading] = useState(true);
+
   // ===================== Data Loading =====================
 
   const loadTeachersAndStudents = useCallback(async () => {
@@ -84,9 +90,24 @@ export default function AdminAssignmentsPage() {
     }
   }, []);
 
+  const loadCoverage = useCallback(async () => {
+    setCoverageLoading(true);
+    try {
+      const students = await getUsersByRole("student");
+      setUncoveredStudents(
+        students.filter((s) => (s.assignedTeacherIds || []).length === 0)
+      );
+    } catch (error) {
+      console.error("Error loading assignment coverage:", error);
+    } finally {
+      setCoverageLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadTeachersAndStudents();
-  }, [loadTeachersAndStudents]);
+    loadCoverage();
+  }, [loadTeachersAndStudents, loadCoverage]);
 
   // Real-time assignments
   useEffect(() => {
@@ -294,17 +315,46 @@ export default function AdminAssignmentsPage() {
   };
 
   /**
-   * Fixes the "published exams / notices not visible" bug (Feature 5) for
-   * every student whose assignment predates the assignedTeacherIds sync
-   * logic. Safe to run any time — see backfillAllAssignedTeacherIds() for why.
+   * Fixes the "published exams / notices not visible" bug for every student
+   * whose roster links have drifted — including students who registered after
+   * their teacher's assignment was created and so never got a mapping row at
+   * all. Safe to run any time — see backfillAllAssignedTeacherIds() for why.
    */
   const handleSyncAssignedTeacherIds = async () => {
+    const current = auth.currentUser;
+    if (!current) {
+      toast({ title: "Session expired", description: "Please sign in again.", variant: "destructive" });
+      return;
+    }
     setSyncing(true);
     try {
-      const { studentsUpdated } = await backfillAllAssignedTeacherIds();
+      // Server-side: the rebuild has to create `teacher_student_mapping` rows
+      // and write other users' documents, and it walks every student. Doing it
+      // from the browser meant one round trip per student and only worked for
+      // an admin session.
+      const res = await fetch("/api/admin/roster/sync", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${await current.getIdToken()}`,
+        },
+        body: JSON.stringify({}),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok || !result?.success) {
+        throw new Error(result?.error || "The rebuild could not be completed.");
+      }
+
+      await loadCoverage();
       toast({
-        title: "Sync Complete",
-        description: `Refreshed assignment visibility for ${studentsUpdated} student${studentsUpdated !== 1 ? "s" : ""}. Exams and notices will now reach everyone who's actually assigned.`,
+        title: "Roster Rebuilt",
+        description:
+          `Checked ${result.studentsChecked} student${result.studentsChecked !== 1 ? "s" : ""}: ` +
+          `${result.linksCreated} link${result.linksCreated !== 1 ? "s" : ""} added, ` +
+          `${result.linksRemoved} removed. ` +
+          (result.uncovered > 0
+            ? `${result.uncovered} student${result.uncovered !== 1 ? "s are" : " is"} still not covered by any assignment — see "Coverage Gaps" below.`
+            : "Every student is now covered by at least one assignment."),
       });
     } catch (error: any) {
       toast({ title: "Sync Failed", description: error.message || "Failed to sync assignments", variant: "destructive" });
@@ -345,6 +395,22 @@ export default function AdminAssignmentsPage() {
     if (!groupedByTeacher.has(a.teacherId)) groupedByTeacher.set(a.teacherId, []);
     groupedByTeacher.get(a.teacherId)!.push(a);
   });
+
+  // Roll the uncovered students up to Batch → Section, which is the unit an
+  // admin actually fixes: one new assignment covers a whole section at once.
+  const coverageGaps = Array.from(
+    uncoveredStudents
+      .reduce((acc, s) => {
+        const batch = s.batch || "No batch";
+        const section = s.section || s.sections?.[0] || "No section";
+        const key = `${batch}|${section}`;
+        const entry = acc.get(key) || { batch, section, students: [] as User[] };
+        entry.students.push(s);
+        acc.set(key, entry);
+        return acc;
+      }, new Map<string, { batch: string; section: string; students: User[] }>())
+      .values()
+  ).sort((a, b) => a.batch.localeCompare(b.batch) || a.section.localeCompare(b.section));
 
   return (
     <DashboardLayout role="admin">
@@ -423,6 +489,47 @@ export default function AdminAssignmentsPage() {
           </Card>
         </div>
 
+        {/* Coverage gaps.
+            A student with no teacher receives nothing: not notices, not exams,
+            not even a notice addressed to "all". Until this panel existed
+            nothing surfaced that, so a teacher would publish a notice, see a
+            success message, and quietly reach an empty audience. */}
+        {!coverageLoading && coverageGaps.length > 0 && (
+          <Card className="border-amber-300 bg-amber-50/50">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-amber-900 text-base">
+                <AlertTriangle className="h-5 w-5" />
+                Coverage Gaps — {uncoveredStudents.length} student
+                {uncoveredStudents.length !== 1 ? "s" : ""} have no teacher
+              </CardTitle>
+              <CardDescription className="text-amber-800">
+                These students are not covered by any assignment, so notices and exams
+                — including ones sent to &ldquo;all students&rdquo; — will never reach
+                them. Create an assignment for each group below, then run{" "}
+                <span className="font-medium">Sync Assignment Visibility</span>.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap gap-2">
+                {coverageGaps.map((gap) => (
+                  <div
+                    key={`${gap.batch}-${gap.section}`}
+                    className="flex items-center gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2"
+                  >
+                    <Layers className="h-4 w-4 text-amber-600" />
+                    <span className="text-sm font-medium text-gray-900">
+                      Batch {gap.batch} &middot; Section {gap.section}
+                    </span>
+                    <Badge variant="outline" className="bg-amber-100 text-amber-800 border-amber-200">
+                      {gap.students.length}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* ===================== Assignment Form Modal ===================== */}
         {showForm && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -470,7 +577,10 @@ export default function AdminAssignmentsPage() {
                     disabled={!formData.courseId}
                   >
                     <option value="">{formData.courseId ? "-- Choose a batch --" : "Select a course first"}</option>
-                    {catalog.getBatchesForCourse(formData.courseId).map((b) => (
+                    {/* Batches are global — every course is taught to the same
+                        set of intake cohorts, so this list is not filtered by
+                        the selected course. */}
+                    {catalog.batchOptions.map((b) => (
                       <option key={b.id} value={b.id}>Batch {b.name}</option>
                     ))}
                   </select>

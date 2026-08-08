@@ -68,15 +68,29 @@ service cloud.firestore {
                        request.resource.data.role == 'student' && request.resource.data.approved == true ||
                        request.resource.data.role == 'teacher' && request.resource.data.approved == false);
       
-      // Users can update their own profile (except role/approval status and
-      // access-control fields). `assignedTeacherIds` MUST stay server-owned:
-      // it is what the notices and exam rules trust to decide which teacher's
-      // content a student may read, so a self-writable value would let any
-      // student grant themselves another teacher's communications. It is
-      // written only by the Admin SDK via /api/classroom/sync-access and the
-      // admin assignment flow.
+      // Users can update their own profile — name, phone, avatar, and the
+      // mustChangePassword acknowledgement. Everything that decides ACCESS is
+      // excluded and stays server/admin-owned:
+      //
+      //   role, approved, rejected, id, status
+      //     — identity and account state.
+      //   assignedTeacherIds
+      //     — the field the notice and exam rules trust to decide whose content
+      //       a student may read. Self-writable, it would let any student grant
+      //       themselves another teacher's communications. Written only by the
+      //       Admin SDK (lib/server/roster.ts, /api/classroom/sync-access).
+      //   batch, section, sections, studentCode, department
+      //     — academic placement. This is the INPUT the roster is derived from,
+      //       so leaving it self-writable is the same hole one step removed: a
+      //       student could move into any section and pick up that section's
+      //       exams and notices on the next roster sync. Changed by an admin
+      //       via the Students page, which resyncs the roster with it.
       allow update: if isUser(userId) &&
-                       !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'approved', 'rejected', 'id', 'assignedTeacherIds', 'status']);
+                       !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+                         'role', 'approved', 'rejected', 'id', 'status',
+                         'assignedTeacherIds',
+                         'batch', 'section', 'sections', 'studentCode', 'department'
+                       ]);
       
       // Admins can update any user (for approval/rejection)
       allow update: if isAdmin();
@@ -414,7 +428,14 @@ service cloud.firestore {
                        (resource.data.targetType in ['batch', 'semester'] &&
                         resource.data.get('targetBatch', '') == getUserData().get('batch', '')) ||
                        (resource.data.targetType == 'section' &&
-                        resource.data.get('targetSection', '') == getUserData().get('section', '')) ||
+                        resource.data.get('targetSection', '') == getUserData().get('section', '') &&
+                        // Section names repeat across batches ("D1" exists in
+                        // 232 and 241), so a section notice must also match the
+                        // student's batch. Notices created before the batch
+                        // selector existed have no targetBatch and stay
+                        // section-only. Mirrored in getStudentNotices().
+                        (resource.data.get('targetBatch', '') == '' ||
+                         resource.data.get('targetBatch', '') == getUserData().get('batch', ''))) ||
                        (resource.data.targetType == 'course' &&
                         resource.data.get('targetCourseId', '') in getUserData().get('courses', []))
                      );

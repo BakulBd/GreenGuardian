@@ -9,7 +9,6 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Trash2, Plus, Edit, X, Download, Search, Loader2, AlertCircle } from "lucide-react";
 import { getUsersByRole, deleteUser, updateUser } from "@/lib/firebase/firestore";
-import { resyncStudentAssignments } from "@/lib/firebase/assignments";
 import { auth } from "@/lib/firebase/config";
 import { User as UserType } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
@@ -17,11 +16,40 @@ import { useToast } from "@/components/ui/use-toast";
 import { DEFAULT_DEPARTMENT } from "@/lib/academics/catalog";
 import { useAcademicCatalog } from "@/hooks/useAcademicCatalog";
 import AccountStatusControl from "@/components/AccountStatusControl";
+import ResetPasswordControl from "@/components/ResetPasswordControl";
 import { doc, setDoc, serverTimestamp, collection, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { downloadStudentInfoPdf } from "@/lib/utils/studentPdf";
 
 import { validateName, validateEmail } from "@/lib/utils/validation";
+
+/**
+ * Ask the server to re-derive one student's roster (mapping rows,
+ * `assignedTeacherIds`, and membership of already-published exams).
+ *
+ * Server-side rather than in the browser so registration and admin edits share
+ * a single implementation — see lib/server/roster.ts.
+ */
+async function syncRoster(
+  studentId: string
+): Promise<{ linksCreated: number; linksRemoved: number; studentsCovered: number } | null> {
+  const current = auth.currentUser;
+  if (!current) return null;
+  try {
+    const res = await fetch("/api/admin/roster/sync", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${await current.getIdToken()}`,
+      },
+      body: JSON.stringify({ studentIds: [studentId] }),
+    });
+    const data = await res.json().catch(() => null);
+    return res.ok && data?.success ? data : null;
+  } catch {
+    return null;
+  }
+}
 
 export default function StudentsPage() {
   const [students, setStudents] = useState<UserType[]>([]);
@@ -40,9 +68,9 @@ export default function StudentsPage() {
   const { toast } = useToast();
   const catalog = useAcademicCatalog();
 
-  // Batches/sections are course-scoped in Firestore (one BatchDoc per
-  // course+name), but a student's batch/section fields are flat strings —
-  // dedupe by name so the dropdown doesn't repeat "241" once per course.
+  // Student profiles store batch/section as flat names, so the selects work in
+  // names throughout. Sections are scoped to the chosen batch — "D1" exists in
+  // several batches and they are not interchangeable.
   const departmentNames = useMemo(() => {
     const names = Array.from(new Set(catalog.courses.map((c) => c.departmentName).filter(Boolean))) as string[];
     return names.length > 0 ? names : [DEFAULT_DEPARTMENT.name];
@@ -74,6 +102,11 @@ export default function StudentsPage() {
     batch: "",
     section: "",
   });
+
+  // Sections valid for the batch chosen in each form. "D1" exists in several
+  // batches and they are not interchangeable, so the list is always scoped.
+  const addSectionNames = catalog.getSectionNamesForBatch(formData.batch);
+  const editSectionNames = catalog.getSectionNamesForBatch(editData.batch);
 
   useEffect(() => {
     loadStudents();
@@ -231,15 +264,15 @@ export default function StudentsPage() {
       // batch/section straight away, so they show on the right roster and are
       // included in that group's exams without waiting for an admin to
       // re-save the assignment.
-      const sync = await resyncStudentAssignments(data.studentId).catch(() => null);
+      const sync = await syncRoster(data.studentId);
 
       toast({
         title: "Student Created",
         description:
           `${formData.name} added to Batch ${formData.batch}, Section ${formData.section}` +
-          (sync && sync.gained.length > 0
-            ? ` and linked to ${sync.gained.length} teacher assignment${sync.gained.length !== 1 ? "s" : ""}.`
-            : ". No teacher is assigned to that group yet."),
+          (sync && sync.linksCreated > 0
+            ? ` and linked to ${sync.linksCreated} teacher assignment${sync.linksCreated !== 1 ? "s" : ""}.`
+            : ". No teacher is assigned to that group yet, so they will not receive notices or exams."),
       });
 
       setShowAddModal(false);
@@ -294,13 +327,20 @@ export default function StudentsPage() {
       // Moving a student between groups used to leave every downstream record
       // behind: they kept their old teacher's roster slot, kept seeing that
       // teacher's published exams, and never appeared for the new one.
-      const sync = await resyncStudentAssignments(editingStudent.id).catch(() => null);
+      //
+      // Routed through the server so it uses the same roster resolver as
+      // registration — one implementation decides who a student's teachers are.
+      const sync = await syncRoster(editingStudent.id);
 
       toast({
         title: "Student Updated",
         description:
           moved && sync
-            ? `Moved to Batch ${editData.batch} / Section ${editData.section}. Teacher links: +${sync.gained.length}, -${sync.lost.length}.`
+            ? `Moved to Batch ${editData.batch} / Section ${editData.section}. ` +
+              `Teacher links: +${sync.linksCreated}, -${sync.linksRemoved}.` +
+              (sync.studentsCovered === 0
+                ? " No teacher is assigned to that section yet, so they will not receive notices or exams."
+                : "")
             : `Updated profile for ${editingStudent.name}.`,
       });
 
@@ -528,7 +568,7 @@ export default function StudentsPage() {
                       <select
                         className="w-full h-9 px-2 rounded border text-xs bg-white"
                         value={formData.batch}
-                        onChange={(e) => setFormData({ ...formData, batch: e.target.value })}
+                        onChange={(e) => setFormData({ ...formData, batch: e.target.value, section: "" })}
                       >
                         {batchNames.map((name) => (
                           <option key={name} value={name}>Batch {name}</option>
@@ -543,7 +583,8 @@ export default function StudentsPage() {
                         value={formData.section}
                         onChange={(e) => setFormData({ ...formData, section: e.target.value })}
                       >
-                        {sectionNames.map((name) => (
+                        <option value="">Select section</option>
+                        {addSectionNames.map((name) => (
                           <option key={name} value={name}>Section {name}</option>
                         ))}
                       </select>
@@ -608,7 +649,7 @@ export default function StudentsPage() {
                       <select
                         className="w-full h-8 px-2 rounded border text-xs bg-white"
                         value={editData.batch}
-                        onChange={(e) => setEditData({ ...editData, batch: e.target.value })}
+                        onChange={(e) => setEditData({ ...editData, batch: e.target.value, section: "" })}
                       >
                         {batchNames.map((name) => (
                           <option key={name} value={name}>{name}</option>
@@ -623,7 +664,8 @@ export default function StudentsPage() {
                         value={editData.section}
                         onChange={(e) => setEditData({ ...editData, section: e.target.value })}
                       >
-                        {sectionNames.map((name) => (
+                        <option value="">Select section</option>
+                        {editSectionNames.map((name) => (
                           <option key={name} value={name}>{name}</option>
                         ))}
                       </select>
@@ -754,12 +796,19 @@ export default function StudentsPage() {
                           {formatDate(student.createdAt as any)}
                         </td>
                         <td className="py-3 px-4 text-right">
-                          <AccountStatusControl
-                            userId={student.id}
-                            userName={student.name}
-                            status={student.status}
-                            onChanged={loadStudents}
-                          />
+                          <div className="flex flex-wrap items-center justify-end gap-1.5">
+                            <AccountStatusControl
+                              userId={student.id}
+                              userName={student.name}
+                              status={student.status}
+                              onChanged={loadStudents}
+                            />
+                            <ResetPasswordControl
+                              userId={student.id}
+                              userName={student.name}
+                              userEmail={student.email}
+                            />
+                          </div>
                         </td>
                         <td className="py-3 px-4 text-right space-x-1">
                           <Button

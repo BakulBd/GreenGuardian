@@ -33,6 +33,12 @@ export interface PendingRegistration {
   lastSentAt: number; // epoch ms
   createdAt: number;
   updatedAt: number;
+  // Academic placement, captured at sign-up for students. Validated against the
+  // catalog server-side before it lands here (see lib/server/enrollment.ts), so
+  // by this point it is trusted. Absent for teachers.
+  batch?: string;
+  section?: string;
+  studentCode?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +73,9 @@ function toAdminRecord(doc: FirebaseFirestore.DocumentSnapshot<any>): PendingReg
     lastSentAt: parseTimestamp(d.lastSentAt),
     createdAt: parseTimestamp(d.createdAt) || Date.now(),
     updatedAt: parseTimestamp(d.updatedAt) || Date.now(),
+    batch: d.batch || undefined,
+    section: d.section || undefined,
+    studentCode: d.studentCode || undefined,
   };
 }
 
@@ -153,7 +162,8 @@ export async function upsertPending(rec: PendingRegistration): Promise<void> {
   if (isAdminSdkConfigured()) {
     try {
       const db = getAdminDb();
-      await db.collection("pendingRegistrations").doc(email).set({
+      // Firestore rejects `undefined`, and teachers have no placement.
+      const payload: Record<string, any> = {
         email: rec.email,
         name: rec.name,
         password: rec.password,
@@ -166,7 +176,11 @@ export async function upsertPending(rec: PendingRegistration): Promise<void> {
         lastSentAt: new Date(rec.lastSentAt),
         createdAt: rec.createdAt ? new Date(rec.createdAt) : new Date(),
         updatedAt: new Date(rec.updatedAt),
-      });
+      };
+      if (rec.batch) payload.batch = rec.batch;
+      if (rec.section) payload.section = rec.section;
+      if (rec.studentCode) payload.studentCode = rec.studentCode;
+      await db.collection("pendingRegistrations").doc(email).set(payload);
     } catch (e) {
       console.warn("[registration-store] Admin upsert failed, stored in memory & file:", e);
     }

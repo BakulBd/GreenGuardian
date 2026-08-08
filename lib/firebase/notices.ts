@@ -16,6 +16,7 @@ import {
   writeBatch,
   Query,
   DocumentData,
+  documentId,
 } from "firebase/firestore";
 import { db } from "./config";
 import {
@@ -284,7 +285,23 @@ export async function getStudentNotices(student: User): Promise<Notice[]> {
     const byId = new Map<string, Notice>();
     snapshots.forEach((snapshot) => {
       snapshot?.docs.forEach((d) => {
-        byId.set(d.id, { ...d.data(), id: d.id } as Notice);
+        const notice = { ...d.data(), id: d.id } as Notice;
+
+        // Section names are only unique WITHIN a batch — "D1" exists in 232 and
+        // in 241. The section query can only filter on one equality field per
+        // target type, so without this a notice addressed to 232/D1 also
+        // reached every 241/D1 student of the same teacher. Notices predating
+        // the batch selector have no `targetBatch`; those stay section-only
+        // rather than disappearing. Mirrored in firestore.rules.
+        if (
+          notice.targetType === "section" &&
+          notice.targetBatch &&
+          notice.targetBatch !== student.batch
+        ) {
+          return;
+        }
+
+        byId.set(d.id, notice);
       });
     });
 
@@ -691,6 +708,61 @@ export function subscribeToUnreadCount(
 // ===================== Helper Functions =====================
 
 /**
+ * Does `notice` address `student`?
+ *
+ * The single source of truth for notice targeting, deliberately pure so it can
+ * be unit-tested and reused. It does NOT check teacher assignment — callers
+ * intersect with the teacher's roster separately (Task 10).
+ *
+ * Must stay consistent with the student read rule in `firestore.rules` and with
+ * the queries in getStudentNotices(): if these three disagree, a notice either
+ * silently reaches nobody or reaches people it shouldn't.
+ */
+export function noticeTargetsStudent(notice: Notice, student: User): boolean {
+  if (student.role !== "student") return false;
+
+  // Students may carry either a scalar `section` or a `sections[]` array;
+  // reading only one of them was silently excluding half the cohort.
+  const sections =
+    student.sections && student.sections.length > 0
+      ? student.sections
+      : student.section
+        ? [student.section]
+        : [];
+
+  const isEnrolledIn = (courseId: string) => {
+    // No explicit course list means "enrolled in everything for my
+    // batch/section" — the same convention getStudentGroup() uses.
+    if (!student.courses || student.courses.length === 0) return true;
+    return student.courses.some((c: any) =>
+      typeof c === "string"
+        ? c === courseId
+        : c?.courseId === courseId || c?.id === courseId || c?.code === courseId
+    );
+  };
+
+  switch (notice.targetType) {
+    case "all":
+      return true;
+    case "individual":
+      return (notice.targetStudentIds || []).includes(student.id);
+    case "course":
+      return !!notice.targetCourseId && isEnrolledIn(notice.targetCourseId);
+    case "batch":
+    case "semester":
+      return !!notice.targetBatch && student.batch === notice.targetBatch;
+    case "section":
+      if (!notice.targetSection || !sections.includes(notice.targetSection)) return false;
+      // Section names repeat across batches ("D1" exists in 232 and 241), so a
+      // section notice must also match the batch. `targetBatch` is optional for
+      // notices created before the batch selector existed.
+      return !notice.targetBatch || student.batch === notice.targetBatch;
+    default:
+      return false;
+  }
+}
+
+/**
  * Get all targeted student IDs for a notice based on its target settings.
  *
  * Intersected with the teacher's actually-assigned students (Task 10) — a
@@ -709,40 +781,33 @@ export async function getTargetedStudentIds(
       return (notice.targetStudentIds || []).filter((id) => assignedStudentIds.has(id));
     }
 
-    const studentsRef = collection(db, "users");
-    let constraints: any[] = [where("role", "==", "student")];
-
-    switch (notice.targetType) {
-      case "all":
-        // All students - no additional constraints
-        break;
-      case "course":
-        if (notice.targetCourseId) {
-          constraints.push(where("courses", "array-contains", notice.targetCourseId));
-        }
-        break;
-      case "batch":
-        if (notice.targetBatch) {
-          constraints.push(where("batch", "==", notice.targetBatch));
-        }
-        break;
-      case "section":
-        if (notice.targetSection) {
-          constraints.push(where("section", "==", notice.targetSection));
-        }
-        break;
-      case "semester":
-        if (notice.targetBatch) {
-          constraints.push(where("batch", "==", notice.targetBatch));
-        }
-        break;
-      default:
-        return [];
+    // Load only the teacher's own assigned students and match in memory.
+    //
+    // The previous version built a Firestore query per target type, which got
+    // the targeting wrong in three ways that all silently under- or
+    // over-delivered notifications:
+    //   - "section" filtered on section alone, so a notice for 232/D1 also
+    //     notified 241/D1 (section names repeat across batches);
+    //   - it only read the scalar `section` field, missing students who carry
+    //     `sections[]` instead;
+    //   - "course" required `courses` to array-contain the id, so students with
+    //     no explicit course list — the majority — matched nothing, even though
+    //     getStudentGroup() counts them as enrolled in every course for their
+    //     batch/section.
+    // Matching in memory keeps this identical to the rules and to the student's
+    // own notice query, and costs fewer reads besides: the assigned roster is
+    // always a subset of all students.
+    const ids = Array.from(assignedStudentIds);
+    const students: User[] = [];
+    for (let i = 0; i < ids.length; i += 30) {
+      const chunk = ids.slice(i, i + 30);
+      const snap = await getDocs(
+        query(collection(db, "users"), where(documentId(), "in", chunk))
+      );
+      snap.docs.forEach((d) => students.push({ ...d.data(), id: d.id } as User));
     }
 
-    const q = query(studentsRef, ...constraints);
-    const snapshot = await getDocs(q);
-    const studentIds = snapshot.docs.map((doc) => doc.id).filter((id) => assignedStudentIds.has(id));
+    const studentIds = students.filter((s) => noticeTargetsStudent(notice, s)).map((s) => s.id);
     console.log(`[Notices] Found ${studentIds.length} targeted students for notice ${notice.id}`);
     return studentIds;
   } catch (error: any) {

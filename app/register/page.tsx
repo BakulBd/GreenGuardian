@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
@@ -24,7 +24,44 @@ export default function RegisterPage() {
     password: "",
     confirmPassword: "",
     role: "student" as UserRole,
+    batch: "",
+    section: "",
+    studentCode: "",
   });
+
+  // Batch -> sections, fetched from the server.
+  //
+  // Not read straight from Firestore: `batches`/`sections` require an
+  // authenticated session under firestore.rules, and someone on the sign-up
+  // page has none. The endpoint falls back to the built-in defaults when the
+  // catalog hasn't been seeded, so this list is never empty.
+  const [placements, setPlacements] = useState<{ batch: string; sections: string[] }[]>([]);
+  const [placementsLoading, setPlacementsLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/placements");
+        const data = await res.json().catch(() => null);
+        if (active && data?.success && Array.isArray(data.placements)) {
+          setPlacements(data.placements);
+        }
+      } catch {
+        // Leave the list empty; submit-time validation still reports clearly.
+      } finally {
+        if (active) setPlacementsLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const sectionsForBatch = useMemo(
+    () => placements.find((p) => p.batch === formData.batch)?.sections ?? [],
+    [placements, formData.batch]
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,6 +84,16 @@ export default function RegisterPage() {
       return;
     }
 
+    if (formData.role === "student" && (!formData.batch || !formData.section)) {
+      toast({
+        title: "Select your class",
+        description:
+          "Please choose your batch and section — they decide which teacher's notices and exams you receive.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -60,6 +107,13 @@ export default function RegisterPage() {
           email: formData.email,
           password: formData.password,
           role: formData.role,
+          ...(formData.role === "student"
+            ? {
+                batch: formData.batch,
+                section: formData.section,
+                studentCode: formData.studentCode.trim(),
+              }
+            : {}),
         }),
       });
 
@@ -262,7 +316,7 @@ export default function RegisterPage() {
                     </button>
                   </div>
                   {formData.role === "teacher" && (
-                    <motion.p 
+                    <motion.p
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: "auto" }}
                       className="text-xs text-amber-600 bg-amber-50 p-2 rounded-md border border-amber-200"
@@ -271,6 +325,93 @@ export default function RegisterPage() {
                     </motion.p>
                   )}
                 </div>
+
+                {/* Academic placement.
+                    A student's Batch + Section is what connects them to a
+                    teacher's assignment, and therefore to every notice, exam
+                    and result they will ever receive. Capturing it here is what
+                    makes an account useful the moment it's verified — without
+                    it the student signs in to a completely empty app and stays
+                    that way until an admin notices. */}
+                {formData.role === "student" && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    className="space-y-3 rounded-lg border border-green-100 bg-green-50/40 p-3"
+                  >
+                    <p className="text-xs text-gray-600">
+                      Your class placement. This decides which teacher&apos;s notices and
+                      exams you receive — ask your department if you&apos;re unsure.
+                    </p>
+
+                    <div className="grid grid-cols-2 gap-2 sm:gap-3">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="batch" className="text-sm font-medium">
+                          Batch <span className="text-red-500">*</span>
+                        </Label>
+                        <select
+                          id="batch"
+                          className="w-full h-11 px-3 rounded-md border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/20 focus:border-green-500 disabled:bg-gray-100"
+                          value={formData.batch}
+                          onChange={(e) =>
+                            setFormData({ ...formData, batch: e.target.value, section: "" })
+                          }
+                          disabled={loading || placementsLoading}
+                          required
+                        >
+                          <option value="">
+                            {placementsLoading ? "Loading..." : "Select batch"}
+                          </option>
+                          {placements.map((p) => (
+                            <option key={p.batch} value={p.batch}>
+                              {p.batch}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <Label htmlFor="section" className="text-sm font-medium">
+                          Section <span className="text-red-500">*</span>
+                        </Label>
+                        <select
+                          id="section"
+                          className="w-full h-11 px-3 rounded-md border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/20 focus:border-green-500 disabled:bg-gray-100"
+                          value={formData.section}
+                          onChange={(e) => setFormData({ ...formData, section: e.target.value })}
+                          disabled={loading || !formData.batch}
+                          required
+                        >
+                          <option value="">
+                            {formData.batch ? "Select section" : "Pick a batch first"}
+                          </option>
+                          {sectionsForBatch.map((s) => (
+                            <option key={s} value={s}>
+                              {s}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label htmlFor="studentCode" className="text-sm font-medium">
+                        Student ID <span className="text-gray-400 font-normal">(optional)</span>
+                      </Label>
+                      <Input
+                        id="studentCode"
+                        type="text"
+                        placeholder="e.g. 0182220005101001"
+                        className="h-11 text-sm border-gray-200 focus:border-green-500 focus:ring-green-500/20"
+                        value={formData.studentCode}
+                        onChange={(e) =>
+                          setFormData({ ...formData, studentCode: e.target.value })
+                        }
+                        disabled={loading}
+                      />
+                    </div>
+                  </motion.div>
+                )}
 
                 {/* Password */}
                 <div className="space-y-1.5 sm:space-y-2">

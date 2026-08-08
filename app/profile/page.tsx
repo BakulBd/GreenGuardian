@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Shield, User, Mail, Calendar, ArrowLeft, Save, Loader2, Camera, Lock, Eye, EyeOff, KeyRound, Phone, GraduationCap, School, BookOpen, Layers } from "lucide-react";
+import { Shield, User, Mail, Calendar, ArrowLeft, Save, Loader2, Camera, Lock, Eye, EyeOff, KeyRound, Phone, GraduationCap, School, BookOpen, Layers, Info, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,13 +14,26 @@ import { updateUserProfile, changePassword } from "@/lib/firebase/auth";
 import { uploadFile } from "@/lib/firebase/storage";
 import { validateStrongPassword } from "@/lib/utils/validation";
 import { formatDate } from "@/lib/utils/helpers";
-import { useAcademicCatalog } from "@/hooks/useAcademicCatalog";
-import { DEFAULT_DEPARTMENT } from "@/lib/academics/catalog";
 import Navbar from "@/components/Navbar";
+
+/**
+ * A profile value the user can see but not change. Rendered as text rather
+ * than a disabled input so it never looks like a field that has gone
+ * temporarily unavailable.
+ */
+function ReadOnlyField({ label, value }: { label: string; value?: string }) {
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-sm text-gray-500">{label}</Label>
+      <p className="text-sm font-medium text-gray-900 h-10 flex items-center px-3 rounded-md bg-gray-50 border border-gray-200">
+        {value?.trim() || <span className="text-gray-400 font-normal">Not set</span>}
+      </p>
+    </div>
+  );
+}
 
 export default function ProfilePage() {
   const { user, loading: authLoading, initialized } = useAuth();
-  const catalog = useAcademicCatalog();
   const router = useRouter();
   const { toast } = useToast();
   const [saving, setSaving] = useState(false);
@@ -31,11 +44,6 @@ export default function ProfilePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Student Academic State
-  const [department, setDepartment] = useState(DEFAULT_DEPARTMENT.name);
-  const [batch, setBatch] = useState("");
-  const [section, setSection] = useState("");
-  const [studentCode, setStudentCode] = useState("");
-  const [savingAcademic, setSavingAcademic] = useState(false);
 
   // Change password
   const [currentPassword, setCurrentPassword] = useState("");
@@ -51,10 +59,6 @@ export default function ProfilePage() {
       setName(user.name || "");
       setPhone(user.phone || "");
       setAvatarUrl(user.avatarUrl || "");
-      setDepartment(user.department || DEFAULT_DEPARTMENT.name);
-      setBatch(user.batch || "");
-      setSection(user.section || "");
-      setStudentCode(user.studentCode || "");
     }
   }, [user]);
 
@@ -336,7 +340,16 @@ export default function ProfilePage() {
               </CardContent>
             </Card>
 
-            {/* Academic Information (Students) */}
+            {/* Academic Enrollment (Students) — READ ONLY.
+                This used to be an editable form that saved batch/section and
+                toasted "Teacher assignments updated." It did neither reliably:
+                refreshing the roster means writing `teacher_student_mapping`
+                and the student's own `assignedTeacherIds`, both admin-only by
+                rule, so the write was denied and swallowed. The student was
+                left with a profile claiming one section and access to none.
+
+                It is also the placement that decides whose exams and notices
+                the account receives, so it is not the student's to change. */}
             {user.role === "student" && (
               <Card className="mt-6">
                 <CardHeader>
@@ -344,123 +357,38 @@ export default function ProfilePage() {
                     <GraduationCap className="h-5 w-5 text-emerald-600" /> Academic Enrollment
                   </CardTitle>
                   <CardDescription>
-                    Update your Department, Batch, and Section to automatically connect your teachers, exams, and classrooms.
+                    Your class placement. It determines which teachers, exams and notices
+                    reach you.
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
-                  <form
-                    onSubmit={async (e) => {
-                      e.preventDefault();
-                      setSavingAcademic(true);
-                      try {
-                        await updateUserProfile(user.id, {
-                          department: department || DEFAULT_DEPARTMENT.name,
-                          batch,
-                          section,
-                          sections: [section],
-                          studentCode: studentCode.trim(),
-                        });
-                        toast({
-                          title: "Academic Info Updated",
-                          description: `Saved Batch ${batch} / Section ${section}. Teacher assignments updated.`,
-                        });
-                      } catch (err: any) {
-                        toast({
-                          title: "Update Failed",
-                          description: err.message || "Failed to update academic profile.",
-                          variant: "destructive",
-                        });
-                      } finally {
-                        setSavingAcademic(false);
-                      }
-                    }}
-                    className="space-y-6"
-                  >
-                    <div className="space-y-2">
-                      <Label htmlFor="academicDepartment">Department</Label>
-                      <select
-                        id="academicDepartment"
-                        value={department}
-                        onChange={(e) => setDepartment(e.target.value)}
-                        className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-ring outline-none"
-                      >
-                        {Array.from(
-                          new Set(
-                            [
-                              DEFAULT_DEPARTMENT.name,
-                              ...catalog.courses.map((c) => c.departmentName).filter(Boolean),
-                            ] as string[]
-                          )
-                        ).map((dept) => (
-                          <option key={dept} value={dept}>
-                            {dept}
-                          </option>
-                        ))}
-                      </select>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <ReadOnlyField label="Department" value={user.department} />
+                    <ReadOnlyField label="Student ID" value={user.studentCode} />
+                    <ReadOnlyField label="Batch" value={user.batch} />
+                    <ReadOnlyField
+                      label="Section"
+                      value={user.section || user.sections?.[0]}
+                    />
+                  </div>
+
+                  <div className="flex items-start gap-2.5 rounded-lg border border-blue-200 bg-blue-50 p-3">
+                    <Info className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
+                    <p className="text-sm text-blue-900 leading-relaxed">
+                      Need a correction? Contact your administrator — moving between
+                      sections changes which classes you belong to, so only they can do it.
+                    </p>
+                  </div>
+
+                  {(user.assignedTeacherIds?.length ?? 0) === 0 && (
+                    <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                      <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+                      <p className="text-sm text-amber-900 leading-relaxed">
+                        No teacher has been assigned to your section yet, so you won&apos;t
+                        see notices or exams. Your administrator needs to assign one.
+                      </p>
                     </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="academicBatch">Batch</Label>
-                        <select
-                          id="academicBatch"
-                          value={batch}
-                          onChange={(e) => setBatch(e.target.value)}
-                          className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-ring outline-none"
-                        >
-                          <option value="">Select Batch</option>
-                          {Array.from(new Set(catalog.batches.map((b) => b.name).filter(Boolean)))
-                            .sort()
-                            .map((b) => (
-                              <option key={b} value={b}>
-                                Batch {b}
-                              </option>
-                            ))}
-                        </select>
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label htmlFor="academicSection">Section</Label>
-                        <select
-                          id="academicSection"
-                          value={section}
-                          onChange={(e) => setSection(e.target.value)}
-                          className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-ring outline-none"
-                        >
-                          <option value="">Select Section</option>
-                          {Array.from(new Set(catalog.sections.map((s) => s.name).filter(Boolean)))
-                            .sort()
-                            .map((s) => (
-                              <option key={s} value={s}>
-                                Section {s}
-                              </option>
-                            ))}
-                        </select>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="studentCodeInput">Student ID / Code</Label>
-                      <Input
-                        id="studentCodeInput"
-                        value={studentCode}
-                        onChange={(e) => setStudentCode(e.target.value)}
-                        placeholder="e.g. 0182220005101001"
-                      />
-                    </div>
-
-                    <Button type="submit" disabled={savingAcademic} className="w-full">
-                      {savingAcademic ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving Academic Info...
-                        </>
-                      ) : (
-                        <>
-                          <Save className="mr-2 h-4 w-4" /> Save Academic Info
-                        </>
-                      )}
-                    </Button>
-                  </form>
+                  )}
                 </CardContent>
               </Card>
             )}

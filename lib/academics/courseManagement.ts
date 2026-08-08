@@ -1,6 +1,7 @@
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   setDoc,
   updateDoc,
@@ -15,6 +16,7 @@ import {
 } from "firebase/firestore";
 import { db } from "../firebase/config";
 import { CourseDoc, BatchDoc, SectionDoc } from "../types";
+import { batchIdFor, sectionIdFor, sameName } from "./ids";
 
 // ===================== Courses =====================
 
@@ -119,25 +121,17 @@ async function assertNoAssignments(
   }
 }
 
+/**
+ * Delete a course.
+ *
+ * Deliberately does NOT cascade into batches and sections any more. Under the
+ * old per-course model that cascade made sense; now a batch is a shared intake
+ * cohort, so deleting one course would have wiped the batches and sections that
+ * every other course — and every student — depends on.
+ */
 export async function deleteCourse(courseId: string): Promise<void> {
   await assertNoAssignments("courseId", courseId, "This course");
-
-  const batch = writeBatch(db);
-
-  // Delete all batches under this course
-  const batchesQ = query(collection(db, "batches"), where("courseId", "==", courseId));
-  const batchesSnap = await getDocs(batchesQ);
-
-  for (const bDoc of batchesSnap.docs) {
-    // Delete all sections under this batch
-    const sectionsQ = query(collection(db, "sections"), where("batchId", "==", bDoc.id));
-    const sectionsSnap = await getDocs(sectionsQ);
-    sectionsSnap.docs.forEach((sDoc) => batch.delete(doc(db, "sections", sDoc.id)));
-    batch.delete(doc(db, "batches", bDoc.id));
-  }
-
-  batch.delete(doc(db, "courses", courseId));
-  await batch.commit();
+  await deleteDoc(doc(db, "courses", courseId));
 }
 
 /**
@@ -157,37 +151,28 @@ export function subscribeToCourses(callback: (courses: CourseDoc[]) => void): ()
 // ===================== Batches =====================
 
 /**
- * Validate batch data. Batch name must be unique within a course.
+ * Validate batch data. Batch names are globally unique — a batch is an intake
+ * cohort ("241"), not something that exists separately per course.
  */
-async function validateBatchData(data: { courseId: string; name: string }, excludeId?: string): Promise<void> {
-  if (!data.courseId) {
-    throw new Error("A course must be selected to create a batch.");
-  }
+async function validateBatchData(data: { name: string }, excludeId?: string): Promise<void> {
   if (!data.name || !data.name.trim()) {
     throw new Error("Batch name is required.");
   }
   const name = data.name.trim();
 
-  const q = query(collection(db, "batches"), where("courseId", "==", data.courseId));
-  const snapshot = await getDocs(q);
-  const duplicate = snapshot.docs.find((d) => d.id !== excludeId && (d.data() as BatchDoc).name === name);
+  const snapshot = await getDocs(collection(db, "batches"));
+  const duplicate = snapshot.docs.find(
+    (d) => d.id !== excludeId && sameName((d.data() as BatchDoc).name, name)
+  );
 
   if (duplicate) {
-    throw new Error(`Batch "${name}" already exists for this course. Batch names must be unique within a course.`);
+    throw new Error(`Batch "${name}" already exists. Batch names must be unique.`);
   }
 }
 
 /**
- * Get all batches for a specific course.
- */
-export async function getBatchesByCourse(courseId: string): Promise<BatchDoc[]> {
-  const q = query(collection(db, "batches"), where("courseId", "==", courseId), orderBy("name", "asc"));
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as BatchDoc));
-}
-
-/**
- * Get all batches across all courses (flat list).
+ * Get all batches (flat list). Batches are global, so there is no per-course
+ * variant of this any more.
  */
 export async function getAllBatches(): Promise<BatchDoc[]> {
   const q = query(collection(db, "batches"), orderBy("name", "asc"));
@@ -196,36 +181,55 @@ export async function getAllBatches(): Promise<BatchDoc[]> {
 }
 
 /**
- * Create a new batch under a course.
+ * Create a batch. The document ID is derived from the name (see
+ * lib/academics/ids.ts), so creating the same batch twice is a no-op rather
+ * than a duplicate.
  */
-export async function createBatch(data: { courseId: string; name: string }): Promise<string> {
+export async function createBatch(data: { name: string }): Promise<string> {
   await validateBatchData(data);
-  const docRef = await addDoc(collection(db, "batches"), {
-    courseId: data.courseId,
-    name: data.name.trim(),
+  const name = data.name.trim();
+  const id = batchIdFor(name);
+  await setDoc(doc(db, "batches", id), {
+    name,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
-  return docRef.id;
+  return id;
 }
 
 /**
- * Update an existing batch.
+ * Rename a batch.
+ *
+ * The document ID is derived from the name, so a rename would strictly mean
+ * moving the document — along with every section under it and every
+ * `teacher_assignments` / student profile row that stores the old name. That is
+ * a migration, not an edit, so it is refused rather than half-performed.
  */
-export async function updateBatch(batchId: string, data: { courseId: string; name: string }): Promise<void> {
-  await validateBatchData(data, batchId);
-  await updateDoc(doc(db, "batches", batchId), {
-    courseId: data.courseId,
-    name: data.name.trim(),
-    updatedAt: serverTimestamp(),
-  });
+export async function updateBatch(batchId: string, data: { name: string }): Promise<void> {
+  const snap = await getDoc(doc(db, "batches", batchId));
+  const current = snap.exists() ? (snap.data() as BatchDoc).name : "";
+  if (!sameName(current, data.name)) {
+    throw new Error(
+      `A batch cannot be renamed once created — students, sections and teacher assignments all reference "${current}" by name. Create the new batch and move its sections instead.`
+    );
+  }
+  await updateDoc(doc(db, "batches", batchId), { updatedAt: serverTimestamp() });
 }
 
 /**
- * Delete a batch and all its associated sections.
+ * Delete a batch and all its sections.
+ *
+ * Refused while any teacher assignment references the batch (see
+ * assertNoAssignments) or while any student is still in it — deleting the batch
+ * out from under a student leaves them with a `batch` value that resolves to
+ * nothing, which is exactly how students end up invisible.
  */
 export async function deleteBatch(batchId: string): Promise<void> {
   await assertNoAssignments("batchId", batchId, "This batch");
+
+  const snap = await getDoc(doc(db, "batches", batchId));
+  const batchName = snap.exists() ? (snap.data() as BatchDoc).name : batchId;
+  await assertNoStudents("batch", batchName, `Batch "${batchName}"`);
 
   const batch = writeBatch(db);
   const sectionsQ = query(collection(db, "sections"), where("batchId", "==", batchId));
@@ -236,10 +240,10 @@ export async function deleteBatch(batchId: string): Promise<void> {
 }
 
 /**
- * Subscribe to real-time batch updates for a course.
+ * Subscribe to real-time batch updates.
  */
-export function subscribeToBatches(courseId: string, callback: (batches: BatchDoc[]) => void): () => void {
-  const q = query(collection(db, "batches"), where("courseId", "==", courseId), orderBy("name", "asc"));
+export function subscribeToBatches(callback: (batches: BatchDoc[]) => void): () => void {
+  const q = query(collection(db, "batches"), orderBy("name", "asc"));
   const unsubscribe = onSnapshot(q, (snapshot) => {
     const batches = snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id } as BatchDoc));
     callback(batches);
@@ -252,7 +256,30 @@ export function subscribeToBatches(courseId: string, callback: (batches: BatchDo
 // ===================== Sections =====================
 
 /**
- * Validate section data. Section name must be unique within a batch.
+ * Refuse to remove a catalog entry that students are still placed in.
+ *
+ * A student whose `batch`/`section` no longer resolves to a catalog entry can't
+ * be matched by any teacher assignment, so they drop out of every roster and
+ * receive nothing — silently. Blocking here is what keeps that from happening
+ * behind a Delete button.
+ */
+async function assertNoStudents(
+  field: "batch" | "section",
+  name: string,
+  label: string
+): Promise<void> {
+  const snap = await getDocs(
+    query(collection(db, "users"), where("role", "==", "student"), where(field, "==", name))
+  );
+  if (!snap.empty) {
+    throw new Error(
+      `${label} still has ${snap.size} student${snap.size !== 1 ? "s" : ""} in it. Move them to another ${field} first.`
+    );
+  }
+}
+
+/**
+ * Validate section data. Section names are unique within their batch.
  */
 async function validateSectionData(data: { batchId: string; name: string }, excludeId?: string): Promise<void> {
   if (!data.batchId) {
@@ -265,10 +292,12 @@ async function validateSectionData(data: { batchId: string; name: string }, excl
 
   const q = query(collection(db, "sections"), where("batchId", "==", data.batchId));
   const snapshot = await getDocs(q);
-  const duplicate = snapshot.docs.find((d) => d.id !== excludeId && (d.data() as SectionDoc).name === name);
+  const duplicate = snapshot.docs.find(
+    (d) => d.id !== excludeId && sameName((d.data() as SectionDoc).name, name)
+  );
 
   if (duplicate) {
-    throw new Error(`Section "${name}" already exists for this batch. Section names must be unique within a batch.`);
+    throw new Error(`Section "${name}" already exists in this batch. Section names must be unique within a batch.`);
   }
 }
 
@@ -291,30 +320,42 @@ export async function getAllSections(): Promise<SectionDoc[]> {
 }
 
 /**
- * Create a new section under a batch.
+ * Create a section under a batch. The ID is `{batchId}_{name}`, so the same
+ * section can't be created twice and the batch is part of its identity.
  */
-export async function createSection(data: { batchId: string; courseId: string; name: string }): Promise<string> {
+export async function createSection(data: { batchId: string; name: string }): Promise<string> {
   await validateSectionData(data);
-  const docRef = await addDoc(collection(db, "sections"), {
+  const batchSnap = await getDoc(doc(db, "batches", data.batchId));
+  if (!batchSnap.exists()) {
+    throw new Error("That batch no longer exists. Refresh and try again.");
+  }
+  const batchName = (batchSnap.data() as BatchDoc).name;
+  const name = data.name.trim();
+  const id = sectionIdFor(batchName, name);
+
+  await setDoc(doc(db, "sections", id), {
     batchId: data.batchId,
-    courseId: data.courseId,
-    name: data.name.trim(),
+    batchName,
+    name,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
-  return docRef.id;
+  return id;
 }
 
 /**
- * Update an existing section.
+ * Rename a section. Refused for the same reason as renaming a batch: student
+ * profiles and teacher assignments both store the section by name.
  */
 export async function updateSection(sectionId: string, data: { batchId: string; name: string }): Promise<void> {
-  await validateSectionData(data, sectionId);
-  await updateDoc(doc(db, "sections", sectionId), {
-    batchId: data.batchId,
-    name: data.name.trim(),
-    updatedAt: serverTimestamp(),
-  });
+  const snap = await getDoc(doc(db, "sections", sectionId));
+  const current = snap.exists() ? (snap.data() as SectionDoc).name : "";
+  if (!sameName(current, data.name)) {
+    throw new Error(
+      `A section cannot be renamed once created — students and teacher assignments reference "${current}" by name. Create the new section and move its students instead.`
+    );
+  }
+  await updateDoc(doc(db, "sections", sectionId), { updatedAt: serverTimestamp() });
 }
 
 /**
@@ -322,6 +363,29 @@ export async function updateSection(sectionId: string, data: { batchId: string; 
  */
 export async function deleteSection(sectionId: string): Promise<void> {
   await assertNoAssignments("sectionId", sectionId, "This section");
+
+  const snap = await getDoc(doc(db, "sections", sectionId));
+  if (snap.exists()) {
+    const section = snap.data() as SectionDoc;
+    // Scoped by batch: two batches can both have a "D1", and only this one's
+    // students are affected.
+    const studentsSnap = await getDocs(
+      query(
+        collection(db, "users"),
+        where("role", "==", "student"),
+        where("batch", "==", section.batchName || ""),
+        where("section", "==", section.name)
+      )
+    );
+    if (!studentsSnap.empty) {
+      throw new Error(
+        `Section ${section.batchName}/${section.name} still has ${studentsSnap.size} student${
+          studentsSnap.size !== 1 ? "s" : ""
+        } in it. Move them to another section first.`
+      );
+    }
+  }
+
   await deleteDoc(doc(db, "sections", sectionId));
 }
 
@@ -342,56 +406,92 @@ export function subscribeToSections(batchId: string, callback: (sections: Sectio
 // ===================== Seed Defaults =====================
 
 /**
- * Seed the default courses/batches/sections into Firestore if they don't exist.
- * Idempotent: safe to call multiple times.
+ * Seed the default catalog. Safe to run repeatedly.
+ *
+ * Under the old per-course model this wrote 11 courses x 10 batches x 5
+ * sections = 671 documents in a single `writeBatch` — past Firestore's 500
+ * operation limit, so the "Seed Defaults" button threw every single time.
+ * Global batches bring it to 11 + 10 + 50 = 71, and the writes are chunked
+ * anyway so the count can grow without reintroducing the ceiling.
+ *
+ * Batches and sections use deterministic IDs, so re-seeding overwrites rather
+ * than duplicating. Courses keep random IDs (their names are editable and
+ * assignments reference them by ID), so they are only created when the
+ * collection is empty.
  */
-export async function seedDefaultCatalog(): Promise<void> {
-  const coursesSnap = await getDocs(collection(db, "courses"));
-  if (coursesSnap.size > 0) {
-    // Catalog already seeded, do nothing
-    return;
-  }
+const MAX_BATCH_WRITES = 400; // headroom under Firestore's 500-op limit
 
-  // Import defaults lazily to avoid circular dependency
+async function commitChunked(writes: ((b: ReturnType<typeof writeBatch>) => void)[]): Promise<void> {
+  for (let i = 0; i < writes.length; i += MAX_BATCH_WRITES) {
+    const chunk = writes.slice(i, i + MAX_BATCH_WRITES);
+    const batch = writeBatch(db);
+    chunk.forEach((apply) => apply(batch));
+    await batch.commit();
+  }
+}
+
+export async function seedDefaultCatalog(): Promise<{
+  coursesCreated: number;
+  batchesCreated: number;
+  sectionsCreated: number;
+}> {
+  // Import defaults lazily to avoid a circular dependency with ./catalog.
   const { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } = await import("./catalog");
 
-  const batch = writeBatch(db);
+  const writes: ((b: ReturnType<typeof writeBatch>) => void)[] = [];
 
-  for (const course of DEFAULT_COURSES) {
-    const courseRef = doc(collection(db, "courses"));
-    batch.set(courseRef, {
-      name: course.name,
-      code: course.code,
-      departmentId: course.departmentId,
-      departmentName: course.departmentName,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
-    // Create all batches under this course
-    for (const b of DEFAULT_BATCHES) {
-      const batchRef = doc(collection(db, "batches"));
-      batch.set(batchRef, {
-        courseId: courseRef.id,
-        name: b.name,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-
-      // Create all sections under this batch
-      for (const s of DEFAULT_SECTIONS) {
-        const sectionRef = doc(collection(db, "sections"));
-        batch.set(sectionRef, {
-          batchId: batchRef.id,
-          courseId: courseRef.id,
-          name: s.name,
+  const coursesSnap = await getDocs(collection(db, "courses"));
+  let coursesCreated = 0;
+  if (coursesSnap.empty) {
+    for (const course of DEFAULT_COURSES) {
+      const courseRef = doc(collection(db, "courses"));
+      writes.push((b) =>
+        b.set(courseRef, {
+          name: course.name,
+          code: course.code,
+          departmentId: course.departmentId,
+          departmentName: course.departmentName,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-        });
-      }
+        })
+      );
+      coursesCreated++;
     }
   }
 
-  await batch.commit();
+  for (const b of DEFAULT_BATCHES) {
+    const batchId = batchIdFor(b.name);
+    writes.push((wb) =>
+      wb.set(
+        doc(db, "batches", batchId),
+        { name: b.name, createdAt: serverTimestamp(), updatedAt: serverTimestamp() },
+        { merge: true }
+      )
+    );
+
+    for (const s of DEFAULT_SECTIONS) {
+      writes.push((wb) =>
+        wb.set(
+          doc(db, "sections", sectionIdFor(b.name, s.name)),
+          {
+            batchId,
+            batchName: b.name,
+            name: s.name,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        )
+      );
+    }
+  }
+
+  await commitChunked(writes);
+
+  return {
+    coursesCreated,
+    batchesCreated: DEFAULT_BATCHES.length,
+    sectionsCreated: DEFAULT_BATCHES.length * DEFAULT_SECTIONS.length,
+  };
 }
 

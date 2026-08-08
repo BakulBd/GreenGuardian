@@ -27,16 +27,14 @@ import {
 import { useToast } from "@/components/ui/use-toast";
 import {
   getAllCourses,
-  getBatchesByCourse,
+  getAllBatches,
   getSectionsByBatch,
   createCourse,
   updateCourse,
   deleteCourse,
   createBatch,
-  updateBatch,
   deleteBatch,
   createSection,
-  updateSection,
   deleteSection,
   seedDefaultCatalog,
 } from "@/lib/academics/courseManagement";
@@ -80,10 +78,13 @@ export default function AdminCoursesPage() {
     }
   };
 
-  const loadBatches = async (courseId: string) => {
-    if (!courseId) return;
+  // Batches are global — an intake cohort like "241" is the same cohort no
+  // matter which course you are looking at. They used to be loaded per course,
+  // which duplicated every batch under every course and left a student's single
+  // `batch: "241"` value unable to say which document it meant.
+  const loadBatches = async () => {
     try {
-      const data = await getBatchesByCourse(courseId);
+      const data = await getAllBatches();
       setBatches(data);
       if (data.length > 0 && !data.some((b) => b.id === selectedBatchId)) {
         setSelectedBatchId(data[0].id);
@@ -117,11 +118,10 @@ export default function AdminCoursesPage() {
     })();
   }, []);
 
+  // Batches are global, so they load once rather than per selected course.
   useEffect(() => {
-    if (selectedCourseId) {
-      loadBatches(selectedCourseId);
-    }
-  }, [selectedCourseId]);
+    loadBatches();
+  }, []);
 
   useEffect(() => {
     if (selectedBatchId) {
@@ -173,17 +173,21 @@ export default function AdminCoursesPage() {
   };
 
   const handleDeleteCourse = async (course: CourseDoc) => {
-    if (!confirm(`Delete course "${course.name}"? This will also delete all its batches and sections.`)) return;
+    // Batches and sections are shared across courses now, so they survive.
+    if (
+      !confirm(
+        `Delete course "${course.name}"? Batches and sections are shared and will not be affected. It will be refused if any teacher assignment still uses this course.`
+      )
+    )
+      return;
     setSaving(true);
     try {
       await deleteCourse(course.id);
-      toast({ title: "Course Deleted", description: `"${course.name}" and all its batches/sections were removed.` });
+      toast({ title: "Course Deleted", description: `"${course.name}" was removed.` });
       setSelectedCourseId("");
       await loadCourses();
-      setBatches([]);
-      setSections([]);
     } catch (error: any) {
-      toast({ title: "Error", description: error.message || "Failed to delete course.", variant: "destructive" });
+      toast({ title: "Cannot Delete Course", description: error.message || "Failed to delete course.", variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -193,21 +197,17 @@ export default function AdminCoursesPage() {
 
   const handleCreateBatch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedCourseId) {
-      toast({ title: "Validation Error", description: "Select a course first.", variant: "destructive" });
-      return;
-    }
     if (!batchForm.name.trim()) {
       toast({ title: "Validation Error", description: "Batch name is required.", variant: "destructive" });
       return;
     }
     setSaving(true);
     try {
-      const id = await createBatch({ courseId: selectedCourseId, name: batchForm.name });
+      const id = await createBatch({ name: batchForm.name });
       toast({ title: "Batch Created", description: `Batch "${batchForm.name}" added.` });
       setBatchModal(null);
       setBatchForm({ name: "" });
-      await loadBatches(selectedCourseId);
+      await loadBatches();
       setSelectedBatchId(id);
     } catch (error: any) {
       toast({ title: "Error", description: error.message || "Failed to create batch.", variant: "destructive" });
@@ -216,36 +216,21 @@ export default function AdminCoursesPage() {
     }
   };
 
-  const handleUpdateBatch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!batchModal?.batch) return;
-    if (!batchForm.name.trim()) {
-      toast({ title: "Validation Error", description: "Batch name is required.", variant: "destructive" });
-      return;
-    }
-    setSaving(true);
-    try {
-      await updateBatch(batchModal.batch.id, { courseId: selectedCourseId, name: batchForm.name });
-      toast({ title: "Batch Updated", description: `Batch renamed to "${batchForm.name}".` });
-      setBatchModal(null);
-      await loadBatches(selectedCourseId);
-    } catch (error: any) {
-      toast({ title: "Error", description: error.message || "Failed to update batch.", variant: "destructive" });
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleDeleteBatch = async (batch: BatchDoc) => {
-    if (!confirm(`Delete batch "${batch.name}"? This will also delete its sections.`)) return;
+    if (
+      !confirm(
+        `Delete batch "${batch.name}"? This also deletes its sections. It will be refused if any student or teacher assignment still uses it.`
+      )
+    )
+      return;
     setSaving(true);
     try {
       await deleteBatch(batch.id);
       toast({ title: "Batch Deleted", description: `Batch "${batch.name}" and its sections removed.` });
-      await loadBatches(selectedCourseId);
+      await loadBatches();
       setSections([]);
     } catch (error: any) {
-      toast({ title: "Error", description: error.message || "Failed to delete batch.", variant: "destructive" });
+      toast({ title: "Cannot Delete Batch", description: error.message || "Failed to delete batch.", variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -255,7 +240,7 @@ export default function AdminCoursesPage() {
 
   const handleCreateSection = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedBatchId || !selectedCourseId) {
+    if (!selectedBatchId) {
       toast({ title: "Validation Error", description: "Select a batch first.", variant: "destructive" });
       return;
     }
@@ -265,7 +250,7 @@ export default function AdminCoursesPage() {
     }
     setSaving(true);
     try {
-      await createSection({ batchId: selectedBatchId, courseId: selectedCourseId, name: sectionForm.name });
+      await createSection({ batchId: selectedBatchId, name: sectionForm.name });
       toast({ title: "Section Created", description: `Section "${sectionForm.name}" added.` });
       setSectionModal(null);
       setSectionForm({ name: "" });
@@ -277,35 +262,20 @@ export default function AdminCoursesPage() {
     }
   };
 
-  const handleUpdateSection = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!sectionModal?.section) return;
-    if (!sectionForm.name.trim()) {
-      toast({ title: "Validation Error", description: "Section name is required.", variant: "destructive" });
-      return;
-    }
-    setSaving(true);
-    try {
-      await updateSection(sectionModal.section.id, { batchId: selectedBatchId, name: sectionForm.name });
-      toast({ title: "Section Updated", description: `Section renamed to "${sectionForm.name}".` });
-      setSectionModal(null);
-      await loadSections(selectedBatchId);
-    } catch (error: any) {
-      toast({ title: "Error", description: error.message || "Failed to update section.", variant: "destructive" });
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleDeleteSection = async (section: SectionDoc) => {
-    if (!confirm(`Delete section "${section.name}"?`)) return;
+    if (
+      !confirm(
+        `Delete section "${section.name}"? It will be refused if any student or teacher assignment still uses it.`
+      )
+    )
+      return;
     setSaving(true);
     try {
       await deleteSection(section.id);
       toast({ title: "Section Deleted", description: `Section "${section.name}" removed.` });
       await loadSections(selectedBatchId);
     } catch (error: any) {
-      toast({ title: "Error", description: error.message || "Failed to delete section.", variant: "destructive" });
+      toast({ title: "Cannot Delete Section", description: error.message || "Failed to delete section.", variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -503,7 +473,8 @@ export default function AdminCoursesPage() {
                     <div>
                       <CardTitle className="text-base font-bold">Batches</CardTitle>
                       <CardDescription className="text-xs">
-                        Batches belong to a course. Names must be unique within a course.
+                        An intake cohort (e.g. 241). Batches are shared across all courses — a
+                        student belongs to exactly one. Names are permanent.
                       </CardDescription>
                     </div>
                     <Button
@@ -512,39 +483,20 @@ export default function AdminCoursesPage() {
                         setBatchForm({ name: "" });
                         setBatchModal({ mode: "add" });
                       }}
-                      disabled={!selectedCourseId || saving}
+                      disabled={saving}
                     >
                       <Plus className="h-3.5 w-3.5 mr-1" /> Add Batch
                     </Button>
                   </div>
                 </CardHeader>
                 <CardContent className="pt-4 space-y-4">
-                  {/* Course selector */}
-                  <div className="bg-gray-50 p-3 rounded-lg border">
-                    <Label className="text-xs font-semibold">Select Course</Label>
-                    <select
-                      className="w-full h-9 px-2 mt-1 rounded border text-xs bg-white"
-                      value={selectedCourseId}
-                      onChange={(e) => setSelectedCourseId(e.target.value)}
-                    >
-                      <option value="">-- Select a course --</option>
-                      {courses.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.code} - {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {!selectedCourseId ? (
-                    <p className="text-center text-xs text-gray-500 py-6">
-                      Select a course above to manage its batches.
-                    </p>
-                  ) : batches.length === 0 ? (
+                  {batches.length === 0 ? (
                     <div className="text-center py-8">
                       <Layers className="h-10 w-10 text-gray-300 mx-auto mb-2" />
-                      <p className="text-gray-500 font-medium text-sm">No batches for {selectedCourse?.name}.</p>
-                      <p className="text-xs text-gray-400 mt-1">Click "Add Batch" to create one.</p>
+                      <p className="text-gray-500 font-medium text-sm">No batches yet.</p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        Click &quot;Add Batch&quot; to create one, or seed the defaults.
+                      </p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
@@ -554,34 +506,21 @@ export default function AdminCoursesPage() {
                             <span className="text-sm font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded">
                               Batch {batch.name}
                             </span>
-                            <div className="flex gap-1">
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 w-7 p-0"
-                                onClick={() => {
-                                  setBatchForm({ name: batch.name });
-                                  setBatchModal({ mode: "edit", batch });
-                                }}
-                                disabled={saving}
-                                title="Edit Batch"
-                              >
-                                <Edit className="h-3.5 w-3.5 text-blue-600" />
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 w-7 p-0"
-                                onClick={() => handleDeleteBatch(batch)}
-                                disabled={saving}
-                                title="Delete Batch"
-                              >
-                                <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                              </Button>
-                            </div>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 w-7 p-0"
+                              onClick={() => handleDeleteBatch(batch)}
+                              disabled={saving}
+                              title="Delete Batch"
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                            </Button>
                           </div>
                           <p className="text-xs text-gray-500">
-                            {selectedCourse?.code} • {selectedCourse?.name}
+                            {sections.filter((s) => s.batchId === batch.id).length > 0
+                              ? `${sections.filter((s) => s.batchId === batch.id).length} section(s)`
+                              : "Manage sections in the Sections tab"}
                           </p>
                         </div>
                       ))}
@@ -599,7 +538,8 @@ export default function AdminCoursesPage() {
                     <div>
                       <CardTitle className="text-base font-bold">Sections</CardTitle>
                       <CardDescription className="text-xs">
-                        Sections belong to a batch. Names must be unique within a batch.
+                        Sections belong to a batch. Unique within their batch, so 241/D1 and
+                        232/D1 are different sections. Names are permanent.
                       </CardDescription>
                     </div>
                     <Button
@@ -615,48 +555,28 @@ export default function AdminCoursesPage() {
                   </div>
                 </CardHeader>
                 <CardContent className="pt-4 space-y-4">
-                  {/* Course & Batch selectors */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-gray-50 p-3 rounded-lg border">
-                    <div>
-                      <Label className="text-xs font-semibold">Course</Label>
-                      <select
-                        className="w-full h-9 px-2 mt-1 rounded border text-xs bg-white"
-                        value={selectedCourseId}
-                        onChange={(e) => {
-                          setSelectedCourseId(e.target.value);
-                          setSelectedBatchId("");
-                          setSections([]);
-                        }}
-                      >
-                        <option value="">-- Select a course --</option>
-                        {courses.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.code} - {c.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <Label className="text-xs font-semibold">Batch</Label>
-                      <select
-                        className="w-full h-9 px-2 mt-1 rounded border text-xs bg-white"
-                        value={selectedBatchId}
-                        onChange={(e) => setSelectedBatchId(e.target.value)}
-                        disabled={!selectedCourseId}
-                      >
-                        <option value="">{batches.length ? "-- Select a batch --" : "No batches in this course"}</option>
-                        {batches.map((b) => (
-                          <option key={b.id} value={b.id}>
-                            Batch {b.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                  {/* Batch selector. No course selector: sections hang off the
+                      batch alone, which is what makes a student's single
+                      `section` value unambiguous. */}
+                  <div className="bg-gray-50 p-3 rounded-lg border">
+                    <Label className="text-xs font-semibold">Batch</Label>
+                    <select
+                      className="w-full h-9 px-2 mt-1 rounded border text-xs bg-white"
+                      value={selectedBatchId}
+                      onChange={(e) => setSelectedBatchId(e.target.value)}
+                    >
+                      <option value="">{batches.length ? "-- Select a batch --" : "No batches yet"}</option>
+                      {batches.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          Batch {b.name}
+                        </option>
+                      ))}
+                    </select>
                   </div>
 
                   {!selectedBatchId ? (
                     <p className="text-center text-xs text-gray-500 py-6">
-                      Select a course and batch above to manage its sections.
+                      Select a batch above to manage its sections.
                     </p>
                   ) : sections.length === 0 ? (
                     <div className="text-center py-8">
@@ -674,31 +594,16 @@ export default function AdminCoursesPage() {
                             <span className="text-sm font-bold text-purple-700 bg-purple-100 px-2 py-0.5 rounded">
                               Section {section.name}
                             </span>
-                            <div className="flex gap-1">
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 w-7 p-0"
-                                onClick={() => {
-                                  setSectionForm({ name: section.name });
-                                  setSectionModal({ mode: "edit", section });
-                                }}
-                                disabled={saving}
-                                title="Edit Section"
-                              >
-                                <Edit className="h-3.5 w-3.5 text-blue-600" />
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 w-7 p-0"
-                                onClick={() => handleDeleteSection(section)}
-                                disabled={saving}
-                                title="Delete Section"
-                              >
-                                <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                              </Button>
-                            </div>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 w-7 p-0"
+                              onClick={() => handleDeleteSection(section)}
+                              disabled={saving}
+                              title="Delete Section"
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                            </Button>
                           </div>
                           <p className="text-xs text-gray-500">
                             Batch {selectedBatch?.name} • {selectedCourse?.code}
@@ -752,8 +657,8 @@ export default function AdminCoursesPage() {
 
       {/* ==================== BATCH MODAL ==================== */}
       {batchModal && (
-        <ModalShell title={batchModal.mode === "add" ? `Add Batch to ${selectedCourse?.name || "Course"}` : "Edit Batch"} onClose={() => setBatchModal(null)}>
-          <form onSubmit={batchModal.mode === "add" ? handleCreateBatch : handleUpdateBatch} className="space-y-4">
+        <ModalShell title="Add Batch" onClose={() => setBatchModal(null)}>
+          <form onSubmit={handleCreateBatch} className="space-y-4">
             <div className="space-y-1">
               <Label htmlFor="batchName" className="text-xs font-semibold">Batch Name *</Label>
               <Input
@@ -763,13 +668,16 @@ export default function AdminCoursesPage() {
                 placeholder="e.g. 241"
                 required
               />
-              <p className="text-[11px] text-gray-400">Batch names must be unique within a course.</p>
+              <p className="text-[11px] text-gray-400">
+                Globally unique. Permanent once created — students and teacher assignments
+                reference the batch by name.
+              </p>
             </div>
             <div className="flex justify-end gap-2 pt-2 border-t">
               <Button type="button" variant="outline" onClick={() => setBatchModal(null)}>Cancel</Button>
               <Button type="submit" disabled={saving}>
                 {saving ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Save className="h-4 w-4 mr-1" />}
-                {batchModal.mode === "add" ? "Create Batch" : "Save Changes"}
+                Create Batch
               </Button>
             </div>
           </form>
@@ -778,8 +686,8 @@ export default function AdminCoursesPage() {
 
       {/* ==================== SECTION MODAL ==================== */}
       {sectionModal && (
-        <ModalShell title={sectionModal.mode === "add" ? `Add Section to Batch ${selectedBatch?.name || ""}` : "Edit Section"} onClose={() => setSectionModal(null)}>
-          <form onSubmit={sectionModal.mode === "add" ? handleCreateSection : handleUpdateSection} className="space-y-4">
+        <ModalShell title={`Add Section to Batch ${selectedBatch?.name || ""}`} onClose={() => setSectionModal(null)}>
+          <form onSubmit={handleCreateSection} className="space-y-4">
             <div className="space-y-1">
               <Label htmlFor="sectionName" className="text-xs font-semibold">Section Name *</Label>
               <Input
@@ -789,13 +697,15 @@ export default function AdminCoursesPage() {
                 placeholder="e.g. D1"
                 required
               />
-              <p className="text-[11px] text-gray-400">Section names must be unique within a batch.</p>
+              <p className="text-[11px] text-gray-400">
+                Unique within this batch. Permanent once created.
+              </p>
             </div>
             <div className="flex justify-end gap-2 pt-2 border-t">
               <Button type="button" variant="outline" onClick={() => setSectionModal(null)}>Cancel</Button>
               <Button type="submit" disabled={saving}>
                 {saving ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Save className="h-4 w-4 mr-1" />}
-                {sectionModal.mode === "add" ? "Create Section" : "Save Changes"}
+                Create Section
               </Button>
             </div>
           </form>

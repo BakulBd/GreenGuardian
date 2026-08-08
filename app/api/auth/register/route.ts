@@ -11,11 +11,12 @@ import {
 import { sendEmail } from "@/lib/email/send";
 import { renderOtpEmail } from "@/lib/email/templates/otp";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
-import { isEmailRegistered, hasCompleteProfile } from "@/lib/firebase/user-lookup";
+import { isEmailRegistered } from "@/lib/firebase/user-lookup";
 import { getPending, upsertPending, deletePending } from "@/lib/registration-store";
 import { getAdminDb, isAdminSdkConfigured } from "@/lib/firebase/admin";
 
-import { validateName, validateEmail, validatePassword } from "@/lib/utils/validation";
+import { validateName, validateEmail, validateStudentCode } from "@/lib/utils/validation";
+import { validatePlacement } from "@/lib/server/enrollment";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,10 @@ interface RegisterBody {
   email?: string;
   password?: string;
   role?: string;
+  // Students only — their academic placement, validated against the catalog.
+  batch?: string;
+  section?: string;
+  studentCode?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -98,6 +103,33 @@ export async function POST(req: NextRequest) {
       { error: "Role must be either 'student' or 'teacher'." },
       { status: 400 }
     );
+  }
+
+  // 2b. Students must declare a batch + section, validated against the real
+  // catalog.
+  //
+  // This is the difference between a working account and an invisible one.
+  // Registration used to capture only name/email/password, so a new student
+  // landed with no placement, matched no teacher assignment, and got an empty
+  // `assignedTeacherIds` — which presents as "no notices, no exams, nothing".
+  // An admin had to notice and fix each one by hand.
+  //
+  // Validated server-side rather than trusted from the form: these two values
+  // decide whose exams and notices the account will receive.
+  let placement: { batch: string; section: string } | null = null;
+  let studentCode = "";
+  if (role === "student") {
+    const check = await validatePlacement({ batch: body.batch, section: body.section });
+    if (!check.ok) {
+      return NextResponse.json({ error: check.error }, { status: 400 });
+    }
+    placement = check.placement;
+
+    studentCode = (body.studentCode || "").trim();
+    const codeCheck = validateStudentCode(studentCode);
+    if (!codeCheck.isValid) {
+      return NextResponse.json({ error: codeCheck.error }, { status: 400 });
+    }
   }
 
   // 3. Check if the email is already registered in Firebase.
@@ -178,6 +210,8 @@ export async function POST(req: NextRequest) {
       lastSentAt: Date.now(),
       createdAt: existingPending?.createdAt || Date.now(),
       updatedAt: Date.now(),
+      ...(placement ? { batch: placement.batch, section: placement.section } : {}),
+      ...(studentCode ? { studentCode } : {}),
     });
   } catch (err: any) {
     console.error("[register] Failed to store pending registration:", err?.message || err);

@@ -48,6 +48,8 @@ function VerifyEmailContent() {
   const [loading, setLoading] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when verification failed because the email already has a real account.
+  const [accountExists, setAccountExists] = useState(false);
   const [success, setSuccess] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
   const [countdown, setCountdown] = useState(0);
@@ -156,6 +158,11 @@ function VerifyEmailContent() {
       if (!res.ok) {
         setError(data.error || "Verification failed. Please try again.");
         setOtp("");
+        // A 409 means the email already belongs to a usable account. Dropping
+        // the user on a bare error with only "Back to Registration" sends them
+        // in a loop back to the same 409 — offer sign-in and password reset,
+        // which are the two things that actually resolve it.
+        setAccountExists(res.status === 409 || !!data.canResetPassword);
         if (res.status === 410 || res.status === 404 || res.status === 409) {
           // Session is no longer usable — clear it.
           sessionStorage.removeItem(SESSION_KEY);
@@ -368,12 +375,32 @@ function VerifyEmailContent() {
                     <AlertTriangle className="h-7 w-7 text-amber-600" />
                   </div>
                   <p className="text-sm text-gray-600 mb-4">{error}</p>
-                  <Link href="/register" passHref>
-                    <Button className="w-full">
-                      <ArrowLeft className="h-4 w-4 mr-2" />
-                      Back to Registration
-                    </Button>
-                  </Link>
+                  {accountExists ? (
+                    <div className="space-y-2">
+                      <Link href="/login" passHref>
+                        <Button className="w-full">Sign In Instead</Button>
+                      </Link>
+                      <Link href="/forgot-password" passHref>
+                        <Button variant="outline" className="w-full">
+                          Reset My Password
+                        </Button>
+                      </Link>
+                      <Link
+                        href="/register"
+                        className="inline-flex items-center justify-center gap-1.5 w-full pt-1 text-sm text-gray-500 hover:text-gray-700"
+                      >
+                        <ArrowLeft className="h-4 w-4" />
+                        Back to Registration
+                      </Link>
+                    </div>
+                  ) : (
+                    <Link href="/register" passHref>
+                      <Button className="w-full">
+                        <ArrowLeft className="h-4 w-4 mr-2" />
+                        Back to Registration
+                      </Button>
+                    </Link>
+                  )}
                 </motion.div>
               ) : (
                 <form onSubmit={handleVerify} className="space-y-4 sm:space-y-5">
