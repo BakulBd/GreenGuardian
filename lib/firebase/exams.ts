@@ -93,11 +93,20 @@ export async function getExamsByTeacher(teacherId: string): Promise<Exam[]> {
   const q1 = query(collection(db, "exams"), where("teacherId", "==", teacherId));
   const q2 = query(collection(db, "exams"), where("createdBy", "==", teacherId));
 
-  const [snap1, snap2] = await Promise.all([getDocs(q1), getDocs(q2)]);
+  const [res1, res2] = await Promise.allSettled([getDocs(q1), getDocs(q2)]);
   const map = new Map<string, Exam>();
 
-  snap1.docs.forEach((doc) => map.set(doc.id, { ...doc.data(), id: doc.id } as Exam));
-  snap2.docs.forEach((doc) => map.set(doc.id, { ...doc.data(), id: doc.id } as Exam));
+  if (res1.status === "fulfilled") {
+    res1.value.docs.forEach((doc) => map.set(doc.id, { ...doc.data(), id: doc.id } as Exam));
+  } else {
+    console.warn("[getExamsByTeacher] teacherId query failed:", res1.reason);
+  }
+
+  if (res2.status === "fulfilled") {
+    res2.value.docs.forEach((doc) => map.set(doc.id, { ...doc.data(), id: doc.id } as Exam));
+  } else {
+    console.warn("[getExamsByTeacher] createdBy query failed:", res2.reason);
+  }
 
   const examsList = Array.from(map.values());
   return examsList.sort((a, b) => {
@@ -153,7 +162,8 @@ export async function updateExam(examId: string, data: Partial<Exam>): Promise<v
  */
 export function subscribeToStudentVisibleExams(
   studentId: string,
-  callback: (exams: Exam[]) => void
+  callback: (exams: Exam[]) => void,
+  onError?: (error: Error) => void
 ): () => void {
   const q = query(
     collection(db, "exams"),
@@ -165,7 +175,10 @@ export function subscribeToStudentVisibleExams(
     (snapshot) => {
       callback(snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Exam)));
     },
-    (error) => console.warn("[Exams] Student-visible exams subscription error:", error.code || error)
+    (error) => {
+      console.warn("[Exams] Student-visible exams subscription error:", error.code || error);
+      if (onError) onError(error as unknown as Error);
+    }
   );
 }
 

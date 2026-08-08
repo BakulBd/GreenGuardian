@@ -139,7 +139,7 @@ export async function restWriteUserDoc(
   // treated as an update, which Firestore rules DENY because there is no
   // existing `resource.data` to validate against — causing a 403.
   const res = await fetch(
-    `${FIRESTORE_REST}/users/${uid}?allowMissing=true&updateMask.fieldPaths=name&updateMask.fieldPaths=email&updateMask.fieldPaths=role&updateMask.fieldPaths=approved&updateMask.fieldPaths=rejected&updateMask.fieldPaths=emailVerified&updateMask.fieldPaths=createdAt&updateMask.fieldPaths=updatedAt`,
+    `${FIRESTORE_REST}/users/${uid}?allowMissing=true&updateMask.fieldPaths=id&updateMask.fieldPaths=name&updateMask.fieldPaths=email&updateMask.fieldPaths=role&updateMask.fieldPaths=approved&updateMask.fieldPaths=rejected&updateMask.fieldPaths=emailVerified&updateMask.fieldPaths=createdAt&updateMask.fieldPaths=updatedAt`,
     {
       method: "PATCH",
       headers: {

@@ -39,21 +39,27 @@ export default function ExamPage() {
     // at exam-creation time from the teacher's Course/Batch/Section
     // assignment — this query can only ever return exams this student is
     // actually allowed to see.
-    const unsubscribe = subscribeToStudentVisibleExams(user.id, (availableExams) => {
-      // Apply the same scheduling window the dashboard uses. Without it this
-      // page listed — and offered a live "Start Exam" button for — exams that
-      // hadn't opened yet or had already closed, so the two lists disagreed
-      // and a student could start an exam early via this route.
-      const now = new Date();
-      setExams(
-        availableExams.filter((e) => {
-          if (e.startDate && new Date(e.startDate as any) > now) return false;
-          if (e.endDate && new Date(e.endDate as any) < now) return false;
-          return true;
-        })
-      );
-      setLoading(false);
-    });
+    const unsubscribe = subscribeToStudentVisibleExams(
+      user.id,
+      (availableExams) => {
+        // Apply the same scheduling window the dashboard uses. Without it this
+        // page listed — and offered a live "Start Exam" button for — exams that
+        // hadn't opened yet or had already closed, so the two lists disagreed
+        // and a student could start an exam early via this route.
+        const now = new Date();
+        setExams(
+          availableExams.filter((e) => {
+            if (e.startDate && new Date(e.startDate as any) > now) return false;
+            if (e.endDate && new Date(e.endDate as any) < now) return false;
+            return true;
+          })
+        );
+        setLoading(false);
+      },
+      () => {
+        setLoading(false);
+      }
+    );
 
     return () => unsubscribe();
   }, [authLoading, user, router]);

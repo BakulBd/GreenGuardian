@@ -96,7 +96,7 @@ service cloud.firestore {
     // Exams collection
     match /exams/{examId} {
       // Teachers can read their own exams (any status).
-      allow read: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow read: if isTeacher() && (resource.data.teacherId == request.auth.uid || resource.data.createdBy == request.auth.uid);
       // Admins can read any exam.
       allow read: if isAdmin();
       // Students can only read an exam they were specifically targeted for —
@@ -123,13 +123,13 @@ service cloud.firestore {
                        request.resource.data.status in ['draft', 'published'];
 
       // Teachers can update their own exams
-      allow update: if isTeacher() && isActiveUser() && resource.data.teacherId == request.auth.uid;
+      allow update: if isTeacher() && isActiveUser() && (resource.data.teacherId == request.auth.uid || resource.data.createdBy == request.auth.uid);
       
       // Admins can update/delete any exam
       allow update, delete: if isAdmin();
       
       // Teachers can delete their own exams
-      allow delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
+      allow delete: if isTeacher() && (resource.data.teacherId == request.auth.uid || resource.data.createdBy == request.auth.uid);
     }
     
     // Questions collection

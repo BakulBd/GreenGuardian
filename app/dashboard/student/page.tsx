@@ -82,15 +82,21 @@ export default function StudentDashboardPage() {
     // guarantees this query can only return exams this student is actually
     // targeted for — the date-window check below is a display concern, not
     // a permission one.
-    const unsubscribe = subscribeToStudentVisibleExams(user.id, (allExams) => {
-      const now = new Date();
-      const exams = allExams.filter((exam) => {
-        if ((exam as any).startDate && new Date((exam as any).startDate) > now) return false;
-        if ((exam as any).endDate && new Date((exam as any).endDate) < now) return false;
-        return true;
-      });
-      setAvailableExams(exams as unknown as Exam[]);
-    });
+    const unsubscribe = subscribeToStudentVisibleExams(
+      user.id,
+      (allExams) => {
+        const now = new Date();
+        const exams = allExams.filter((exam) => {
+          if ((exam as any).startDate && new Date((exam as any).startDate) > now) return false;
+          if ((exam as any).endDate && new Date((exam as any).endDate) < now) return false;
+          return true;
+        });
+        setAvailableExams(exams as unknown as Exam[]);
+      },
+      (error) => {
+        console.warn("[StudentDashboard] Subscription error:", error);
+      }
+    );
     return () => unsubscribe();
   }, [user]);
 

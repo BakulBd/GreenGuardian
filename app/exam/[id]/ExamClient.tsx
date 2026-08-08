@@ -37,6 +37,7 @@ import {
   runTransaction,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
+import { getExam } from "@/lib/firebase/exams";
 import { 
   loadFaceDetectionModel, 
   disposeFaceDetectionModel,
@@ -593,8 +594,8 @@ export default function ExamClient() {
           // Keep the default on failure (e.g. offline) rather than blocking exam load.
         });
 
-      const examDoc = await getDoc(doc(db, "exams", examId));
-      if (!examDoc.exists()) {
+      const examData = (await getExam(examId)) as any;
+      if (!examData) {
         toast({
           title: "Error",
           description: "Exam not found",
@@ -603,8 +604,6 @@ export default function ExamClient() {
         router.push("/dashboard/student");
         return;
       }
-
-      const examData = { id: examDoc.id, ...examDoc.data() } as any;
       const now = new Date();
       const isPast = (examData.endDate && new Date(examData.endDate) < now) || examData.status === "archived";
 
