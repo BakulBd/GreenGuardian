@@ -85,6 +85,79 @@ async function backfillMemberTeacherIds() {
   return membersSnap;
 }
 
+
+/**
+ * Create the `teacher_student_mapping` rows that were never written.
+ *
+ * Mappings are only produced when an assignment is created or edited, resolving
+ * the group as it stood at that moment. A student who registered afterwards —
+ * or who was moved into the batch/section later — has no row, so they are
+ * missing from their teacher's roster and from every exam's targetStudentIds.
+ * This walks every student against every assignment and fills the gaps.
+ */
+async function backfillAssignmentMappings() {
+  const [assignmentsSnap, studentsSnap, mappingsSnap] = await Promise.all([
+    db.collection("teacher_assignments").get(),
+    db.collection("users").where("role", "==", "student").get(),
+    db.collection("teacher_student_mapping").get(),
+  ]);
+
+  const assignments = assignmentsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const students = studentsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+  const existing = new Set(
+    mappingsSnap.docs
+      .map((d) => d.data())
+      .filter((m) => m.assignmentId && m.studentId)
+      .map((m) => `${m.assignmentId}::${m.studentId}`)
+  );
+
+  let created = 0;
+  let batch = db.batch();
+  let pending = 0;
+
+  for (const a of assignments) {
+    for (const s of students) {
+      if (s.batch !== a.batchName) continue;
+      const sections = s.sections?.length ? s.sections : s.section ? [s.section] : [];
+      if (!a.sectionName || !sections.includes(a.sectionName)) continue;
+      if (s.courses?.length && !s.courses.includes(a.courseId)) continue;
+      if (a.studentIds?.length && !a.studentIds.includes(s.id)) continue;
+      if (existing.has(`${a.id}::${s.id}`)) continue;
+
+      batch.set(db.collection("teacher_student_mapping").doc(), {
+        teacherId: a.teacherId,
+        studentId: s.id,
+        studentName: s.name || "",
+        studentCode: s.studentCode || "",
+        courseId: a.courseId,
+        courseName: a.courseName || "",
+        batchId: a.batchId,
+        batchName: a.batchName || "",
+        sectionId: a.sectionId,
+        sectionName: a.sectionName || "",
+        assignmentId: a.id,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      created++;
+      pending++;
+
+      if (pending >= 400) {
+        await batch.commit();
+        batch = db.batch();
+        pending = 0;
+      }
+    }
+  }
+  if (pending > 0) await batch.commit();
+
+  console.log(
+    `teacher_student_mapping: created ${created} missing row(s) across ${assignments.length} assignment(s).`
+  );
+  return created;
+}
+
 async function recomputeAssignedTeacherIds(membersSnap) {
   const studentIds = new Set();
   membersSnap.docs.forEach((d) => d.data().studentId && studentIds.add(d.data().studentId));
@@ -213,6 +286,7 @@ async function backfillExamTargets() {
 (async () => {
   console.log("Starting classroom/exam access backfill...\n");
   const membersSnap = await backfillMemberTeacherIds();
+  await backfillAssignmentMappings();
   await recomputeAssignedTeacherIds(membersSnap);
   await backfillExamTargets();
   console.log("\nBackfill complete.");

@@ -1,43 +1,38 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   ArrowLeft,
   FileText,
   AlertTriangle,
+  AlertCircle,
   CheckCircle,
-  XCircle,
   Bot,
   Copy,
-  Users,
   Eye,
   BarChart,
   Loader2,
   Download,
   RefreshCcw,
-  Calendar,
   Clock,
   Filter,
-  Check,
   Search
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { doc, getDoc, collection, query, where, getDocs, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
-import { getSimilarityLevel, getSimilarityColor, SIMILARITY_THRESHOLDS, performSimilarityCheck } from "@/lib/utils/similarity";
-import { analyzeSubmittedAnswer, detectAIContent } from "@/lib/utils/ai-client";
+import { getSimilarityLevel, getSimilarityColor, performSimilarityCheck } from "@/lib/utils/similarity";
+import { analyzeSubmittedAnswer } from "@/lib/utils/ai-client";
 import { formatDate } from "@/lib/utils/helpers";
 import { getQuestionsByExam, getExamsByTeacher, getAnswersByTeacher } from "@/lib/firebase/exams";
-import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
 import { Exam } from "@/lib/types";
 
 interface Answer {
@@ -118,9 +113,10 @@ function AnswerReviewContent() {
   const [exam, setExam] = useState<Exam | null>(null);
   const [examsList, setExamsList] = useState<Exam[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
-  const [studentsMap, setStudentsMap] = useState<Map<string, StudentInfo>>(new Map());
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState<string | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
   const [selectedAnswer, setSelectedAnswer] = useState<Answer | null>(null);
 
   // Filters
@@ -140,6 +136,7 @@ function AnswerReviewContent() {
   const loadSubmissionsData = async () => {
     if (!user) return;
     setLoading(true);
+    setError(null);
 
     try {
       // 1. Fetch teacher exams
@@ -225,26 +222,29 @@ function AnswerReviewContent() {
       const studentIds = [...new Set(fetchedAnswers.map((a) => a.studentId).filter(Boolean))];
       const sMap = new Map<string, StudentInfo>();
 
-      for (const sId of studentIds) {
-        try {
-          const sDoc = await getDoc(doc(db, "users", sId));
-          if (sDoc.exists()) {
-            const data = sDoc.data();
-            sMap.set(sId, {
-              id: sId,
-              name: data.name || "Unknown Student",
-              email: data.email || "",
-              studentCode: data.studentCode || data.id?.substring(0, 8),
-              department: data.department || "CSE",
-              batch: data.batch || "",
-              section: data.section || (data.sections?.[0] ?? ""),
-            });
+      // One round trip per student, but issued together — sequentially awaiting
+      // these made the page take seconds to open on a real class.
+      await Promise.all(
+        studentIds.map(async (sId) => {
+          try {
+            const sDoc = await getDoc(doc(db, "users", sId));
+            if (sDoc.exists()) {
+              const data = sDoc.data();
+              sMap.set(sId, {
+                id: sId,
+                name: data.name || "Unknown Student",
+                email: data.email || "",
+                studentCode: data.studentCode || sId.substring(0, 8),
+                department: data.department || "",
+                batch: data.batch || "",
+                section: data.section || (data.sections?.[0] ?? ""),
+              });
+            }
+          } catch (e) {
+            console.error("Error fetching student record:", e);
           }
-        } catch (e) {
-          console.error("Error fetching student record:", e);
-        }
-      }
-      setStudentsMap(sMap);
+        })
+      );
 
       // Enriched answers with exam & student info fallback
       const enrichedAnswers = fetchedAnswers.map((a) => {
@@ -271,18 +271,22 @@ function AnswerReviewContent() {
       });
 
       setAnswers(enrichedAnswers);
-    } catch (error) {
-      console.error("Error loading submissions data:", error);
+    } catch (err) {
+      console.error("Error loading submissions data:", err);
+      setError("Could not load submissions. Check your connection and try again.");
       toast({ title: "Error", description: "Failed to load submissions", variant: "destructive" });
     } finally {
       setLoading(false);
     }
   };
 
-  const runOCRAnalysis = async (answer: Answer) => {
+  const runOCRAnalysis = async (
+    answer: Answer,
+    options: { silent?: boolean } = {}
+  ): Promise<boolean> => {
     if (!answer.answerFiles || answer.answerFiles.length === 0) {
       toast({ title: "Error", description: "No files to analyze", variant: "destructive" });
-      return;
+      return false;
     }
 
     setAnalyzing(answer.id);
@@ -326,29 +330,62 @@ function AnswerReviewContent() {
         );
       }
 
-      toast({ title: "Success", description: "Gemini 2.5 Flash OCR & similarity check completed!" });
+      if (!options.silent) {
+        toast({ title: "Analysis Complete", description: "OCR and similarity check finished." });
+      }
+      return true;
     } catch (error: any) {
       console.error("OCR analysis error:", error);
-      toast({ title: "Error", description: error.message || "Analysis failed", variant: "destructive" });
+      if (!options.silent) {
+        toast({
+          title: "Analysis Failed",
+          description: error.message || "Analysis failed",
+          variant: "destructive",
+        });
+      }
+      return false;
     } finally {
       setAnalyzing(null);
     }
   };
 
   const runBatchOCRAnalysis = async () => {
-    const unanalyzed = filteredAnswers.filter(a => a.answerFiles && a.answerFiles.length > 0 && !a.ocrAnalysis?.extractedText);
+    // Re-entrancy guard: the button used to stay live during a run, so a second
+    // click started a parallel pass over the same submissions — doubling the
+    // billable Gemini calls and racing two writes onto the same document.
+    if (batchProgress || analyzing) return;
+
+    const unanalyzed = filteredAnswers.filter(
+      (a) => a.answerFiles && a.answerFiles.length > 0 && !a.ocrAnalysis?.extractedText
+    );
     if (unanalyzed.length === 0) {
-      toast({ title: "Info", description: "All uploaded submissions have already been processed with OCR." });
+      toast({
+        title: "Nothing to process",
+        description: "Every uploaded submission in view has already been analyzed.",
+      });
       return;
     }
 
-    toast({ title: "Batch Processing Started", description: `Processing ${unanalyzed.length} submission(s) with Gemini 2.5 Flash...` });
+    setBatchProgress({ done: 0, total: unanalyzed.length });
+    let succeeded = 0;
+    let failed = 0;
 
-    for (const ans of unanalyzed) {
-      await runOCRAnalysis(ans);
+    for (let i = 0; i < unanalyzed.length; i++) {
+      const ok = await runOCRAnalysis(unanalyzed[i], { silent: true });
+      if (ok) succeeded++;
+      else failed++;
+      setBatchProgress({ done: i + 1, total: unanalyzed.length });
     }
 
-    toast({ title: "Batch Completed", description: `Finished processing ${unanalyzed.length} submission(s).` });
+    setBatchProgress(null);
+    toast({
+      title: failed === 0 ? "Batch Completed" : "Batch Finished With Errors",
+      description:
+        failed === 0
+          ? `Analyzed ${succeeded} submission${succeeded !== 1 ? "s" : ""}.`
+          : `Analyzed ${succeeded}, failed ${failed}. Re-run OCR on the failed rows individually to see why.`,
+      variant: failed === 0 ? undefined : "destructive",
+    });
   };
 
   const getOCRBadge = (answer: Answer) => {
@@ -377,6 +414,30 @@ function AnswerReviewContent() {
     }
     return <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-300">Pending OCR</Badge>;
   };
+
+  // Filter options are derived from the submissions themselves. They used to
+  // come from the hardcoded DEFAULT_* catalog, whose course ids never match the
+  // Firestore course documents these records reference — selecting any course
+  // silently emptied the list.
+  const courseOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    answers.forEach((a) => {
+      if (a.courseId) byId.set(a.courseId, a.courseName || a.courseId);
+    });
+    return Array.from(byId, ([id, name]) => ({ id, name })).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+  }, [answers]);
+
+  const batchOptions = useMemo(
+    () => Array.from(new Set(answers.map((a) => a.batch).filter(Boolean) as string[])).sort(),
+    [answers]
+  );
+
+  const sectionOptions = useMemo(
+    () => Array.from(new Set(answers.map((a) => a.section).filter(Boolean) as string[])).sort(),
+    [answers]
+  );
 
   // Dynamic Filtering Logic
   const filteredAnswers = answers.filter((a) => {
@@ -422,6 +483,10 @@ function AnswerReviewContent() {
     return true;
   });
 
+  const pendingOcrCount = filteredAnswers.filter(
+    (a) => a.answerFiles && a.answerFiles.length > 0 && !a.ocrAnalysis?.extractedText
+  ).length;
+
   if (loading) {
     return (
       <DashboardLayout role="teacher">
@@ -456,16 +521,45 @@ function AnswerReviewContent() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={runBatchOCRAnalysis} className="gap-2 border-purple-300 text-purple-700 hover:bg-purple-50">
-              <Bot className="h-4 w-4 text-purple-600" />
-              Batch Gemini 2.5 Flash OCR
+            <Button
+              variant="outline"
+              onClick={runBatchOCRAnalysis}
+              disabled={!!batchProgress || !!analyzing || pendingOcrCount === 0}
+              className="gap-2 border-purple-300 text-purple-700 hover:bg-purple-50"
+            >
+              {batchProgress ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Analyzing {batchProgress.done}/{batchProgress.total}
+                </>
+              ) : (
+                <>
+                  <Bot className="h-4 w-4 text-purple-600" />
+                  Run OCR on {pendingOcrCount} Pending
+                </>
+              )}
             </Button>
-            <Button variant="outline" onClick={loadSubmissionsData} className="gap-2">
-              <RefreshCcw className="h-4 w-4" />
+            <Button
+              variant="outline"
+              onClick={loadSubmissionsData}
+              disabled={loading || !!batchProgress}
+              className="gap-2"
+            >
+              <RefreshCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               Refresh Results
             </Button>
           </div>
         </div>
+
+        {error && (
+          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">{error}</div>
+            <Button size="sm" variant="outline" onClick={loadSubmissionsData}>
+              Retry
+            </Button>
+          </div>
+        )}
 
         {/* Overview Stats */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -581,9 +675,9 @@ function AnswerReviewContent() {
                   onChange={(e) => setSelectedCourse(e.target.value)}
                 >
                   <option value="all">All Courses</option>
-                  {DEFAULT_COURSES.map((c) => (
+                  {courseOptions.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.code} - {c.name}
+                      {c.name}
                     </option>
                   ))}
                 </select>
@@ -598,9 +692,9 @@ function AnswerReviewContent() {
                   onChange={(e) => setSelectedBatch(e.target.value)}
                 >
                   <option value="all">All Batches</option>
-                  {DEFAULT_BATCHES.map((b) => (
-                    <option key={b.id} value={b.name}>
-                      Batch {b.name}
+                  {batchOptions.map((b) => (
+                    <option key={b} value={b}>
+                      Batch {b}
                     </option>
                   ))}
                 </select>
@@ -615,9 +709,9 @@ function AnswerReviewContent() {
                   onChange={(e) => setSelectedSection(e.target.value)}
                 >
                   <option value="all">All Sections</option>
-                  {DEFAULT_SECTIONS.map((s) => (
-                    <option key={s.id} value={s.name}>
-                      Section {s.name}
+                  {sectionOptions.map((sec) => (
+                    <option key={sec} value={sec}>
+                      Section {sec}
                     </option>
                   ))}
                 </select>
@@ -742,7 +836,7 @@ function AnswerReviewContent() {
                               size="sm"
                               variant="outline"
                               onClick={() => runOCRAnalysis(answer)}
-                              disabled={analyzing === answer.id}
+                              disabled={!!analyzing || !!batchProgress}
                               className="text-xs"
                             >
                               {analyzing === answer.id ? (

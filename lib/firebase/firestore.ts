@@ -85,9 +85,9 @@ export async function getDashboardStats() {
     getDocs(collection(db, "examSessions")),
   ]);
 
-  const users = usersSnapshot.docs.map((doc) => doc.data());
-  const exams = examsSnapshot.docs.map((doc) => doc.data());
-  const sessions = sessionsSnapshot.docs.map((doc) => doc.data());
+  const users = usersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }) as any);
+  const exams = examsSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }) as any);
+  const sessions = sessionsSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }) as any);
 
   const totalStudents = users.filter((u) => u.role === "student").length;
   const totalTeachers = users.filter((u) => u.role === "teacher" && u.approved).length;
@@ -98,6 +98,81 @@ export async function getDashboardStats() {
   const activeExams = exams.filter((e) => e.status === "active").length;
   const flaggedSessions = sessions.filter((s) => s.flagged).length;
 
+  // Sessions still open right now, using the same heartbeat window the
+  // invigilation views use, so the dashboard and Watch Live agree.
+  const now = Date.now();
+  const liveSessions = sessions.filter((s) => {
+    if (s.submitted === true) return false;
+    if (s.status && s.status !== "in-progress" && s.status !== "started") return false;
+    const last = toMillis(s.updatedAt || s.startTime);
+    return last > 0 && now - last < 90_000;
+  }).length;
+
+  const publishedExams = exams.filter(
+    (e) => e.status === "published" || e.status === "active"
+  ).length;
+  const submittedSessions = sessions.filter(
+    (s) => s.submitted === true || s.status === "submitted" || s.status === "auto-submitted"
+  ).length;
+  const suspendedAccounts = users.filter(
+    (u) => u.status === "hold" || u.status === "suspended"
+  ).length;
+
+  // A single recent-activity feed built from records that already exist —
+  // newest first. The dashboard card used to render a hardcoded
+  // "No recent activity" string that never changed no matter what happened.
+  const activity: Array<{
+    id: string;
+    kind: "user" | "exam" | "session";
+    message: string;
+    detail?: string;
+    at: number;
+  }> = [];
+
+  users.forEach((u) => {
+    const at = toMillis(u.createdAt);
+    if (!at) return;
+    activity.push({
+      id: `user-${u.id}`,
+      kind: "user",
+      message:
+        u.role === "teacher"
+          ? `${u.name || "A teacher"} registered as a teacher`
+          : `${u.name || "A student"} registered`,
+      detail:
+        u.role === "teacher" && !u.approved && !u.rejected ? "Awaiting approval" : undefined,
+      at,
+    });
+  });
+
+  exams.forEach((e) => {
+    const at = toMillis(e.createdAt);
+    if (!at) return;
+    activity.push({
+      id: `exam-${e.id}`,
+      kind: "exam",
+      message: `Exam "${e.title || "Untitled"}" created`,
+      detail: e.teacherName ? `by ${e.teacherName}` : undefined,
+      at,
+    });
+  });
+
+  sessions.forEach((s) => {
+    const at = toMillis(s.completedAt || s.startTime);
+    if (!at) return;
+    activity.push({
+      id: `session-${s.id}`,
+      kind: "session",
+      message: `${s.studentName || "A student"} ${
+        s.submitted ? "submitted" : "started"
+      } ${s.examTitle ? `"${s.examTitle}"` : "an exam"}`,
+      detail: s.flagged ? "Flagged for review" : undefined,
+      at,
+    });
+  });
+
+  activity.sort((a, b) => b.at - a.at);
+
   return {
     totalStudents,
     totalTeachers,
@@ -105,5 +180,19 @@ export async function getDashboardStats() {
     activeExams,
     pendingApprovals,
     flaggedSessions,
+    liveSessions,
+    publishedExams,
+    submittedSessions,
+    suspendedAccounts,
+    recentActivity: activity.slice(0, 8),
   };
+}
+
+/** Firestore Timestamp | Date | ISO string -> epoch ms (0 when unusable). */
+function toMillis(value: any): number {
+  if (!value) return 0;
+  if (typeof value?.toDate === "function") return value.toDate().getTime();
+  const d = new Date(value);
+  const t = d.getTime();
+  return Number.isNaN(t) ? 0 : t;
 }

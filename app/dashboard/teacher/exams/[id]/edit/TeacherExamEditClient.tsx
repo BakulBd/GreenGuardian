@@ -149,6 +149,20 @@ export default function TeacherExamEditClient() {
       toast({ title: "Error", description: "Please select the Course, Batch, and Section this exam is for.", variant: "destructive" });
       return;
     }
+    // Students only see an exam inside its start/end window; an inverted window
+    // hides it from everyone.
+    if (
+      editedExam.startDate &&
+      editedExam.endDate &&
+      new Date(editedExam.endDate) <= new Date(editedExam.startDate)
+    ) {
+      toast({
+        title: "Invalid schedule",
+        description: "The end date must be after the start date.",
+        variant: "destructive",
+      });
+      return;
+    }
 
     setSaving(true);
     try {

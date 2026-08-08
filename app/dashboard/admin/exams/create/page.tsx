@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,8 +8,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ArrowLeft, Save, Loader2, Plus, Trash2 } from "lucide-react";
-import { createExam, createQuestion } from "@/lib/firebase/exams";
+import { ArrowLeft, Save, Loader2, Plus, Trash2, AlertCircle } from "lucide-react";
+import {
+  createExam,
+  createQuestion,
+  getGlobalProctoringDefaults,
+  notifyExamPublished,
+} from "@/lib/firebase/exams";
+import {
+  getAllAssignments,
+  groupAssignmentsByCourse,
+  computeAssignmentTargetStudentIds,
+  AssignedCatalogEntry,
+} from "@/lib/firebase/assignments";
+import { getUsersByRole } from "@/lib/firebase/firestore";
+import { TeacherAssignment, User as UserType } from "@/lib/types";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -27,7 +40,10 @@ export default function CreateExamPage() {
   const { user } = useAuth();
   const { toast } = useToast();
   const [saving, setSaving] = useState(false);
-  
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [teachers, setTeachers] = useState<UserType[]>([]);
+  const [assignments, setAssignments] = useState<TeacherAssignment[]>([]);
+
   const [examData, setExamData] = useState({
     title: "",
     description: "",
@@ -35,9 +51,58 @@ export default function CreateExamPage() {
     totalMarks: 100,
     passingMarks: 40,
     instructions: "",
+    teacherId: "",
+    courseId: "",
+    batchId: "",
+    sectionId: "",
   });
 
   const [questions, setQuestions] = useState<QuestionForm[]>([]);
+
+  // An exam has to belong to a teacher and a Course/Batch/Section: students see
+  // an exam through `targetStudentIds`, which is resolved from that teacher's
+  // admin assignment. This page used to create exams with `teacherId` set to
+  // the *admin*, no course, batch or section, and therefore no targets — so an
+  // admin-created exam was invisible to every student no matter its status.
+  useEffect(() => {
+    (async () => {
+      try {
+        const [teacherUsers, allAssignments] = await Promise.all([
+          getUsersByRole("teacher"),
+          getAllAssignments(),
+        ]);
+        setTeachers(teacherUsers.filter((t) => t.approved && !t.rejected));
+        setAssignments(allAssignments);
+      } catch (err) {
+        console.error("Failed to load teachers/assignments:", err);
+        toast({
+          title: "Error",
+          description: "Could not load teachers and their assigned courses.",
+          variant: "destructive",
+        });
+      } finally {
+        setCatalogLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const teacherCatalog: AssignedCatalogEntry[] = useMemo(
+    () =>
+      examData.teacherId
+        ? groupAssignmentsByCourse(
+            assignments.filter((a) => a.teacherId === examData.teacherId)
+          )
+        : [],
+    [assignments, examData.teacherId]
+  );
+
+  const selectedCourse = teacherCatalog.find((c) => c.courseId === examData.courseId);
+  const selectedBatch = selectedCourse?.batches.find((b) => b.batchId === examData.batchId);
+  const teachersWithAssignments = useMemo(() => {
+    const ids = new Set(assignments.map((a) => a.teacherId));
+    return teachers.filter((t) => ids.has(t.id));
+  }, [teachers, assignments]);
 
   const addQuestion = () => {
     setQuestions([
@@ -69,21 +134,76 @@ export default function CreateExamPage() {
     setQuestions(questions.filter((_, i) => i !== index));
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!user) return;
+  const validate = (status: "draft" | "published"): string | null => {
+    if (!examData.title.trim()) return "Please enter an exam title.";
+    if (!examData.teacherId) return "Please choose the teacher who owns this exam.";
+    if (!examData.courseId || !examData.batchId || !examData.sectionId) {
+      return "Please choose the Course, Batch and Section this exam targets.";
+    }
+    if (examData.duration < 1) return "Duration must be at least 1 minute.";
+    if (examData.totalMarks < 1) return "Total marks must be at least 1.";
+    if (examData.passingMarks < 0 || examData.passingMarks > examData.totalMarks) {
+      return "Passing marks must be between 0 and the total marks.";
+    }
 
-    if (!examData.title.trim()) {
-      toast({
-        title: "Validation Error",
-        description: "Please enter an exam title",
-        variant: "destructive",
-      });
+    if (status === "published") {
+      // An exam with no questions cannot be sat, so it must not reach students.
+      if (questions.length === 0) {
+        return "Add at least one question before publishing. Save as a draft instead.";
+      }
+      for (const [i, q] of questions.entries()) {
+        if (!q.text.trim()) return `Question ${i + 1} has no text.`;
+        if (q.marks < 1) return `Question ${i + 1} must be worth at least 1 mark.`;
+        if (q.type === "multiple-choice") {
+          const filled = q.options.filter((o) => o.trim());
+          if (filled.length < 2) return `Question ${i + 1} needs at least two options.`;
+          if (!q.correctAnswer.trim()) return `Question ${i + 1} has no correct answer selected.`;
+        }
+      }
+    }
+    return null;
+  };
+
+  const handleSubmit = async (
+    e: React.FormEvent,
+    status: "draft" | "published" = "draft"
+  ) => {
+    e.preventDefault();
+    if (!user || saving) return;
+
+    const problem = validate(status);
+    if (problem) {
+      toast({ title: "Validation Error", description: problem, variant: "destructive" });
       return;
     }
 
     setSaving(true);
     try {
+      const [proctoringDefaults, targetStudentIds] = await Promise.all([
+        getGlobalProctoringDefaults(),
+        computeAssignmentTargetStudentIds(
+          examData.teacherId,
+          examData.courseId,
+          examData.batchId,
+          examData.sectionId
+        ),
+      ]);
+
+      if (status === "published" && targetStudentIds.length === 0) {
+        toast({
+          title: "No students in this group",
+          description:
+            "Nobody is enrolled in that Course/Batch/Section, so publishing would reach no one. Save it as a draft instead.",
+          variant: "destructive",
+        });
+        setSaving(false);
+        return;
+      }
+
+      const courseEntry = teacherCatalog.find((c) => c.courseId === examData.courseId);
+      const batchEntry = courseEntry?.batches.find((b) => b.batchId === examData.batchId);
+      const sectionEntry = batchEntry?.sections.find((s) => s.sectionId === examData.sectionId);
+
       // Create exam
       const examId = await createExam({
         title: examData.title,
@@ -92,8 +212,17 @@ export default function CreateExamPage() {
         totalMarks: examData.totalMarks,
         passingMarks: examData.passingMarks,
         instructions: examData.instructions,
-        teacherId: user.id,
-        status: "draft",
+        teacherId: examData.teacherId,
+        teacherName: teachers.find((t) => t.id === examData.teacherId)?.name,
+        courseId: examData.courseId,
+        courseName: courseEntry?.courseName,
+        batchId: examData.batchId,
+        batch: batchEntry?.batchName,
+        sectionId: examData.sectionId,
+        section: sectionEntry?.sectionName,
+        targetStudentIds,
+        createdBy: user.id,
+        status,
         questionCount: questions.length,
         settings: {
           requireWebcam: true,
@@ -106,11 +235,7 @@ export default function CreateExamPage() {
           allowedLateSubmission: false,
           showResults: true,
           allowReview: true,
-          proctoring: {
-            faceDetection: true,
-            tabSwitchDetection: true,
-            fullscreenRequired: true,
-          },
+          proctoring: proctoringDefaults,
         },
       });
 
@@ -128,9 +253,18 @@ export default function CreateExamPage() {
         });
       }
 
+      if (status === "published" && targetStudentIds.length > 0) {
+        notifyExamPublished(examId, targetStudentIds).catch((err) =>
+          console.warn("[AdminCreateExam] Failed to send publish notifications:", err)
+        );
+      }
+
       toast({
-        title: "Exam Created",
-        description: "Your exam has been created successfully.",
+        title: status === "draft" ? "Draft Saved" : "Exam Published",
+        description:
+          status === "draft"
+            ? "The exam was saved as a draft. Publish it when the questions are ready."
+            : `Published to ${targetStudentIds.length} student${targetStudentIds.length !== 1 ? "s" : ""}.`,
       });
 
       router.push("/dashboard/admin/exams");
@@ -159,7 +293,131 @@ export default function CreateExamPage() {
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
+        <form onSubmit={(e) => handleSubmit(e, "draft")} className="space-y-6">
+          {/* Ownership & audience */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Teacher &amp; Audience</CardTitle>
+              <CardDescription>
+                Who owns this exam, and which group of students can see it
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {catalogLoading ? (
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading teachers and assigned courses...
+                </div>
+              ) : teachersWithAssignments.length === 0 ? (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                  <div>
+                    No approved teacher has a course assignment yet. Create one under{" "}
+                    <strong>Assignments</strong> first — an exam needs a teacher and a
+                    Course/Batch/Section to reach any student.
+                  </div>
+                </div>
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="teacher">Teacher *</Label>
+                    <select
+                      id="teacher"
+                      className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm"
+                      value={examData.teacherId}
+                      onChange={(e) =>
+                        setExamData({
+                          ...examData,
+                          teacherId: e.target.value,
+                          courseId: "",
+                          batchId: "",
+                          sectionId: "",
+                        })
+                      }
+                    >
+                      <option value="">Select a teacher</option>
+                      {teachersWithAssignments.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} ({t.email})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="course">Course *</Label>
+                    <select
+                      id="course"
+                      className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm disabled:bg-gray-50"
+                      value={examData.courseId}
+                      disabled={!examData.teacherId}
+                      onChange={(e) =>
+                        setExamData({
+                          ...examData,
+                          courseId: e.target.value,
+                          batchId: "",
+                          sectionId: "",
+                        })
+                      }
+                    >
+                      <option value="">
+                        {examData.teacherId ? "Select a course" : "Choose a teacher first"}
+                      </option>
+                      {teacherCatalog.map((c) => (
+                        <option key={c.courseId} value={c.courseId}>
+                          {c.courseCode ? `${c.courseCode} — ` : ""}
+                          {c.courseName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="batch">Batch *</Label>
+                    <select
+                      id="batch"
+                      className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm disabled:bg-gray-50"
+                      value={examData.batchId}
+                      disabled={!examData.courseId}
+                      onChange={(e) =>
+                        setExamData({ ...examData, batchId: e.target.value, sectionId: "" })
+                      }
+                    >
+                      <option value="">
+                        {examData.courseId ? "Select a batch" : "Choose a course first"}
+                      </option>
+                      {(selectedCourse?.batches ?? []).map((b) => (
+                        <option key={b.batchId} value={b.batchId}>
+                          Batch {b.batchName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="section">Section *</Label>
+                    <select
+                      id="section"
+                      className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm disabled:bg-gray-50"
+                      value={examData.sectionId}
+                      disabled={!examData.batchId}
+                      onChange={(e) => setExamData({ ...examData, sectionId: e.target.value })}
+                    >
+                      <option value="">
+                        {examData.batchId ? "Select a section" : "Choose a batch first"}
+                      </option>
+                      {(selectedBatch?.sections ?? []).map((sec) => (
+                        <option key={sec.sectionId} value={sec.sectionId}>
+                          Section {sec.sectionName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Exam Details */}
           <Card>
             <CardHeader>
@@ -343,22 +601,25 @@ export default function CreateExamPage() {
           </Card>
 
           {/* Submit */}
-          <div className="flex justify-end gap-4">
-            <Button type="button" variant="outline" onClick={() => router.back()}>
+          <div className="flex flex-col sm:flex-row justify-end gap-3">
+            <Button type="button" variant="outline" onClick={() => router.back()} disabled={saving}>
               Cancel
             </Button>
-            <Button type="submit" disabled={saving}>
+            <Button type="submit" variant="outline" disabled={saving || catalogLoading}>
               {saving ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Creating...
-                </>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (
-                <>
-                  <Save className="mr-2 h-4 w-4" />
-                  Create Exam
-                </>
+                <Save className="mr-2 h-4 w-4" />
               )}
+              Save as Draft
+            </Button>
+            <Button
+              type="button"
+              onClick={(e) => handleSubmit(e, "published")}
+              disabled={saving || catalogLoading}
+            >
+              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Publish Exam
             </Button>
           </div>
         </form>

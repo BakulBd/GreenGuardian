@@ -5,10 +5,20 @@ import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
-import { FileText, Users, Shield, Plus, TrendingUp, Camera, BookOpen, Megaphone } from "lucide-react";
+import {
+  FileText,
+  Users,
+  Plus,
+  TrendingUp,
+  Camera,
+  BookOpen,
+  Megaphone,
+  School,
+  AlertCircle,
+  Image as ImageIcon,
+} from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { getExamsByTeacher, getSessionsByExam } from "@/lib/firebase/exams";
-import { getUsersByRole } from "@/lib/firebase/firestore";
+import { getExamsByTeacher } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
 import {
   getAssignmentsByTeacher,
@@ -21,6 +31,7 @@ export default function TeacherDashboard() {
   const [assignedStudentsCount, setAssignedStudentsCount] = useState(0);
   const [assignedCoursesCount, setAssignedCoursesCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (user) {
@@ -31,6 +42,7 @@ export default function TeacherDashboard() {
   const loadDashboardData = async () => {
     try {
       if (!user) return;
+      setError(null);
 
       const [teacherExams, assignments, students] = await Promise.all([
         getExamsByTeacher(user.id),
@@ -47,8 +59,9 @@ export default function TeacherDashboard() {
       // Count unique assigned students
       const uniqueStudents = new Set(students.map((s) => s.studentId));
       setAssignedStudentsCount(uniqueStudents.size);
-    } catch (error) {
-      console.error("Error loading dashboard data:", error);
+    } catch (err) {
+      console.error("Error loading dashboard data:", err);
+      setError("Could not load your dashboard. Check your connection and try again.");
     } finally {
       setLoading(false);
     }
@@ -60,6 +73,13 @@ export default function TeacherDashboard() {
   const activeExams = exams.filter(
     (e) => e.status === "active" || e.status === "published"
   ).length;
+
+  const examCounts = {
+    draft: exams.filter((e) => e.status === "draft").length,
+    published: exams.filter((e) => e.status === "published").length,
+    active: exams.filter((e) => e.status === "active").length,
+    completed: exams.filter((e) => e.status === "completed").length,
+  };
 
   return (
     <DashboardLayout role="teacher">
@@ -78,6 +98,27 @@ export default function TeacherDashboard() {
             </Button>
           </Link>
         </div>
+
+        {error && (
+          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">{error}</div>
+            <Button size="sm" variant="outline" onClick={loadDashboardData}>
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {!loading && !error && assignedCoursesCount === 0 && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div>
+              No courses are assigned to you yet. Ask an administrator to assign a
+              Course, Batch and Section — exams and notices you create can only reach
+              students inside your assignments.
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <StatCard
@@ -157,81 +198,101 @@ export default function TeacherDashboard() {
           <Card>
             <CardHeader>
               <CardTitle>Quick Actions</CardTitle>
+              <CardDescription>Jump straight to the things you do most</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-                <Link href="/dashboard/teacher/notices">
-                  <Button variant="outline" className="w-full justify-start text-purple-700 bg-purple-50/50 border-purple-200 hover:bg-purple-100">
-                    <Megaphone className="h-4 w-4 mr-2" />
-                    Manage Notices
-                  </Button>
-                </Link>
-                <Link href="/dashboard/teacher/courses">
-                  <Button variant="outline" className="w-full justify-start text-emerald-700 bg-emerald-50/50 border-emerald-200 hover:bg-emerald-100">
-                    <BookOpen className="h-4 w-4 mr-2" />
-                    My Assigned Courses
-                  </Button>
-                </Link>
                 <Link href="/dashboard/teacher/exams/create">
                   <Button variant="outline" className="w-full justify-start">
                     <Plus className="h-4 w-4 mr-2" />
                     Create New Exam
                   </Button>
                 </Link>
-                <Link href="/dashboard/teacher/monitoring">
-                  <Button variant="outline" className="w-full justify-start">
-                    <Shield className="h-4 w-4 mr-2" />
-                    Monitor Active Sessions
-                  </Button>
-                </Link>
                 <Link href="/dashboard/teacher/watch-live">
                   <Button variant="outline" className="w-full justify-start">
                     <Camera className="h-4 w-4 mr-2" />
-                    Watch Live
+                    Watch Live Exam Sessions
                   </Button>
                 </Link>
-                <Link href="/dashboard/teacher/students">
+                <Link href="/dashboard/teacher/answers">
                   <Button variant="outline" className="w-full justify-start">
-                    <Users className="h-4 w-4 mr-2" />
-                    View My Students
+                    <FileText className="h-4 w-4 mr-2" />
+                    Review Submissions &amp; OCR
+                  </Button>
+                </Link>
+                <Link href="/dashboard/teacher/classrooms">
+                  <Button variant="outline" className="w-full justify-start">
+                    <School className="h-4 w-4 mr-2" />
+                    My Classrooms
+                  </Button>
+                </Link>
+                <Link href="/dashboard/teacher/notices">
+                  <Button variant="outline" className="w-full justify-start">
+                    <Megaphone className="h-4 w-4 mr-2" />
+                    Manage Notices
+                  </Button>
+                </Link>
+                <Link href="/dashboard/teacher/snapshots">
+                  <Button variant="outline" className="w-full justify-start">
+                    <ImageIcon className="h-4 w-4 mr-2" />
+                    Proctoring Snapshots
                   </Button>
                 </Link>
               </div>
             </CardContent>
           </Card>
 
+          {/* Real, derived numbers. The panel that used to sit here reported
+              "Proctoring: Active / Face Detection: Active" from hardcoded
+              strings — it was the same green regardless of system state. */}
           <Card>
             <CardHeader>
-              <CardTitle>System Status</CardTitle>
+              <CardTitle>Exam Pipeline</CardTitle>
+              <CardDescription>Where your exams currently stand</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Proctoring</span>
-                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">Active</span>
+              {loading ? (
+                <div className="space-y-3">
+                  {[0, 1, 2, 3].map((i) => (
+                    <div key={i} className="h-6 bg-gray-100 rounded animate-pulse" />
+                  ))}
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Plagiarism Detection</span>
-                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">Active</span>
+              ) : exams.length === 0 ? (
+                <div className="py-6 text-center">
+                  <FileText className="h-10 w-10 text-gray-300 mx-auto mb-3" />
+                  <p className="text-sm text-gray-500">
+                    Nothing here yet. Your exams will be summarised once you create one.
+                  </p>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Face Detection</span>
-                  <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">Active</span>
+              ) : (
+                <div className="space-y-3">
+                  <PipelineRow label="Drafts" count={examCounts.draft} tone="bg-gray-100 text-gray-700" />
+                  <PipelineRow label="Published" count={examCounts.published} tone="bg-blue-100 text-blue-700" />
+                  <PipelineRow label="Active now" count={examCounts.active} tone="bg-green-100 text-green-700" />
+                  <PipelineRow label="Completed" count={examCounts.completed} tone="bg-purple-100 text-purple-700" />
+                  <div className="pt-2 border-t">
+                    <Link href="/dashboard/teacher/exams">
+                      <Button variant="outline" size="sm" className="w-full">
+                        View all exams
+                      </Button>
+                    </Link>
+                  </div>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Assigned Courses</span>
-                  <span className="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-700">{assignedCoursesCount}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Assigned Students</span>
-                  <span className="text-xs px-2 py-1 rounded-full bg-purple-100 text-purple-700">{assignedStudentsCount}</span>
-                </div>
-              </div>
+              )}
             </CardContent>
           </Card>
         </div>
       </div>
     </DashboardLayout>
+  );
+}
+
+function PipelineRow({ label, count, tone }: { label: string; count: number; tone: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-sm text-gray-600">{label}</span>
+      <span className={`text-xs font-semibold px-2 py-1 rounded-full ${tone}`}>{count}</span>
+    </div>
   );
 }
 

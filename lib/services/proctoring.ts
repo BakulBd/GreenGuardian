@@ -384,7 +384,8 @@ function toDateSafe(value: any): Date {
  */
 export function subscribeToLiveSessions(
   examId: string,
-  onUpdate: (sessions: LiveStudentSession[]) => void
+  onUpdate: (sessions: LiveStudentSession[]) => void,
+  onError?: (error: Error) => void
 ): () => void {
   const sessionsQuery = (examId && examId !== "all")
     ? query(collection(db, "examSessions"), where("examId", "==", examId))
@@ -498,6 +499,13 @@ export function subscribeToLiveSessions(
     });
 
     onUpdate(sessions);
+  }, (error) => {
+    // Without this the listener dies silently on a permission or index error
+    // and the monitoring grid sits on stale data with no indication it is
+    // no longer live.
+    if (cancelled) return;
+    console.error("subscribeToLiveSessions failed:", error);
+    onError?.(error);
   });
 
   return () => {

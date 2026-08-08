@@ -143,7 +143,6 @@ const teacherMenuItems = [
     { icon: Megaphone, label: "Notices", href: "/dashboard/teacher/notices" },
     { icon: FileText, label: "Submissions & OCR", href: "/dashboard/teacher/answers" },
     { icon: Camera, label: "Watch Live", href: "/dashboard/teacher/watch-live" },
-    { icon: Shield, label: "Live Monitoring", href: "/dashboard/teacher/monitoring" },
     { icon: ImageIcon, label: "Snapshots", href: "/dashboard/teacher/snapshots" },
     { icon: Users, label: "Students", href: "/dashboard/teacher/students" },
     { icon: User, label: "My Profile", href: "/profile" },

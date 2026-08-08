@@ -274,21 +274,29 @@ service cloud.firestore {
     }
 
     // Proctoring Events collection
+    // Proctoring evidence (events, webcam snapshots, warning screenshots).
+    //
+    // Students WRITE these from the exam client but never read them back; only
+    // the teacher invigilation surfaces do. Read used to be `isAuthenticated()`,
+    // which let any signed-in student pull every other student's webcam
+    // captures and violation history straight out of Firestore.
+    // Own-session reads stay allowed so a student can still see their own
+    // record if a future screen needs it.
     match /proctoringEvents/{eventId} {
-      allow read: if isAuthenticated();
+      allow read: if isTeacherOrAdmin() || isUser(resource.data.studentId);
       allow create: if isAuthenticated();
     }
 
     // Proctoring Snapshots collection
     match /proctoringSnapshots/{snapshotId} {
-      allow read: if isAuthenticated();
+      allow read: if isTeacherOrAdmin() || isUser(resource.data.studentId);
       allow create: if isAuthenticated();
     }
-    
+
     // Warning Screenshots collection — permanent proctoring evidence
     // captured on every warning (Task 9's Snapshots gallery).
     match /warningScreenshots/{screenshotId} {
-      allow read: if isAuthenticated();
+      allow read: if isTeacherOrAdmin() || isUser(resource.data.studentId);
       allow create: if isAuthenticated();
       allow delete: if isTeacherOrAdmin();
     }

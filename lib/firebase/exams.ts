@@ -17,6 +17,37 @@ import { db } from "./config";
 import { Exam, Question, ExamSession, Answer, ExamLog } from "../types";
 
 // Exams
+/**
+ * The admin's global proctoring defaults (settings/global.proctoring), used to
+ * seed a newly created exam. Exam creation used to hardcode all three flags to
+ * `true`, which made the corresponding admin switches decorative.
+ *
+ * Falls back to the safe (all-on) defaults if the document is missing or
+ * unreadable — creating an exam must never fail because of a settings read.
+ */
+export async function getGlobalProctoringDefaults(): Promise<{
+  faceDetection: boolean;
+  tabSwitchDetection: boolean;
+  fullscreenRequired: boolean;
+}> {
+  const fallback = {
+    faceDetection: true,
+    tabSwitchDetection: true,
+    fullscreenRequired: true,
+  };
+  try {
+    const snap = await getDoc(doc(db, "settings", "global"));
+    const configured = snap.exists() ? (snap.data()?.proctoring ?? {}) : {};
+    return {
+      faceDetection: configured.faceDetection ?? fallback.faceDetection,
+      tabSwitchDetection: configured.tabSwitchDetection ?? fallback.tabSwitchDetection,
+      fullscreenRequired: configured.fullscreenRequired ?? fallback.fullscreenRequired,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export async function createExam(examData: Omit<Exam, "id" | "createdAt" | "updatedAt">): Promise<string> {
   const docRef = await addDoc(collection(db, "exams"), {
     ...examData,

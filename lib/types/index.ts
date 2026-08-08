@@ -123,6 +123,8 @@ export interface Exam {
   // can see this exam", not the batch/section name strings above (those
   // are display-only / legacy).
   targetStudentIds?: string[];
+  /** Admin who created the exam on a teacher's behalf, when applicable. */
+  createdBy?: string;
 }
 
 export type QuestionType = "mcq" | "short" | "long" | "code" | "multiple-choice" | "short-answer" | "essay" | "true-false";
@@ -304,6 +306,15 @@ export interface AppSettings {
   updatedBy: string;
 }
 
+export interface DashboardActivityItem {
+  id: string;
+  kind: "user" | "exam" | "session";
+  message: string;
+  detail?: string;
+  /** Epoch milliseconds. */
+  at: number;
+}
+
 export interface DashboardStats {
   totalStudents: number;
   totalTeachers: number;
@@ -312,6 +323,12 @@ export interface DashboardStats {
   pendingApprovals: number;
   flaggedSessions: number;
   totalCourses?: number;
+  /** Sessions inside the live heartbeat window right now. */
+  liveSessions: number;
+  publishedExams: number;
+  submittedSessions: number;
+  suspendedAccounts: number;
+  recentActivity: DashboardActivityItem[];
 }
 
 export interface PlagiarismMatch {

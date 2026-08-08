@@ -28,7 +28,7 @@ import {
   Check,
   AlertCircle
 } from "lucide-react";
-import { getExam, updateExam, deleteExam, getQuestionsByExam, createQuestion, deleteQuestion, getSessionsByExam, updateQuestion } from "@/lib/firebase/exams";
+import { getExam, updateExam, deleteExam, getQuestionsByExam, createQuestion, deleteQuestion, getSessionsByExam, updateQuestion, notifyExamPublished } from "@/lib/firebase/exams";
 import { Exam, Question, ExamSession } from "@/lib/types";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -45,6 +45,8 @@ export default function TeacherExamClient() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [sessions, setSessions] = useState<ExamSession[]>([]);
   const [loading, setLoading] = useState(true);
+  const [changingStatus, setChangingStatus] = useState<Exam["status"] | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const examId = params.id as string;
 
@@ -91,23 +93,64 @@ export default function TeacherExamClient() {
   };
 
   const handleDeleteExam = async () => {
-    if (!confirm("Are you sure you want to delete this exam? This action cannot be undone.")) return;
+    if (deleting) return;
+    const warning =
+      sessions.length > 0
+        ? `\n\n${sessions.length} student attempt${sessions.length !== 1 ? "s" : ""} recorded for this exam will be orphaned.`
+        : "";
+    if (!confirm(`Delete "${exam?.title ?? "this exam"}"?${warning}\n\nThis cannot be undone.`)) return;
+    setDeleting(true);
     try {
       await deleteExam(examId);
       toast({ title: "Success", description: "Exam deleted successfully" });
       router.push("/dashboard/teacher/exams");
     } catch (error) {
       toast({ title: "Error", description: "Failed to delete exam", variant: "destructive" });
+    } finally {
+      setDeleting(false);
     }
   };
 
   const handleStatusChange = async (status: Exam["status"]) => {
+    if (!exam || status === exam.status || changingStatus) return;
+
+    const targets = exam.targetStudentIds ?? [];
+    const goingLive = status === "published" || status === "active";
+    const wasLive = exam.status === "published" || exam.status === "active";
+
+    if (goingLive && targets.length === 0) {
+      toast({
+        title: "No students targeted",
+        description:
+          "This exam matches no students yet. Edit it to pick a Course, Batch and Section before publishing.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setChangingStatus(status);
     try {
       await updateExam(examId, { status });
-      setExam({ ...exam!, status });
-      toast({ title: "Success", description: `Exam status updated to ${status}` });
+      setExam({ ...exam, status });
+
+      // Publishing from this page used to change the status silently: no
+      // notification and no email, while the same transition on the edit page
+      // sent both. Same action, same outcome now.
+      if (goingLive && !wasLive) {
+        notifyExamPublished(examId, targets).catch((err) =>
+          console.warn("[ExamDetail] Failed to send publish notifications:", err)
+        );
+        toast({
+          title: "Exam Published",
+          description: `Notified ${targets.length} student${targets.length !== 1 ? "s" : ""}.`,
+        });
+      } else {
+        toast({ title: "Status Updated", description: `Exam is now ${status}.` });
+      }
     } catch (error) {
       toast({ title: "Error", description: "Failed to update status", variant: "destructive" });
+    } finally {
+      setChangingStatus(null);
     }
   };
 
@@ -172,7 +215,7 @@ export default function TeacherExamClient() {
                 <Edit className="h-4 w-4" /> Edit Exam & Questions
               </Button>
             </Link>
-            <Button variant="outline" onClick={handleDeleteExam} className="text-red-600 hover:text-red-700 border-red-200 gap-1.5">
+            <Button variant="outline" onClick={handleDeleteExam} disabled={deleting} className="text-red-600 hover:text-red-700 border-red-200 gap-1.5">
               <Trash2 className="h-4 w-4" /> Delete
             </Button>
           </div>
@@ -244,8 +287,13 @@ export default function TeacherExamClient() {
                     variant={exam.status === s ? "default" : "outline"}
                     className={`h-7 text-xs capitalize ${exam.status === s ? "bg-emerald-600 hover:bg-emerald-700" : ""}`}
                     onClick={() => handleStatusChange(s)}
+                    disabled={!!changingStatus || exam.status === s}
                   >
-                    {s}
+                    {changingStatus === s ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      s
+                    )}
                   </Button>
                 ))}
               </div>

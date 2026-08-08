@@ -100,7 +100,7 @@ function Navbar() {
                 {user.role === "teacher" && (
                   <>
                     <NavLink href="/dashboard/teacher/exams" active={pathname.startsWith("/dashboard/teacher/exams")}>My Exams</NavLink>
-                    <NavLink href="/dashboard/teacher/monitoring" active={pathname.startsWith("/dashboard/teacher/monitoring")}>Live Monitoring</NavLink>
+                    <NavLink href="/dashboard/teacher/watch-live" active={pathname.startsWith("/dashboard/teacher/watch-live")}>Watch Live</NavLink>
                   </>
                 )}
                 {user.role === "admin" && (

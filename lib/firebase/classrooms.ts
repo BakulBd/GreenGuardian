@@ -198,7 +198,13 @@ export function subscribeToTeacherClassrooms(teacherId: string, callback: (class
       const classrooms = snap.docs.map((d) => ({ ...d.data(), id: d.id } as Classroom));
       callback(classrooms.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
     },
-    (error) => console.warn("[Classrooms] Teacher classrooms subscription error:", error.code || error)
+    (error) => {
+      // Hand back an empty list as well as logging: callers flip their
+      // `loading` flag inside the success callback, so a silent failure left
+      // the page spinning forever with no way out but a reload.
+      console.warn("[Classrooms] Teacher classrooms subscription error:", error.code || error);
+      callback([]);
+    }
   );
 }
 
@@ -378,7 +384,10 @@ export function subscribeToClassroomMembers(classroomId: string, callback: (memb
       const members = snap.docs.map((d) => ({ ...d.data(), id: d.id } as ClassroomMember));
       callback(members.sort((a, b) => (a.studentName || "").localeCompare(b.studentName || "")));
     },
-    (error) => console.warn("[Classrooms] Members subscription error:", error.code || error)
+    (error) => {
+      console.warn("[Classrooms] Members subscription error:", error.code || error);
+      callback([]);
+    }
   );
 }
 
@@ -419,7 +428,10 @@ export function subscribeToStudentClassrooms(studentId: string, callback: (class
         callback([]);
       }
     },
-    (error) => console.warn("[Classrooms] Student classrooms subscription error:", error.code || error)
+    (error) => {
+      console.warn("[Classrooms] Student classrooms subscription error:", error.code || error);
+      callback([]);
+    }
   );
 }
 
@@ -482,7 +494,10 @@ export function subscribeToClassroomPosts(classroomId: string, callback: (posts:
       });
       callback(posts);
     },
-    (error) => console.warn("[Classrooms] Posts subscription error:", error.code || error)
+    (error) => {
+      console.warn("[Classrooms] Posts subscription error:", error.code || error);
+      callback([]);
+    }
   );
 }
 
@@ -521,7 +536,10 @@ export function subscribeToPostComments(postId: string, callback: (comments: Cla
       const comments = snap.docs.map((d) => ({ ...d.data(), id: d.id } as ClassroomComment));
       callback(comments.sort((a, b) => toMillis(a.createdAt) - toMillis(b.createdAt)));
     },
-    (error) => console.warn("[Classrooms] Comments subscription error:", error.code || error)
+    (error) => {
+      console.warn("[Classrooms] Comments subscription error:", error.code || error);
+      callback([]);
+    }
   );
 }
 

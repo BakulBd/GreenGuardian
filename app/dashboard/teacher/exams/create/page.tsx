@@ -33,6 +33,7 @@ import {
   AssignedCatalogEntry,
 } from "@/lib/firebase/assignments";
 import { createExam, notifyExamPublished } from "@/lib/firebase/exams";
+import { extractQuestionsFromPaper } from "@/lib/utils/ai-client";
 
 interface Question {
   id: string;
@@ -98,15 +99,25 @@ export default function CreateExamPage() {
       toast({ title: "Error", description: "Please upload an exam paper first.", variant: "destructive" });
       return;
     }
+    // Importing replaces whatever is in the question list, so confirm first —
+    // this used to silently discard questions the teacher had already typed.
+    if (
+      questions.length > 0 &&
+      !confirm(
+        `Importing will replace the ${questions.length} question${questions.length !== 1 ? "s" : ""} you have already added. Continue?`
+      )
+    ) {
+      return;
+    }
+
     setExtractingOCRQuestions(true);
     try {
       const primaryUrl = examPapers[0].url;
-      const res = await fetch("/api/ocr", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "extract_questions", fileUrl: primaryUrl }),
-      });
-      const data = await res.json();
+      // Goes through the authenticated AI client. This used to be a bare
+      // fetch("/api/ocr") with no Authorization header, so the endpoint — which
+      // requires a Firebase ID token — answered 401 every single time and the
+      // feature could never have worked.
+      const data = await extractQuestionsFromPaper(primaryUrl);
       if (data.success && Array.isArray(data.questions) && data.questions.length > 0) {
         const parsedQuestions: Question[] = data.questions.map((q: any, idx: number) => {
           const type: Question["type"] = q.type === "mcq" ? "multiple-choice" : "short-answer";
@@ -127,9 +138,18 @@ export default function CreateExamPage() {
 
         setQuestions(parsedQuestions);
         setExamMode("online");
-        toast({ title: "Questions Extracted!", description: `Successfully imported ${parsedQuestions.length} questions using Gemini 2.5 Flash OCR.` });
+        toast({
+          title: "Questions Extracted",
+          description: `Imported ${parsedQuestions.length} question${parsedQuestions.length !== 1 ? "s" : ""}. Review the text, options and correct answers before saving.`,
+        });
       } else {
-        toast({ title: "OCR Notice", description: data.error || "Could not automatically parse structured questions from this document.", variant: "destructive" });
+        toast({
+          title: "No Questions Found",
+          description:
+            data.error ||
+            "Could not parse structured questions from this document. Try a clearer scan, or add the questions manually.",
+          variant: "destructive",
+        });
       }
     } catch (err: any) {
       toast({ title: "Error", description: err.message || "Failed to extract questions", variant: "destructive" });
@@ -227,6 +247,21 @@ export default function CreateExamPage() {
       toast({
         title: "Error",
         description: "Please select the Course, Batch, and Section this exam is for.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Students only see an exam inside its start/end window, so an inverted
+    // window publishes an exam nobody can ever open.
+    if (
+      examData.startDate &&
+      examData.endDate &&
+      new Date(examData.endDate) <= new Date(examData.startDate)
+    ) {
+      toast({
+        title: "Invalid schedule",
+        description: "The end date must be after the start date.",
         variant: "destructive",
       });
       return;
