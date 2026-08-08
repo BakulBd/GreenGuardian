@@ -88,7 +88,40 @@ export async function updateCourse(courseId: string, data: { name: string; code:
 /**
  * Delete a course and all its associated batches and sections.
  */
+/**
+ * Refuse to delete a catalog entry that teacher assignments still point at.
+ *
+ * Deleting cascaded to batches and sections but never touched
+ * `teacher_assignments` or `teacher_student_mapping`. Those rows survived
+ * pointing at a course/batch/section that no longer existed, and because
+ * `users.assignedTeacherIds` is derived from them the teacher kept access to
+ * the students — while "My Courses" listed a course that had been deleted.
+ * Blocking is safer than cascading: silently revoking a live class's teacher
+ * links is not something to do behind a generic "Delete" button.
+ */
+async function assertNoAssignments(
+  field: "courseId" | "batchId" | "sectionId",
+  id: string,
+  label: string
+): Promise<void> {
+  const snap = await getDocs(
+    query(collection(db, "teacher_assignments"), where(field, "==", id))
+  );
+  if (!snap.empty) {
+    const names = Array.from(
+      new Set(snap.docs.map((d) => d.data().teacherName || d.data().teacherId))
+    );
+    throw new Error(
+      `${label} is still assigned to ${snap.size} teacher assignment${snap.size !== 1 ? "s" : ""} (${names
+        .slice(0, 3)
+        .join(", ")}${names.length > 3 ? ", …" : ""}). Remove those assignments first.`
+    );
+  }
+}
+
 export async function deleteCourse(courseId: string): Promise<void> {
+  await assertNoAssignments("courseId", courseId, "This course");
+
   const batch = writeBatch(db);
 
   // Delete all batches under this course
@@ -192,6 +225,8 @@ export async function updateBatch(batchId: string, data: { courseId: string; nam
  * Delete a batch and all its associated sections.
  */
 export async function deleteBatch(batchId: string): Promise<void> {
+  await assertNoAssignments("batchId", batchId, "This batch");
+
   const batch = writeBatch(db);
   const sectionsQ = query(collection(db, "sections"), where("batchId", "==", batchId));
   const sectionsSnap = await getDocs(sectionsQ);
@@ -286,6 +321,7 @@ export async function updateSection(sectionId: string, data: { batchId: string; 
  * Delete a section.
  */
 export async function deleteSection(sectionId: string): Promise<void> {
+  await assertNoAssignments("sectionId", sectionId, "This section");
   await deleteDoc(doc(db, "sections", sectionId));
 }
 

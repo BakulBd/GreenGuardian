@@ -45,7 +45,10 @@ export default function StudentNoticesPage() {
   const [readStatus, setReadStatus] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
-  const [targetFilter, setTargetFilter] = useState<string>("all");
+  // "__any__" is the no-filter sentinel. It must NOT be "all", because "all"
+  // is itself a real Notice.targetType (a general notice to every student) —
+  // the two collided, so picking "General" could never match anything.
+  const [targetFilter, setTargetFilter] = useState<string>("__any__");
 
   useEffect(() => {
     if (user) {
@@ -113,7 +116,7 @@ export default function StudentNoticesPage() {
         return false;
       }
     }
-    if (targetFilter !== "all" && notice.targetType !== targetFilter) {
+    if (targetFilter !== "__any__" && notice.targetType !== targetFilter) {
       return false;
     }
     return true;
@@ -203,11 +206,13 @@ export default function StudentNoticesPage() {
                   <SelectValue placeholder="All Types" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All Types</SelectItem>
-                  <SelectItem value="all_students">General</SelectItem>
+                  <SelectItem value="__any__">All Types</SelectItem>
+                  <SelectItem value="all">General</SelectItem>
                   <SelectItem value="course">Course</SelectItem>
                   <SelectItem value="batch">Batch</SelectItem>
                   <SelectItem value="section">Section</SelectItem>
+                  <SelectItem value="semester">Semester</SelectItem>
+                  <SelectItem value="individual">Personal</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,14 +16,12 @@ import {
   Calendar,
   Clock,
   Users,
-  BarChart
+  BarChart,
+  AlertCircle
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { collection, query, where, getDocs, deleteDoc, doc } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
 import Link from "next/link";
-import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
 import { getExamsByTeacher, deleteExam } from "@/lib/firebase/exams";
 
 interface Exam {
@@ -50,6 +48,8 @@ export default function TeacherExamsPage() {
   const [selectedCourse, setSelectedCourse] = useState<string>("all");
   const [selectedBatch, setSelectedBatch] = useState<string>("all");
   const [selectedSection, setSelectedSection] = useState<string>("all");
+  const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const { user } = useAuth();
   const { toast } = useToast();
   const router = useRouter();
@@ -62,12 +62,14 @@ export default function TeacherExamsPage() {
 
   const loadExams = async () => {
     if (!user) return;
-    
+
+    setError(null);
     try {
       const examsList = await getExamsByTeacher(user.id);
       setExams(examsList as any[]);
-    } catch (error) {
-      console.error("Error loading exams:", error);
+    } catch (err) {
+      console.error("Error loading exams:", err);
+      setError("Could not load your exams.");
       toast({
         title: "Error",
         description: "Failed to load exams",
@@ -78,22 +80,31 @@ export default function TeacherExamsPage() {
     }
   };
 
-  const handleDelete = async (examId: string) => {
-    if (!confirm("Are you sure you want to delete this exam?")) return;
+  const handleDelete = async (exam: Exam) => {
+    // Deleting an exam takes its questions with it and orphans any submissions,
+    // so the confirmation names the exam and says what is lost.
+    const published = exam.status !== "draft";
+    const warning = published
+      ? `\n\nThis exam is ${exam.status}. Students who already sat it will lose access to their result.`
+      : "";
+    if (!confirm(`Delete "${exam.title}"?${warning}\n\nThis cannot be undone.`)) return;
 
+    setDeletingId(exam.id);
     try {
-      await deleteExam(examId);
-      setExams(exams.filter(e => e.id !== examId));
+      await deleteExam(exam.id);
+      setExams((prev) => prev.filter((e) => e.id !== exam.id));
       toast({
         title: "Exam Deleted",
-        description: "The exam has been deleted successfully.",
+        description: `"${exam.title}" has been deleted.`,
       });
-    } catch (error: any) {
+    } catch (err: any) {
       toast({
         title: "Error",
-        description: error.message || "Failed to delete exam",
+        description: err.message || "Failed to delete exam",
         variant: "destructive",
       });
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -107,6 +118,30 @@ export default function TeacherExamsPage() {
     const { variant, label } = variants[status] || variants.draft;
     return <Badge variant={variant}>{label}</Badge>;
   };
+
+  // Filter options come from the exams themselves. They used to come from the
+  // hardcoded DEFAULT_* catalog, whose ids (e.g. "cse-301") never match the
+  // Firestore course documents exams actually reference — so picking any course
+  // filtered the list down to nothing, every time.
+  const courseOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    exams.forEach((e) => {
+      if (e.courseId) byId.set(e.courseId, e.courseName || e.courseId);
+    });
+    return Array.from(byId, ([id, name]) => ({ id, name })).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+  }, [exams]);
+
+  const batchOptions = useMemo(
+    () => Array.from(new Set(exams.map((e) => e.batch).filter(Boolean) as string[])).sort(),
+    [exams]
+  );
+
+  const sectionOptions = useMemo(
+    () => Array.from(new Set(exams.map((e) => e.section).filter(Boolean) as string[])).sort(),
+    [exams]
+  );
 
   const filteredExams = exams.filter((e) => {
     const matchCourse = selectedCourse === "all" || e.courseId === selectedCourse || (!e.courseId && selectedCourse === "all");
@@ -190,7 +225,18 @@ export default function TeacherExamsPage() {
           </Card>
         </div>
 
-        {/* Filter Controls */}
+        {error && (
+          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">{error}</div>
+            <Button size="sm" variant="outline" onClick={loadExams}>
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {/* Filter Controls — pointless chrome until there is something to filter. */}
+        {exams.length > 0 && (
         <Card className="bg-emerald-50/40 border-emerald-100 p-4">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="text-sm font-semibold text-gray-700 flex items-center gap-2">
@@ -216,9 +262,9 @@ export default function TeacherExamsPage() {
                 onChange={(e) => setSelectedCourse(e.target.value)}
               >
                 <option value="all">All Courses</option>
-                {DEFAULT_COURSES.map((course) => (
+                {courseOptions.map((course) => (
                   <option key={course.id} value={course.id}>
-                    {course.code} - {course.name}
+                    {course.name}
                   </option>
                 ))}
               </select>
@@ -230,9 +276,9 @@ export default function TeacherExamsPage() {
                 onChange={(e) => setSelectedBatch(e.target.value)}
               >
                 <option value="all">All Batches</option>
-                {DEFAULT_BATCHES.map((batch) => (
-                  <option key={batch.id} value={batch.name}>
-                    Batch {batch.name}
+                {batchOptions.map((batch) => (
+                  <option key={batch} value={batch}>
+                    Batch {batch}
                   </option>
                 ))}
               </select>
@@ -244,15 +290,16 @@ export default function TeacherExamsPage() {
                 onChange={(e) => setSelectedSection(e.target.value)}
               >
                 <option value="all">All Sections</option>
-                {DEFAULT_SECTIONS.map((section) => (
-                  <option key={section.id} value={section.name}>
-                    Section {section.name}
+                {sectionOptions.map((section) => (
+                  <option key={section} value={section}>
+                    Section {section}
                   </option>
                 ))}
               </select>
             </div>
           </div>
         </Card>
+        )}
 
         {/* Exam List */}
         {filteredExams.length === 0 ? (
@@ -260,14 +307,39 @@ export default function TeacherExamsPage() {
             <CardContent className="py-12">
               <div className="text-center">
                 <FileText className="mx-auto h-12 w-12 text-gray-400" />
-                <h3 className="mt-4 text-lg font-medium text-gray-900">No matching exams found</h3>
-                <p className="mt-2 text-gray-500">Try selecting different course, batch, or section filters</p>
-                <Link href="/dashboard/teacher/exams/create">
-                  <Button className="mt-4">
-                    <Plus className="mr-2 h-4 w-4" />
-                    Create Exam
-                  </Button>
-                </Link>
+                {exams.length === 0 ? (
+                  <>
+                    <h3 className="mt-4 text-lg font-medium text-gray-900">No exams yet</h3>
+                    <p className="mt-2 text-gray-500">
+                      Create your first exam and pick the Course, Batch and Section it targets.
+                    </p>
+                    <Link href="/dashboard/teacher/exams/create">
+                      <Button className="mt-4">
+                        <Plus className="mr-2 h-4 w-4" />
+                        Create Exam
+                      </Button>
+                    </Link>
+                  </>
+                ) : (
+                  <>
+                    <h3 className="mt-4 text-lg font-medium text-gray-900">No matching exams</h3>
+                    <p className="mt-2 text-gray-500">
+                      None of your {exams.length} exam{exams.length !== 1 ? "s" : ""} match the
+                      current filters.
+                    </p>
+                    <Button
+                      variant="outline"
+                      className="mt-4"
+                      onClick={() => {
+                        setSelectedCourse("all");
+                        setSelectedBatch("all");
+                        setSelectedSection("all");
+                      }}
+                    >
+                      Reset Filters
+                    </Button>
+                  </>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -335,10 +407,15 @@ export default function TeacherExamsPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => handleDelete(exam.id)}
+                        onClick={() => handleDelete(exam)}
+                        disabled={deletingId === exam.id}
                         className="text-red-600 hover:text-red-700"
                       >
-                        <Trash2 className="h-4 w-4 sm:mr-1" />
+                        {deletingId === exam.id ? (
+                          <Loader2 className="h-4 w-4 sm:mr-1 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4 sm:mr-1" />
+                        )}
                         <span className="hidden sm:inline">Delete</span>
                       </Button>
                     </div>

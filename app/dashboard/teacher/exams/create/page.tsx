@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,12 +24,16 @@ import {
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { collection, addDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
 import Link from "next/link";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult } from "@/lib/firebase/storage";
-import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
+import {
+  subscribeToAssignedCatalog,
+  computeAssignmentTargetStudentIds,
+  AssignedCatalogEntry,
+} from "@/lib/firebase/assignments";
+import { createExam, notifyExamPublished } from "@/lib/firebase/exams";
+import { extractQuestionsFromPaper } from "@/lib/utils/ai-client";
 
 interface Question {
   id: string;
@@ -50,10 +54,12 @@ export default function CreateExamPage() {
   const [examData, setExamData] = useState({
     title: "",
     description: "",
-    courseId: DEFAULT_COURSES[5].id, // Default DBMS (CSE 301)
-    courseName: DEFAULT_COURSES[5].name,
-    batch: DEFAULT_BATCHES[2].name, // Default 241
-    section: DEFAULT_SECTIONS[1].name, // Default D2
+    courseId: "",
+    courseName: "",
+    batchId: "",
+    batch: "",
+    sectionId: "",
+    section: "",
     duration: 60,
     totalMarks: 100,
     passingScore: 40,
@@ -67,24 +73,51 @@ export default function CreateExamPage() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [examPapers, setExamPapers] = useState<UploadResult[]>([]);
   const [extractingOCRQuestions, setExtractingOCRQuestions] = useState(false);
+  const [assignedCatalog, setAssignedCatalog] = useState<AssignedCatalogEntry[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(true);
   const { user, loading: authLoading } = useAuth();
   const { toast } = useToast();
   const router = useRouter();
+
+  // Course/Batch/Section options are restricted to what an admin actually
+  // assigned this teacher — a teacher can't target students outside their
+  // own assignment (see lib/firebase/assignments.ts).
+  useEffect(() => {
+    if (!user) return;
+    const unsubscribe = subscribeToAssignedCatalog(user.id, (grouped) => {
+      setAssignedCatalog(grouped);
+      setCatalogLoading(false);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  const selectedCourse = assignedCatalog.find((c) => c.courseId === examData.courseId);
+  const selectedBatch = selectedCourse?.batches.find((b) => b.batchId === examData.batchId);
 
   const extractQuestionsFromPaperOCR = async () => {
     if (examPapers.length === 0) {
       toast({ title: "Error", description: "Please upload an exam paper first.", variant: "destructive" });
       return;
     }
+    // Importing replaces whatever is in the question list, so confirm first —
+    // this used to silently discard questions the teacher had already typed.
+    if (
+      questions.length > 0 &&
+      !confirm(
+        `Importing will replace the ${questions.length} question${questions.length !== 1 ? "s" : ""} you have already added. Continue?`
+      )
+    ) {
+      return;
+    }
+
     setExtractingOCRQuestions(true);
     try {
       const primaryUrl = examPapers[0].url;
-      const res = await fetch("/api/ocr", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "extract_questions", fileUrl: primaryUrl }),
-      });
-      const data = await res.json();
+      // Goes through the authenticated AI client. This used to be a bare
+      // fetch("/api/ocr") with no Authorization header, so the endpoint — which
+      // requires a Firebase ID token — answered 401 every single time and the
+      // feature could never have worked.
+      const data = await extractQuestionsFromPaper(primaryUrl);
       if (data.success && Array.isArray(data.questions) && data.questions.length > 0) {
         const parsedQuestions: Question[] = data.questions.map((q: any, idx: number) => {
           const type: Question["type"] = q.type === "mcq" ? "multiple-choice" : "short-answer";
@@ -105,9 +138,18 @@ export default function CreateExamPage() {
 
         setQuestions(parsedQuestions);
         setExamMode("online");
-        toast({ title: "Questions Extracted!", description: `Successfully imported ${parsedQuestions.length} questions using Gemini 2.5 Flash OCR.` });
+        toast({
+          title: "Questions Extracted",
+          description: `Imported ${parsedQuestions.length} question${parsedQuestions.length !== 1 ? "s" : ""}. Review the text, options and correct answers before saving.`,
+        });
       } else {
-        toast({ title: "OCR Notice", description: data.error || "Could not automatically parse structured questions from this document.", variant: "destructive" });
+        toast({
+          title: "No Questions Found",
+          description:
+            data.error ||
+            "Could not parse structured questions from this document. Try a clearer scan, or add the questions manually.",
+          variant: "destructive",
+        });
       }
     } catch (err: any) {
       toast({ title: "Error", description: err.message || "Failed to extract questions", variant: "destructive" });
@@ -201,21 +243,64 @@ export default function CreateExamPage() {
       }
     }
 
+    if (!examData.courseId || !examData.batchId || !examData.sectionId) {
+      toast({
+        title: "Error",
+        description: "Please select the Course, Batch, and Section this exam is for.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Students only see an exam inside its start/end window, so an inverted
+    // window publishes an exam nobody can ever open.
+    if (
+      examData.startDate &&
+      examData.endDate &&
+      new Date(examData.endDate) <= new Date(examData.startDate)
+    ) {
+      toast({
+        title: "Invalid schedule",
+        description: "The end date must be after the start date.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setSaving(true);
     try {
-      const totalMarks = examMode === "online" 
+      // Only students an admin actually assigned to this teacher for this
+      // exact Course+Batch+Section will ever see this exam — mirrors the
+      // same resolution used for the teacher's "My Courses" page and for
+      // notices, so exam visibility is always "communication scoped to
+      // teacher assignment", never a free-text course/batch/section match.
+      const targetStudentIds = await computeAssignmentTargetStudentIds(
+        user.id,
+        examData.courseId,
+        examData.batchId,
+        examData.sectionId
+      );
+
+      if (targetStudentIds.length === 0) {
+        toast({
+          title: "No students in this group yet",
+          description: "This exam was saved, but no students currently match this Course/Batch/Section — it won't be visible to anyone until students are assigned.",
+        });
+      }
+
+      const totalMarks = examMode === "online"
         ? questions.reduce((sum, q) => sum + q.marks, 0)
         : examData.totalMarks;
-      
+
       const examDoc: any = {
         ...examData,
         totalMarks,
         examMode,
         status,
         teacherId: user.id,
+        teacherName: user.name,
         createdBy: user.id,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        targetStudentIds,
       };
 
       // Add questions or exam papers based on mode
@@ -231,23 +316,12 @@ export default function CreateExamPage() {
         examDoc.allowAnswerUpload = true;
       }
 
-      const examRef = await addDoc(collection(db, "exams"), examDoc);
+      const examId = await createExam(examDoc);
 
-      // Save each question into questions collection with examId
-      if (examMode === "online" && questions.length > 0) {
-        for (let i = 0; i < questions.length; i++) {
-          const q = questions[i];
-          await addDoc(collection(db, "questions"), {
-            ...q,
-            examId: examRef.id,
-            order: i,
-            courseId: examData.courseId,
-            batch: examData.batch,
-            section: examData.section,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        }
+      if (status === "published" && targetStudentIds.length > 0) {
+        notifyExamPublished(examId, targetStudentIds).catch((err) =>
+          console.warn("[CreateExam] Failed to send publish notifications:", err)
+        );
       }
 
       toast({
@@ -333,62 +407,99 @@ export default function CreateExamPage() {
               />
             </div>
 
-            {/* Academic Target Selection */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-emerald-50/50 p-4 rounded-lg border border-emerald-100">
-              <div className="space-y-2">
-                <Label htmlFor="course">Course *</Label>
-                <select
-                  id="course"
-                  className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  value={examData.courseId}
-                  onChange={(e) => {
-                    const selectedCourse = DEFAULT_COURSES.find((c) => c.id === e.target.value);
-                    setExamData({
-                      ...examData,
-                      courseId: e.target.value,
-                      courseName: selectedCourse ? selectedCourse.name : e.target.value,
-                    });
-                  }}
-                >
-                  {DEFAULT_COURSES.map((course) => (
-                    <option key={course.id} value={course.id}>
-                      {course.code} - {course.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+            {/* Academic Target Selection — restricted to this teacher's own
+                Course/Batch/Section assignments so only students actually
+                enrolled under this teacher can ever see the exam. */}
+            <div className="bg-emerald-50/50 p-4 rounded-lg border border-emerald-100 space-y-2">
+              <Label>Target Course, Batch & Section *</Label>
+              {catalogLoading ? (
+                <p className="text-sm text-gray-500 flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading your assignments...
+                </p>
+              ) : assignedCatalog.length === 0 ? (
+                <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-3">
+                  You have no Course/Batch/Section assignments yet. Contact an admin to be assigned before creating an exam.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <select
+                      id="course"
+                      className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      value={examData.courseId}
+                      onChange={(e) => {
+                        const course = assignedCatalog.find((c) => c.courseId === e.target.value);
+                        setExamData({
+                          ...examData,
+                          courseId: course?.courseId || "",
+                          courseName: course?.courseName || "",
+                          batchId: "",
+                          batch: "",
+                          sectionId: "",
+                          section: "",
+                        });
+                      }}
+                    >
+                      <option value="">-- Select Course --</option>
+                      {assignedCatalog.map((course) => (
+                        <option key={course.courseId} value={course.courseId}>
+                          {course.courseCode ? `${course.courseCode} - ` : ""}{course.courseName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="batch">Batch *</Label>
-                <select
-                  id="batch"
-                  className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  value={examData.batch}
-                  onChange={(e) => setExamData({ ...examData, batch: e.target.value })}
-                >
-                  {DEFAULT_BATCHES.map((batch) => (
-                    <option key={batch.id} value={batch.name}>
-                      Batch {batch.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  <div className="space-y-2">
+                    <select
+                      id="batch"
+                      className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      value={examData.batchId}
+                      disabled={!selectedCourse}
+                      onChange={(e) => {
+                        const batch = selectedCourse?.batches.find((b) => b.batchId === e.target.value);
+                        setExamData({
+                          ...examData,
+                          batchId: batch?.batchId || "",
+                          batch: batch?.batchName || "",
+                          sectionId: "",
+                          section: "",
+                        });
+                      }}
+                    >
+                      <option value="">-- Select Batch --</option>
+                      {selectedCourse?.batches.map((batch) => (
+                        <option key={batch.batchId} value={batch.batchId}>
+                          Batch {batch.batchName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="section">Section *</Label>
-                <select
-                  id="section"
-                  className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  value={examData.section}
-                  onChange={(e) => setExamData({ ...examData, section: e.target.value })}
-                >
-                  {DEFAULT_SECTIONS.map((section) => (
-                    <option key={section.id} value={section.name}>
-                      Section {section.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  <div className="space-y-2">
+                    <select
+                      id="section"
+                      className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      value={examData.sectionId}
+                      disabled={!selectedBatch}
+                      onChange={(e) => {
+                        const section = selectedBatch?.sections.find((s) => s.sectionId === e.target.value);
+                        setExamData({
+                          ...examData,
+                          sectionId: section?.sectionId || "",
+                          section: section?.sectionName || "",
+                        });
+                      }}
+                    >
+                      <option value="">-- Select Section --</option>
+                      {selectedBatch?.sections.map((section) => (
+                        <option key={section.sectionId} value={section.sectionId}>
+                          Section {section.sectionName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

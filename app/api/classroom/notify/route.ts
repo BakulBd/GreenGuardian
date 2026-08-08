@@ -130,13 +130,12 @@ export async function POST(req: NextRequest) {
 
     for (const memberDoc of membersSnap.docs) {
       const member = memberDoc.data();
-      const studentSnap = await db.collection("users").doc(member.studentId).get();
-      const student = studentSnap.data();
-      const assignedTeacherIds: string[] = student?.assignedTeacherIds || [];
 
-      // Re-check current assignment — a student who left the teacher's
-      // roster since joining must not keep receiving notifications.
-      if (!assignedTeacherIds.includes(classroom.teacherId)) {
+      // Membership itself is the access boundary now (classrooms are no
+      // longer gated behind a separate admin assignment) — the classroomId
+      // filter above already limits this to current members, so no extra
+      // assignedTeacherIds re-check is needed here.
+      if (!member.studentEmail) {
         skipped++;
         continue;
       }

@@ -1,7 +1,7 @@
 "use client";
 
 import { ReactNode, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import {
@@ -19,7 +19,6 @@ import {
   Camera,
   BookOpen,
   Award,
-  Bell,
 Megaphone,
   GraduationCap,
   UserCog,
@@ -30,7 +29,7 @@ import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
 import { signOut } from "@/lib/firebase/auth";
 import { auth } from "@/lib/firebase/config";
-import { subscribeToUnreadCount } from "@/lib/firebase/notices";
+import NotificationBell from "@/components/NotificationBell";
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -41,24 +40,19 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
   const { user, loading: authLoading, initialized } = useAuth();
   const [loading, setLoading] = useState(!initialized || authLoading);
   const router = useRouter();
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [notificationCount, setNotificationCount] = useState(0);
+  const pathname = usePathname();
+  // Closed by default on small screens: the drawer used to render over the
+  // page content on every mobile page load, forcing a dismiss before reading.
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(min-width: 1024px)").matches;
+  });
 
   useEffect(() => {
     if (initialized && !authLoading) {
       setLoading(false);
     }
   }, [initialized, authLoading]);
-
-// Subscribe to notification count for students
-  useEffect(() => {
-    if (user && user.role === "student") {
-      const unsub = subscribeToUnreadCount(user.id, (count) => {
-        setNotificationCount(count);
-      });
-      return () => unsub();
-    }
-  }, [user]);
 
   useEffect(() => {
     // Only check auth after fully initialized and not loading
@@ -149,7 +143,6 @@ const teacherMenuItems = [
     { icon: Megaphone, label: "Notices", href: "/dashboard/teacher/notices" },
     { icon: FileText, label: "Submissions & OCR", href: "/dashboard/teacher/answers" },
     { icon: Camera, label: "Watch Live", href: "/dashboard/teacher/watch-live" },
-    { icon: Shield, label: "Live Monitoring", href: "/dashboard/teacher/monitoring" },
     { icon: ImageIcon, label: "Snapshots", href: "/dashboard/teacher/snapshots" },
     { icon: Users, label: "Students", href: "/dashboard/teacher/students" },
     { icon: User, label: "My Profile", href: "/profile" },
@@ -199,22 +192,45 @@ const teacherMenuItems = [
 
           {/* Menu Items */}
 <nav className="flex-1 px-4 py-4 space-y-1 overflow-y-auto" aria-label="Dashboard navigation">
-            {menuItems.map((item) => (
-              <Link key={item.href} href={item.href}>
-                <motion.div
-                  whileHover={{ x: 4 }}
-                  className="flex items-center space-x-3 px-3 py-2 rounded-lg hover:bg-primary-50 text-gray-700 hover:text-primary-700 transition-colors relative"
+            {menuItems.map((item) => {
+              // Exact match for dashboard roots, prefix match for sections, so
+              // a detail page (e.g. /notices/abc) still highlights its parent.
+              const isRoot = item.href === `/dashboard/${role}`;
+              const isActive = isRoot
+                ? pathname === item.href
+                : pathname === item.href || pathname?.startsWith(`${item.href}/`);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  aria-current={isActive ? "page" : undefined}
+                  onClick={() => {
+                    // Dismiss the drawer after navigating on mobile.
+                    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1024px)").matches) {
+                      setSidebarOpen(false);
+                    }
+                  }}
                 >
-                  <item.icon className="h-5 w-5" />
-                  <span className="text-sm font-medium">{item.label}</span>
-                  {item.label === "Notices" && role === "student" && notificationCount > 0 && (
-                    <span className="absolute right-2 top-1/2 -translate-y-1/2 bg-red-500 text-white text-xs font-bold rounded-full h-5 min-w-[20px] flex items-center justify-center px-1">
-                      {notificationCount > 99 ? "99+" : notificationCount}
-                    </span>
-                  )}
-                </motion.div>
-              </Link>
-            ))}
+                  <motion.div
+                    whileHover={{ x: 4 }}
+                    className={`flex items-center space-x-3 px-3 py-2 rounded-lg transition-colors relative ${
+                      isActive
+                        ? "bg-primary-50 text-primary-700 font-semibold"
+                        : "text-gray-700 hover:bg-primary-50 hover:text-primary-700"
+                    }`}
+                  >
+                    {isActive && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute left-0 top-1/2 -translate-y-1/2 h-6 w-1 rounded-r bg-primary-600"
+                      />
+                    )}
+                    <item.icon className="h-5 w-5" />
+                    <span className="text-sm font-medium">{item.label}</span>
+                  </motion.div>
+                </Link>
+              );
+            })}
           </nav>
 
           {/* Logout */}
@@ -245,18 +261,7 @@ const teacherMenuItems = [
             </button>
 <div className="flex items-center space-x-4">
               <span className="text-sm text-gray-600 hidden sm:inline">Welcome back, {user.name}!</span>
-              {role === "student" && (
-                <Link href="/dashboard/student/notices">
-                  <Button variant="ghost" size="sm" className="relative">
-                    <Bell className="h-5 w-5" />
-                    {notificationCount > 0 && (
-                      <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs font-bold rounded-full h-4 min-w-[16px] flex items-center justify-center px-1">
-                        {notificationCount > 9 ? "9+" : notificationCount}
-                      </span>
-                    )}
-                  </Button>
-                </Link>
-              )}
+              {role === "student" && <NotificationBell userId={user.id} />}
               <Link href="/profile">
                 <Button variant="outline" size="sm" className="flex items-center gap-2">
                   {user.avatarUrl ? (

@@ -84,8 +84,12 @@ export default function RegisterPage() {
       }
 
       // Save the registration session so the verify-email page can complete it.
+      // `password` is only used, if present, as a last-resort client sign-in
+      // after verification when no Admin SDK custom token is available (see
+      // verify-email/page.tsx) — it's cleared from storage as soon as it's used.
       const session = {
         email: formData.email,
+        password: formData.password,
         verificationToken: data.verificationToken,
         role: formData.role,
         name: formData.name,

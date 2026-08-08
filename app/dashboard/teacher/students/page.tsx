@@ -15,8 +15,8 @@ import {
   Loader2,
   RefreshCw,
   GraduationCap,
-  UserCheck,
   Download,
+  AlertCircle,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
@@ -54,13 +54,17 @@ export default function TeacherStudentsPage() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
   const loadData = useCallback(async (teacherId: string) => {
     try {
       setLoading(true);
+      setError(null);
       const [mappingsData, assign, allStudentDocs] = await Promise.all([
         getAssignedStudents(teacherId).catch(() => []),
         getAssignmentsByTeacher(teacherId).catch(() => []),
+        // Only used to enrich the students this teacher is already mapped to
+        // with their full profile — never to widen who is shown.
         getUsersByRole("student").catch(() => []),
       ]);
 
@@ -74,58 +78,47 @@ export default function TeacherStudentsPage() {
 
       const studentMap = new Map<string, StudentInfo>();
 
-      // 1. Process explicit teacher-student mappings if present
-      if (mappingsData.length > 0) {
-        for (const mapping of mappingsData) {
-          const sid = mapping.studentId;
-          const u = userMap.get(sid);
-          if (!studentMap.has(sid)) {
-            studentMap.set(sid, {
-              id: sid,
-              name: u?.name || mapping.studentName || `Student ${sid.slice(0, 8)}`,
-              email: u?.email || "",
-              studentCode: u?.studentCode || mapping.studentCode || "",
-              batch: u?.batch || mapping.batchName || "241",
-              section: u?.section || mapping.sectionName || "D1",
-              department: u?.department || "",
-              phone: u?.phone || "",
-              status: u?.status || "active",
-              createdAt: u?.createdAt,
-              courses: [],
-            });
-          }
-          const student = studentMap.get(sid)!;
-          if (mapping.courseName && !student.courses.some((c) => c.courseId === mapping.courseId)) {
-            student.courses.push({
-              courseId: mapping.courseId,
-              courseName: mapping.courseName || mapping.courseId,
-            });
-          }
-        }
-      }
-
-      // 2. If no explicit mappings exist yet, load all registered student profiles
-      if (studentMap.size === 0) {
-        for (const u of allStudentDocs) {
-          studentMap.set(u.id, {
-            id: u.id,
-            name: u.name || `Student ${u.id.slice(0, 8)}`,
-            email: u.email || "",
-            studentCode: u.studentCode || "",
-            batch: u.batch || "241",
-            section: u.section || "D1",
-            department: u.department || "",
-            phone: u.phone || "",
-            status: u.status || "active",
-            createdAt: u.createdAt,
+      // Build the roster strictly from this teacher's admin assignments.
+      //
+      // There used to be a fallback here: if a teacher had no mappings, the page
+      // loaded *every* student in the system and presented them as "assigned to
+      // you" — complete with an Export-to-PDF of their names, emails and phone
+      // numbers. An unassigned teacher could walk the whole student directory.
+      for (const mapping of mappingsData) {
+        const sid = mapping.studentId;
+        const u = userMap.get(sid);
+        if (!studentMap.has(sid)) {
+          studentMap.set(sid, {
+            id: sid,
+            name: u?.name || mapping.studentName || `Student ${sid.slice(0, 8)}`,
+            email: u?.email || "",
+            studentCode: u?.studentCode || mapping.studentCode || "",
+            // No invented defaults: a blank batch renders as "—" rather than
+            // showing every student as batch 241 / section D1.
+            batch: u?.batch || mapping.batchName || "",
+            section: u?.section || mapping.sectionName || "",
+            department: u?.department || "",
+            phone: u?.phone || "",
+            status: u?.status || "active",
+            createdAt: u?.createdAt,
             courses: [],
+          });
+        }
+        const student = studentMap.get(sid)!;
+        if (mapping.courseName && !student.courses.some((c) => c.courseId === mapping.courseId)) {
+          student.courses.push({
+            courseId: mapping.courseId,
+            courseName: mapping.courseName || mapping.courseId,
           });
         }
       }
 
-      setStudents(Array.from(studentMap.values()));
-    } catch (error) {
-      console.error("Failed to load teacher students:", error);
+      setStudents(
+        Array.from(studentMap.values()).sort((a, b) => a.name.localeCompare(b.name))
+      );
+    } catch (err) {
+      console.error("Failed to load teacher students:", err);
+      setError("Could not load your students. Check your connection and try again.");
     } finally {
       setLoading(false);
     }
@@ -231,7 +224,12 @@ export default function TeacherStudentsPage() {
             </p>
           </div>
           <div className="flex gap-2">
-            <Button onClick={handleDownloadPdf} variant="outline" className="flex items-center gap-2">
+            <Button
+              onClick={handleDownloadPdf}
+              variant="outline"
+              disabled={loading || filteredStudents.length === 0}
+              className="flex items-center gap-2"
+            >
               <Download className="h-4 w-4" />
               Download PDF{selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}
             </Button>
@@ -246,6 +244,16 @@ export default function TeacherStudentsPage() {
             </Button>
           </div>
         </div>
+
+        {error && (
+          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">{error}</div>
+            <Button size="sm" variant="outline" onClick={handleRefresh}>
+              Retry
+            </Button>
+          </div>
+        )}
 
         {/* Stats Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -287,6 +295,7 @@ export default function TeacherStudentsPage() {
         </div>
 
         {/* Search */}
+        {students.length > 0 && (
         <Card>
           <CardContent className="p-4">
             <div className="relative">
@@ -300,6 +309,7 @@ export default function TeacherStudentsPage() {
             </div>
           </CardContent>
         </Card>
+        )}
 
         {/* Student Table / Cards */}
         <Card>
@@ -315,11 +325,26 @@ export default function TeacherStudentsPage() {
                 <Loader2 className="h-6 w-6 animate-spin mr-2" />
                 Loading students...
               </div>
+            ) : students.length === 0 ? (
+              <div className="text-center py-12 text-gray-500">
+                <Users className="h-12 w-12 mx-auto mb-3 text-gray-300" />
+                <p className="text-lg font-medium">No students assigned yet</p>
+                <p className="text-sm mt-1 max-w-md mx-auto">
+                  An administrator assigns you a Course, Batch and Section, and the
+                  students enrolled in it appear here automatically.
+                </p>
+              </div>
             ) : filteredStudents.length === 0 ? (
               <div className="text-center py-12 text-gray-500">
                 <Users className="h-12 w-12 mx-auto mb-3 text-gray-300" />
-                <p className="text-lg font-medium">No students found</p>
-                <p className="text-sm mt-1">Try adjusting your search criteria</p>
+                <p className="text-lg font-medium">No matching students</p>
+                <p className="text-sm mt-1">
+                  None of your {students.length} student{students.length !== 1 ? "s" : ""} match
+                  &ldquo;{searchQuery}&rdquo;.
+                </p>
+                <Button variant="outline" className="mt-4" onClick={() => setSearchQuery("")}>
+                  Clear search
+                </Button>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -374,12 +399,12 @@ export default function TeacherStudentsPage() {
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
-                            Batch {student.batch || "241"}
+                            {student.batch ? `Batch ${student.batch}` : "—"}
                           </Badge>
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
-                            Section {student.section || "D1"}
+                            {student.section ? `Section ${student.section}` : "—"}
                           </Badge>
                         </td>
                         <td className="px-4 py-3">

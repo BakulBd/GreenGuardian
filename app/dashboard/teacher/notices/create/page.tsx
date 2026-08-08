@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,7 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { createNotice, getTargetedStudentIds, publishNoticeWithNotifications } from "@/lib/firebase/notices";
+import { createNotice, getTargetedStudentIds, publishNoticeWithNotifications, notifyNoticePublished } from "@/lib/firebase/notices";
+import { subscribeToAssignedCatalog, AssignedCatalogEntry } from "@/lib/firebase/assignments";
 import { uploadFile } from "@/lib/firebase/storage";
 import { Notice, NoticeTargetType } from "@/lib/types";
 import {
@@ -28,11 +29,6 @@ import {
   BookOpen,
 } from "lucide-react";
 import Link from "next/link";
-import {
-  DEFAULT_COURSES,
-  DEFAULT_BATCHES,
-  DEFAULT_SECTIONS,
-} from "@/lib/academics/catalog";
 
 export default function CreateNoticePage() {
   const { user } = useAuth();
@@ -53,6 +49,27 @@ export default function CreateNoticePage() {
   const [attachmentName, setAttachmentName] = useState("");
   const [attachmentType, setAttachmentType] = useState("");
   const [saving, setSaving] = useState(false);
+  const [assignedCatalog, setAssignedCatalog] = useState<AssignedCatalogEntry[]>([]);
+
+  // Course/Batch/Section options are restricted to what an admin actually
+  // assigned this teacher — same source as exam creation and "My Courses".
+  useEffect(() => {
+    if (!user) return;
+    const unsubscribe = subscribeToAssignedCatalog(user.id, setAssignedCatalog);
+    return () => unsubscribe();
+  }, [user]);
+
+  const assignedBatchNames = useMemo(() => {
+    const names = new Set<string>();
+    assignedCatalog.forEach((c) => c.batches.forEach((b) => names.add(b.batchName)));
+    return Array.from(names).sort();
+  }, [assignedCatalog]);
+
+  const assignedSectionNames = useMemo(() => {
+    const names = new Set<string>();
+    assignedCatalog.forEach((c) => c.batches.forEach((b) => b.sections.forEach((s) => names.add(s.sectionName))));
+    return Array.from(names).sort();
+  }, [assignedCatalog]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -96,8 +113,8 @@ export default function CreateNoticePage() {
 
   const handleCourseChange = (courseId: string) => {
     setTargetCourseId(courseId);
-    const course = DEFAULT_COURSES.find((c) => c.id === courseId);
-    setTargetCourseName(course?.name || "");
+    const course = assignedCatalog.find((c) => c.courseId === courseId);
+    setTargetCourseName(course?.courseName || "");
   };
 
   const handleSave = async (status: "draft" | "published") => {
@@ -149,6 +166,9 @@ const noticeId = await createNotice(noticeData);
 
         if (targetedStudentIds.length > 0) {
           const result = await publishNoticeWithNotifications(noticeId, targetedStudentIds);
+          notifyNoticePublished(noticeId, targetedStudentIds).catch((err) =>
+            console.warn("[CreateNotice] Failed to send publish emails:", err)
+          );
           toast({
             title: "✅ Notice Published",
             description: `Notice sent to ${result.notificationCount} student(s) successfully.`,
@@ -370,13 +390,16 @@ const noticeId = await createNotice(noticeData);
                         <SelectValue placeholder="Choose a course..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {DEFAULT_COURSES.map((course) => (
-                          <SelectItem key={course.id} value={course.id}>
-                            {course.code} - {course.name}
+                        {assignedCatalog.map((course) => (
+                          <SelectItem key={course.courseId} value={course.courseId}>
+                            {course.courseCode ? `${course.courseCode} - ` : ""}{course.courseName}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
+                    {assignedCatalog.length === 0 && (
+                      <p className="text-xs text-amber-700">You have no course assignments yet.</p>
+                    )}
                   </div>
                 )}
 
@@ -389,9 +412,9 @@ const noticeId = await createNotice(noticeData);
                         <SelectValue placeholder="Choose a batch..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {DEFAULT_BATCHES.map((batch) => (
-                          <SelectItem key={batch.id} value={batch.name}>
-                            Batch {batch.name}
+                        {assignedBatchNames.map((name) => (
+                          <SelectItem key={name} value={name}>
+                            Batch {name}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -408,9 +431,9 @@ const noticeId = await createNotice(noticeData);
                         <SelectValue placeholder="Choose a section..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {DEFAULT_SECTIONS.map((section) => (
-                          <SelectItem key={section.id} value={section.name}>
-                            Section {section.name}
+                        {assignedSectionNames.map((name) => (
+                          <SelectItem key={name} value={name}>
+                            Section {name}
                           </SelectItem>
                         ))}
                       </SelectContent>

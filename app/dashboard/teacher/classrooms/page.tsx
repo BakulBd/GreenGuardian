@@ -31,7 +31,9 @@ import {
   restoreClassroom,
   deleteClassroom,
   subscribeToTeacherClassrooms,
+  addStudentsToClassroomByGroup,
 } from "@/lib/firebase/classrooms";
+import { subscribeToAssignedCatalog, AssignedCatalogEntry } from "@/lib/firebase/assignments";
 import { Classroom } from "@/lib/types";
 
 export default function TeacherClassroomsPage() {
@@ -47,6 +49,11 @@ export default function TeacherClassroomsPage() {
   const [editing, setEditing] = useState<Classroom | null>(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ name: "", subject: "", section: "", semester: "", description: "" });
+  const [assignedCatalog, setAssignedCatalog] = useState<AssignedCatalogEntry[]>([]);
+  const [bulkEnroll, setBulkEnroll] = useState(false);
+  const [bulkCourseId, setBulkCourseId] = useState("");
+  const [bulkBatchId, setBulkBatchId] = useState("");
+  const [bulkSectionId, setBulkSectionId] = useState("");
 
   useEffect(() => {
     if (!user) return;
@@ -57,10 +64,23 @@ export default function TeacherClassroomsPage() {
     return () => unsub();
   }, [user]);
 
+  useEffect(() => {
+    if (!user) return;
+    const unsub = subscribeToAssignedCatalog(user.id, setAssignedCatalog);
+    return () => unsub();
+  }, [user]);
+
+  const bulkCourse = assignedCatalog.find((c) => c.courseId === bulkCourseId);
+  const bulkBatch = bulkCourse?.batches.find((b) => b.batchId === bulkBatchId);
+
   const resetForm = () => {
     setForm({ name: "", subject: "", section: "", semester: "", description: "" });
     setEditing(null);
     setShowModal(false);
+    setBulkEnroll(false);
+    setBulkCourseId("");
+    setBulkBatchId("");
+    setBulkSectionId("");
   };
 
   const startEdit = (c: Classroom) => {
@@ -81,8 +101,23 @@ export default function TeacherClassroomsPage() {
         await updateClassroom(editing.id, form);
         toast({ title: "Classroom Updated" });
       } else {
-        await createClassroom({ ...form, teacherId: user.id, teacherName: user.name });
-        toast({ title: "Classroom Created", description: `${form.name} is ready.` });
+        const classroomId = await createClassroom({ ...form, teacherId: user.id, teacherName: user.name });
+        let description = `${form.name} is ready.`;
+
+        if (bulkEnroll && bulkCourse && bulkBatch && bulkSectionId) {
+          const section = bulkBatch.sections.find((s) => s.sectionId === bulkSectionId);
+          if (section) {
+            const result = await addStudentsToClassroomByGroup(
+              { id: classroomId, teacherId: user.id },
+              bulkCourse.courseId,
+              bulkBatch.batchName,
+              section.sectionName
+            );
+            description += ` Enrolled ${result.added} student${result.added === 1 ? "" : "s"} from ${bulkCourse.courseName} / Batch ${bulkBatch.batchName} / Section ${section.sectionName}.`;
+          }
+        }
+
+        toast({ title: "Classroom Created", description });
       }
       resetForm();
     } catch (error: any) {
@@ -256,6 +291,56 @@ export default function TeacherClassroomsPage() {
                 <Label>Description</Label>
                 <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={3} />
               </div>
+
+              {!editing && (
+                <div className="space-y-2 bg-emerald-50/60 border border-emerald-200 rounded-lg p-3">
+                  <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                    <input type="checkbox" checked={bulkEnroll} onChange={(e) => setBulkEnroll(e.target.checked)} />
+                    Bulk-enroll students by Course/Batch/Section
+                  </label>
+                  {bulkEnroll && (
+                    assignedCatalog.length === 0 ? (
+                      <p className="text-xs text-amber-700">You have no Course/Batch/Section assignments yet.</p>
+                    ) : (
+                      <div className="grid grid-cols-3 gap-2">
+                        <select
+                          className="h-9 px-2 border rounded text-xs bg-white"
+                          value={bulkCourseId}
+                          onChange={(e) => { setBulkCourseId(e.target.value); setBulkBatchId(""); setBulkSectionId(""); }}
+                        >
+                          <option value="">Course</option>
+                          {assignedCatalog.map((c) => (
+                            <option key={c.courseId} value={c.courseId}>{c.courseName}</option>
+                          ))}
+                        </select>
+                        <select
+                          className="h-9 px-2 border rounded text-xs bg-white"
+                          value={bulkBatchId}
+                          disabled={!bulkCourse}
+                          onChange={(e) => { setBulkBatchId(e.target.value); setBulkSectionId(""); }}
+                        >
+                          <option value="">Batch</option>
+                          {bulkCourse?.batches.map((b) => (
+                            <option key={b.batchId} value={b.batchId}>Batch {b.batchName}</option>
+                          ))}
+                        </select>
+                        <select
+                          className="h-9 px-2 border rounded text-xs bg-white"
+                          value={bulkSectionId}
+                          disabled={!bulkBatch}
+                          onChange={(e) => setBulkSectionId(e.target.value)}
+                        >
+                          <option value="">Section</option>
+                          {bulkBatch?.sections.map((s) => (
+                            <option key={s.sectionId} value={s.sectionId}>Section {s.sectionName}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-2 border-t">
                 <Button variant="outline" onClick={resetForm} disabled={saving}>
                   Cancel

@@ -26,11 +26,11 @@ import {
   AlertTriangle,
   Check
 } from "lucide-react";
-import { getExam, updateExam, getQuestionsByExam, createQuestion, updateQuestion, deleteQuestion } from "@/lib/firebase/exams";
+import { getExam, updateExam, getQuestionsByExam, createQuestion, updateQuestion, deleteQuestion, notifyExamPublished } from "@/lib/firebase/exams";
+import { subscribeToAssignedCatalog, computeAssignmentTargetStudentIds, AssignedCatalogEntry } from "@/lib/firebase/assignments";
 import { Exam, Question, ExamSettings } from "@/lib/types";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
-import { DEFAULT_COURSES, DEFAULT_BATCHES, DEFAULT_SECTIONS } from "@/lib/academics/catalog";
 
 const defaultSettings: ExamSettings = {
   requireWebcam: true,
@@ -72,8 +72,18 @@ export default function TeacherExamEditClient() {
     correctAnswer: "",
     marks: 10,
   });
+  const [assignedCatalog, setAssignedCatalog] = useState<AssignedCatalogEntry[]>([]);
 
   const examId = params.id as string;
+
+  useEffect(() => {
+    if (!user) return;
+    const unsubscribe = subscribeToAssignedCatalog(user.id, setAssignedCatalog);
+    return () => unsubscribe();
+  }, [user]);
+
+  const selectedCourse = assignedCatalog.find((c) => c.courseId === editedExam.courseId);
+  const selectedBatch = selectedCourse?.batches.find((b) => b.batchId === editedExam.batchId);
 
   useEffect(() => {
     if (examId && examId !== 'placeholder' && user) {
@@ -104,10 +114,12 @@ export default function TeacherExamEditClient() {
       setEditedExam({
         title: examData.title || "",
         description: examData.description || "",
-        courseId: examData.courseId || DEFAULT_COURSES[0].id,
-        courseName: examData.courseName || DEFAULT_COURSES[0].name,
-        batch: examData.batch || DEFAULT_BATCHES[0].name,
-        section: examData.section || DEFAULT_SECTIONS[0].name,
+        courseId: examData.courseId || "",
+        courseName: examData.courseName || "",
+        batchId: examData.batchId || "",
+        batch: examData.batch || "",
+        sectionId: examData.sectionId || "",
+        section: examData.section || "",
         duration: examData.duration || 60,
         totalMarks: examData.totalMarks || 100,
         attemptsAllowed: examData.attemptsAllowed || 1,
@@ -128,26 +140,65 @@ export default function TeacherExamEditClient() {
   };
 
   const handleSaveExam = async () => {
-    if (!exam) return;
+    if (!exam || !user) return;
     if (!editedExam.title?.trim()) {
       toast({ title: "Error", description: "Exam title is required", variant: "destructive" });
+      return;
+    }
+    if (!editedExam.courseId || !editedExam.batchId || !editedExam.sectionId) {
+      toast({ title: "Error", description: "Please select the Course, Batch, and Section this exam is for.", variant: "destructive" });
+      return;
+    }
+    // Students only see an exam inside its start/end window; an inverted window
+    // hides it from everyone.
+    if (
+      editedExam.startDate &&
+      editedExam.endDate &&
+      new Date(editedExam.endDate) <= new Date(editedExam.startDate)
+    ) {
+      toast({
+        title: "Invalid schedule",
+        description: "The end date must be after the start date.",
+        variant: "destructive",
+      });
       return;
     }
 
     setSaving(true);
     try {
-      const totalMarksCalculated = questions.length > 0 
+      const totalMarksCalculated = questions.length > 0
         ? questions.reduce((sum, q) => sum + (q.marks || 0), 0)
         : Number(editedExam.totalMarks || 100);
+
+      // Recompute visibility whenever course/batch/section could have
+      // changed — cheap, and keeps `targetStudentIds` (what firestore.rules
+      // and subscribeToStudentVisibleExams actually check) authoritative.
+      const targetStudentIds = await computeAssignmentTargetStudentIds(
+        user.id,
+        editedExam.courseId,
+        editedExam.batchId,
+        editedExam.sectionId
+      );
 
       const updateData = {
         ...editedExam,
         totalMarks: totalMarksCalculated,
         questionCount: questions.length,
+        targetStudentIds,
       };
+
+      const wasPublished = exam.status === "published" || exam.status === "active";
+      const isNowPublished = updateData.status === "published" || updateData.status === "active";
 
       await updateExam(examId, updateData);
       setExam({ ...exam, ...updateData } as Exam);
+
+      if (!wasPublished && isNowPublished && targetStudentIds.length > 0) {
+        notifyExamPublished(examId, targetStudentIds).catch((err) =>
+          console.warn("[EditExam] Failed to send publish notifications:", err)
+        );
+      }
+
       toast({ title: "Success", description: "Exam details updated successfully" });
       router.push(`/dashboard/teacher/exams/${examId}`);
     } catch (error) {
@@ -335,7 +386,8 @@ export default function TeacherExamEditClient() {
                 />
               </div>
 
-              {/* Academic Dropdowns */}
+              {/* Academic Dropdowns — restricted to this teacher's own
+                  Course/Batch/Section assignments (see lib/firebase/assignments.ts) */}
               <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-4 bg-emerald-50/60 p-4 rounded-lg border border-emerald-200">
                 <div>
                   <Label>Course *</Label>
@@ -343,17 +395,22 @@ export default function TeacherExamEditClient() {
                     className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:ring-2 focus:ring-emerald-500"
                     value={editedExam.courseId || ""}
                     onChange={(e) => {
-                      const cObj = DEFAULT_COURSES.find(c => c.id === e.target.value);
+                      const course = assignedCatalog.find((c) => c.courseId === e.target.value);
                       setEditedExam({
                         ...editedExam,
-                        courseId: e.target.value,
-                        courseName: cObj ? cObj.name : e.target.value
+                        courseId: course?.courseId || "",
+                        courseName: course?.courseName || "",
+                        batchId: "",
+                        batch: "",
+                        sectionId: "",
+                        section: "",
                       });
                     }}
                   >
-                    {DEFAULT_COURSES.map((course) => (
-                      <option key={course.id} value={course.id}>
-                        {course.code} - {course.name}
+                    <option value="">-- Select Course --</option>
+                    {assignedCatalog.map((course) => (
+                      <option key={course.courseId} value={course.courseId}>
+                        {course.courseCode ? `${course.courseCode} - ` : ""}{course.courseName}
                       </option>
                     ))}
                   </select>
@@ -363,12 +420,23 @@ export default function TeacherExamEditClient() {
                   <Label>Batch *</Label>
                   <select
                     className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:ring-2 focus:ring-emerald-500"
-                    value={editedExam.batch || ""}
-                    onChange={(e) => setEditedExam({ ...editedExam, batch: e.target.value })}
+                    value={editedExam.batchId || ""}
+                    disabled={!selectedCourse}
+                    onChange={(e) => {
+                      const batch = selectedCourse?.batches.find((b) => b.batchId === e.target.value);
+                      setEditedExam({
+                        ...editedExam,
+                        batchId: batch?.batchId || "",
+                        batch: batch?.batchName || "",
+                        sectionId: "",
+                        section: "",
+                      });
+                    }}
                   >
-                    {DEFAULT_BATCHES.map((batch) => (
-                      <option key={batch.id} value={batch.name}>
-                        Batch {batch.name}
+                    <option value="">-- Select Batch --</option>
+                    {selectedCourse?.batches.map((batch) => (
+                      <option key={batch.batchId} value={batch.batchId}>
+                        Batch {batch.batchName}
                       </option>
                     ))}
                   </select>
@@ -378,12 +446,21 @@ export default function TeacherExamEditClient() {
                   <Label>Section *</Label>
                   <select
                     className="w-full h-10 px-3 rounded-md border border-gray-300 bg-white text-sm focus:ring-2 focus:ring-emerald-500"
-                    value={editedExam.section || ""}
-                    onChange={(e) => setEditedExam({ ...editedExam, section: e.target.value })}
+                    value={editedExam.sectionId || ""}
+                    disabled={!selectedBatch}
+                    onChange={(e) => {
+                      const section = selectedBatch?.sections.find((s) => s.sectionId === e.target.value);
+                      setEditedExam({
+                        ...editedExam,
+                        sectionId: section?.sectionId || "",
+                        section: section?.sectionName || "",
+                      });
+                    }}
                   >
-                    {DEFAULT_SECTIONS.map((section) => (
-                      <option key={section.id} value={section.name}>
-                        Section {section.name}
+                    <option value="">-- Select Section --</option>
+                    {selectedBatch?.sections.map((section) => (
+                      <option key={section.sectionId} value={section.sectionId}>
+                        Section {section.sectionName}
                       </option>
                     ))}
                   </select>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter, useParams } from "next/navigation";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,7 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { getNotice, updateNotice, getTargetedStudentIds, publishNoticeWithNotifications } from "@/lib/firebase/notices";
+import { getNotice, updateNotice, getTargetedStudentIds, publishNoticeWithNotifications, notifyNoticePublished } from "@/lib/firebase/notices";
+import { subscribeToAssignedCatalog, AssignedCatalogEntry } from "@/lib/firebase/assignments";
 import { uploadFile } from "@/lib/firebase/storage";
 import { Notice, NoticeTargetType } from "@/lib/types";
 import {
@@ -27,11 +28,6 @@ import {
   BookOpen,
 } from "lucide-react";
 import Link from "next/link";
-import {
-  DEFAULT_COURSES,
-  DEFAULT_BATCHES,
-  DEFAULT_SECTIONS,
-} from "@/lib/academics/catalog";
 
 export default function EditNoticePage() {
   const { user } = useAuth();
@@ -56,12 +52,31 @@ export default function EditNoticePage() {
   const [fileUploading, setFileUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<"draft" | "published">("draft");
+  const [assignedCatalog, setAssignedCatalog] = useState<AssignedCatalogEntry[]>([]);
 
   useEffect(() => {
     if (noticeId && user) {
       loadNotice();
     }
   }, [noticeId, user]);
+
+  useEffect(() => {
+    if (!user) return;
+    const unsubscribe = subscribeToAssignedCatalog(user.id, setAssignedCatalog);
+    return () => unsubscribe();
+  }, [user]);
+
+  const assignedBatchNames = useMemo(() => {
+    const names = new Set<string>();
+    assignedCatalog.forEach((c) => c.batches.forEach((b) => names.add(b.batchName)));
+    return Array.from(names).sort();
+  }, [assignedCatalog]);
+
+  const assignedSectionNames = useMemo(() => {
+    const names = new Set<string>();
+    assignedCatalog.forEach((c) => c.batches.forEach((b) => b.sections.forEach((s) => names.add(s.sectionName))));
+    return Array.from(names).sort();
+  }, [assignedCatalog]);
 
   const loadNotice = async () => {
     try {
@@ -130,8 +145,8 @@ export default function EditNoticePage() {
 
   const handleCourseChange = (courseId: string) => {
     setTargetCourseId(courseId);
-    const course = DEFAULT_COURSES.find((c) => c.id === courseId);
-    setTargetCourseName(course?.name || "");
+    const course = assignedCatalog.find((c) => c.courseId === courseId);
+    setTargetCourseName(course?.courseName || "");
   };
 
   const handleSave = async (newStatus?: "draft" | "published") => {
@@ -170,6 +185,9 @@ if (newStatus === "published") {
         const targetedStudentIds = await getTargetedStudentIds(fullNotice);
         if (targetedStudentIds.length > 0) {
           const result = await publishNoticeWithNotifications(noticeId, targetedStudentIds);
+          notifyNoticePublished(noticeId, targetedStudentIds).catch((err) =>
+            console.warn("[EditNotice] Failed to send publish emails:", err)
+          );
           toast({ title: "✅ Notice Published", description: `Notice sent to ${result.notificationCount} student(s) successfully.` });
         } else {
           await publishNoticeWithNotifications(noticeId, []);
@@ -301,8 +319,8 @@ if (newStatus === "published") {
                         <SelectValue placeholder="Choose a course..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {DEFAULT_COURSES.map((course) => (
-                          <SelectItem key={course.id} value={course.id}>{course.code} - {course.name}</SelectItem>
+                        {assignedCatalog.map((course) => (
+                          <SelectItem key={course.courseId} value={course.courseId}>{course.courseCode ? `${course.courseCode} - ` : ""}{course.courseName}</SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
@@ -316,8 +334,8 @@ if (newStatus === "published") {
                         <SelectValue placeholder="Choose a batch..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {DEFAULT_BATCHES.map((batch) => (
-                          <SelectItem key={batch.id} value={batch.name}>Batch {batch.name}</SelectItem>
+                        {assignedBatchNames.map((name) => (
+                          <SelectItem key={name} value={name}>Batch {name}</SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
@@ -331,8 +349,8 @@ if (newStatus === "published") {
                         <SelectValue placeholder="Choose a section..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {DEFAULT_SECTIONS.map((section) => (
-                          <SelectItem key={section.id} value={section.name}>Section {section.name}</SelectItem>
+                        {assignedSectionNames.map((name) => (
+                          <SelectItem key={name} value={name}>Section {name}</SelectItem>
                         ))}
                       </SelectContent>
                     </Select>

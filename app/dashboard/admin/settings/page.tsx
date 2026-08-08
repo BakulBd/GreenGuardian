@@ -7,40 +7,44 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Save, Loader2, Shield, Bell, Eye, Lock } from "lucide-react";
+import { Save, Loader2, Shield, Eye, AlertCircle } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 
+/**
+ * Only settings that something actually reads live here.
+ *
+ * The page previously also offered Site Name, Require Teacher Approval,
+ * Email on New Teacher and Email on Exam Completion. Nothing in the codebase
+ * ever read any of them, so toggling them changed nothing while looking like
+ * it did. They are gone rather than left as decoration:
+ *   - Teacher approval is a security gate enforced unconditionally in
+ *     DashboardLayout and the login flow; making it switchable would only
+ *     weaken it.
+ *   - The notification switches described emails that are not sent from those
+ *     events at all.
+ */
 interface Settings {
-  siteName: string;
+  /** Enforced server-side in /api/auth/register. */
   allowRegistration: boolean;
-  requireTeacherApproval: boolean;
   proctoring: {
+    /** Seeded into each new exam's proctoringSettings. */
     faceDetection: boolean;
     tabSwitchDetection: boolean;
     fullscreenRequired: boolean;
+    /** Read live by the exam client to cap warnings before auto-submit. */
     maxWarnings: number;
-  };
-  notifications: {
-    emailOnNewTeacher: boolean;
-    emailOnExamComplete: boolean;
   };
 }
 
 const defaultSettings: Settings = {
-  siteName: "GreenGuardian",
   allowRegistration: true,
-  requireTeacherApproval: true,
   proctoring: {
     faceDetection: true,
     tabSwitchDetection: true,
     fullscreenRequired: true,
     maxWarnings: 5,
-  },
-  notifications: {
-    emailOnNewTeacher: true,
-    emailOnExamComplete: true,
   },
 };
 
@@ -48,29 +52,55 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
   const { toast } = useToast();
+
+  const update = (next: Settings) => {
+    setSettings(next);
+    setDirty(true);
+  };
 
   useEffect(() => {
     loadSettings();
   }, []);
 
   const loadSettings = async () => {
+    setError(null);
     try {
       const settingsDoc = await getDoc(doc(db, "settings", "global"));
       if (settingsDoc.exists()) {
-        setSettings({ ...defaultSettings, ...settingsDoc.data() as Settings });
+        const data = settingsDoc.data() as Partial<Settings>;
+        setSettings({
+          ...defaultSettings,
+          ...data,
+          proctoring: { ...defaultSettings.proctoring, ...(data.proctoring || {}) },
+        });
       }
-    } catch (error) {
-      console.error("Error loading settings:", error);
+      setDirty(false);
+    } catch (err) {
+      console.error("Error loading settings:", err);
+      setError("Could not load settings. Showing defaults — saving will overwrite the stored values.");
     } finally {
       setLoading(false);
     }
   };
 
   const handleSave = async () => {
+    if (saving) return;
+    if (settings.proctoring.maxWarnings < 1 || settings.proctoring.maxWarnings > 20) {
+      toast({
+        title: "Invalid value",
+        description: "Maximum warnings must be between 1 and 20.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setSaving(true);
     try {
       await setDoc(doc(db, "settings", "global"), settings, { merge: true });
+      setDirty(false);
       toast({
         title: "Settings Saved",
         description: "Your settings have been updated successfully.",
@@ -104,46 +134,40 @@ export default function SettingsPage() {
           <p className="text-gray-600 mt-1">Configure your exam proctoring system</p>
         </div>
 
-        {/* General Settings */}
+        {error && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">{error}</div>
+            <Button size="sm" variant="outline" onClick={loadSettings}>
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {/* Access */}
         <Card>
           <CardHeader>
             <div className="flex items-center gap-3">
               <Shield className="h-5 w-5 text-green-600" />
               <div>
-                <CardTitle>General Settings</CardTitle>
-                <CardDescription>Basic configuration options</CardDescription>
+                <CardTitle>Access</CardTitle>
+                <CardDescription>Who may create an account</CardDescription>
               </div>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="siteName">Site Name</Label>
-              <Input
-                id="siteName"
-                value={settings.siteName}
-                onChange={(e) => setSettings({ ...settings, siteName: e.target.value })}
-              />
-            </div>
-
-            <div className="flex items-center justify-between py-2">
+            <div className="flex items-center justify-between gap-4 py-2">
               <div>
-                <Label>Allow Registration</Label>
-                <p className="text-sm text-gray-500">Allow new users to register</p>
+                <Label htmlFor="allowRegistration">Allow Self-Registration</Label>
+                <p className="text-sm text-gray-500">
+                  When off, the public sign-up form is refused server-side. Administrators can
+                  still add students from the Students page.
+                </p>
               </div>
               <Switch
+                id="allowRegistration"
                 checked={settings.allowRegistration}
-                onCheckedChange={(checked) => setSettings({ ...settings, allowRegistration: checked })}
-              />
-            </div>
-
-            <div className="flex items-center justify-between py-2">
-              <div>
-                <Label>Require Teacher Approval</Label>
-                <p className="text-sm text-gray-500">Teachers must be approved before creating exams</p>
-              </div>
-              <Switch
-                checked={settings.requireTeacherApproval}
-                onCheckedChange={(checked) => setSettings({ ...settings, requireTeacherApproval: checked })}
+                onCheckedChange={(checked) => update({ ...settings, allowRegistration: checked })}
               />
             </div>
           </CardContent>
@@ -155,54 +179,15 @@ export default function SettingsPage() {
             <div className="flex items-center gap-3">
               <Eye className="h-5 w-5 text-blue-600" />
               <div>
-                <CardTitle>Proctoring Settings</CardTitle>
-                <CardDescription>Default proctoring options for exams</CardDescription>
+                <CardTitle>Proctoring</CardTitle>
+                <CardDescription>
+                  Warning cap applies to every running exam. The detection switches are the
+                  defaults applied to newly created exams; existing exams keep their own settings.
+                </CardDescription>
               </div>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex items-center justify-between py-2">
-              <div>
-                <Label>Face Detection</Label>
-                <p className="text-sm text-gray-500">Enable AI-powered face detection</p>
-              </div>
-              <Switch
-                checked={settings.proctoring.faceDetection}
-                onCheckedChange={(checked) => setSettings({
-                  ...settings,
-                  proctoring: { ...settings.proctoring, faceDetection: checked }
-                })}
-              />
-            </div>
-
-            <div className="flex items-center justify-between py-2">
-              <div>
-                <Label>Tab Switch Detection</Label>
-                <p className="text-sm text-gray-500">Detect when students switch browser tabs</p>
-              </div>
-              <Switch
-                checked={settings.proctoring.tabSwitchDetection}
-                onCheckedChange={(checked) => setSettings({
-                  ...settings,
-                  proctoring: { ...settings.proctoring, tabSwitchDetection: checked }
-                })}
-              />
-            </div>
-
-            <div className="flex items-center justify-between py-2">
-              <div>
-                <Label>Fullscreen Required</Label>
-                <p className="text-sm text-gray-500">Require fullscreen mode during exams</p>
-              </div>
-              <Switch
-                checked={settings.proctoring.fullscreenRequired}
-                onCheckedChange={(checked) => setSettings({
-                  ...settings,
-                  proctoring: { ...settings.proctoring, fullscreenRequired: checked }
-                })}
-              />
-            </div>
-
             <div className="space-y-2">
               <Label htmlFor="maxWarnings">Maximum Warnings</Label>
               <Input
@@ -211,62 +196,79 @@ export default function SettingsPage() {
                 min="1"
                 max="20"
                 value={settings.proctoring.maxWarnings}
-                onChange={(e) => setSettings({
-                  ...settings,
-                  proctoring: { ...settings.proctoring, maxWarnings: parseInt(e.target.value) || 5 }
-                })}
+                onChange={(e) =>
+                  update({
+                    ...settings,
+                    proctoring: {
+                      ...settings.proctoring,
+                      maxWarnings: parseInt(e.target.value, 10) || 1,
+                    },
+                  })
+                }
                 className="w-32"
               />
-              <p className="text-sm text-gray-500">Number of warnings before exam is flagged</p>
+              <p className="text-sm text-gray-500">
+                A student&apos;s exam auto-submits once they exceed this many warnings.
+              </p>
             </div>
-          </CardContent>
-        </Card>
 
-        {/* Notification Settings */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-3">
-              <Bell className="h-5 w-5 text-yellow-600" />
+            <div className="flex items-center justify-between gap-4 py-2 border-t pt-4">
               <div>
-                <CardTitle>Notifications</CardTitle>
-                <CardDescription>Email notification preferences</CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between py-2">
-              <div>
-                <Label>New Teacher Registration</Label>
-                <p className="text-sm text-gray-500">Receive email when a new teacher registers</p>
+                <Label htmlFor="faceDetection">Face Detection (default)</Label>
+                <p className="text-sm text-gray-500">Enable AI face detection on new exams</p>
               </div>
               <Switch
-                checked={settings.notifications.emailOnNewTeacher}
-                onCheckedChange={(checked) => setSettings({
-                  ...settings,
-                  notifications: { ...settings.notifications, emailOnNewTeacher: checked }
-                })}
+                id="faceDetection"
+                checked={settings.proctoring.faceDetection}
+                onCheckedChange={(checked) =>
+                  update({
+                    ...settings,
+                    proctoring: { ...settings.proctoring, faceDetection: checked },
+                  })
+                }
               />
             </div>
 
-            <div className="flex items-center justify-between py-2">
+            <div className="flex items-center justify-between gap-4 py-2">
               <div>
-                <Label>Exam Completion</Label>
-                <p className="text-sm text-gray-500">Receive email when exams are completed</p>
+                <Label htmlFor="tabSwitchDetection">Tab Switch Detection (default)</Label>
+                <p className="text-sm text-gray-500">Flag students who leave the exam tab</p>
               </div>
               <Switch
-                checked={settings.notifications.emailOnExamComplete}
-                onCheckedChange={(checked) => setSettings({
-                  ...settings,
-                  notifications: { ...settings.notifications, emailOnExamComplete: checked }
-                })}
+                id="tabSwitchDetection"
+                checked={settings.proctoring.tabSwitchDetection}
+                onCheckedChange={(checked) =>
+                  update({
+                    ...settings,
+                    proctoring: { ...settings.proctoring, tabSwitchDetection: checked },
+                  })
+                }
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-4 py-2">
+              <div>
+                <Label htmlFor="fullscreenRequired">Fullscreen Required (default)</Label>
+                <p className="text-sm text-gray-500">Require fullscreen mode during new exams</p>
+              </div>
+              <Switch
+                id="fullscreenRequired"
+                checked={settings.proctoring.fullscreenRequired}
+                onCheckedChange={(checked) =>
+                  update({
+                    ...settings,
+                    proctoring: { ...settings.proctoring, fullscreenRequired: checked },
+                  })
+                }
               />
             </div>
           </CardContent>
         </Card>
 
         {/* Save Button */}
-        <div className="flex justify-end">
-          <Button onClick={handleSave} disabled={saving}>
+        <div className="flex items-center justify-end gap-3">
+          {dirty && <span className="text-sm text-amber-700">Unsaved changes</span>}
+          <Button onClick={handleSave} disabled={saving || !dirty}>
             {saving ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />

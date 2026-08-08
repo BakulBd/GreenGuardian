@@ -17,13 +17,14 @@ import {
   Loader2,
   PlayCircle,
   Eye,
-  Megaphone
+  Megaphone,
+  School
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { collection, query, where, getDocs, doc, getDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
-import { subscribeToPublishedExams } from "@/lib/firebase/exams";
+import { subscribeToStudentVisibleExams } from "@/lib/firebase/exams";
 import Link from "next/link";
 
 interface Exam {
@@ -77,16 +78,13 @@ export default function StudentDashboardPage() {
   // this listener can update independently as exams are published/edited.
   useEffect(() => {
     if (!user) return;
-    const assignedTeacherIds = user.assignedTeacherIds || [];
-    const unsubscribe = subscribeToPublishedExams((allExams) => {
+    // Server-side visibility (see firestore.rules `exams` read rule) already
+    // guarantees this query can only return exams this student is actually
+    // targeted for — the date-window check below is a display concern, not
+    // a permission one.
+    const unsubscribe = subscribeToStudentVisibleExams(user.id, (allExams) => {
       const now = new Date();
       const exams = allExams.filter((exam) => {
-        // A student only sees exams from teachers an admin assigned them
-        // to (Task 10) — see lib/firebase/assignments.ts.
-        if ((exam as any).teacherId && !assignedTeacherIds.includes((exam as any).teacherId)) {
-          return false;
-        }
-        // Check if exam is within date range
         if ((exam as any).startDate && new Date((exam as any).startDate) > now) return false;
         if ((exam as any).endDate && new Date((exam as any).endDate) < now) return false;
         return true;
@@ -118,10 +116,19 @@ export default function StudentDashboardPage() {
             .filter((id: string) => id && !titleById.has(id))
         )
       );
+      // Per-item catch is essential: a student legitimately has sessions for
+      // exams they can no longer read (archived, or retargeted away from
+      // them). Without it a single denied read rejected this whole
+      // Promise.all and blanked the entire dashboard — no history, no stats.
+      // A missing title just falls back to "Exam".
       await Promise.all(
         missingExamIds.map(async (examId: string) => {
-          const examDoc = await getDoc(doc(db, "exams", examId));
-          if (examDoc.exists()) titleById.set(examId, (examDoc.data() as any).title);
+          try {
+            const examDoc = await getDoc(doc(db, "exams", examId));
+            if (examDoc.exists()) titleById.set(examId, (examDoc.data() as any).title);
+          } catch {
+            // Not readable anymore — keep the generic title.
+          }
         })
       );
 
@@ -308,7 +315,25 @@ export default function StudentDashboardPage() {
             {availableExams.length === 0 ? (
               <div className="text-center py-8 text-gray-500">
                 <FileText className="mx-auto h-12 w-12 text-gray-300" />
-                <p className="mt-4">No exams available at the moment</p>
+                {/* Distinguish "nothing scheduled" from "you aren't linked to a
+                    teacher yet" — both used to show the same dead end, and the
+                    second is the one the student can actually act on. */}
+                {(user?.assignedTeacherIds?.length ?? 0) === 0 ? (
+                  <>
+                    <p className="mt-4 font-medium text-gray-700">You&apos;re not enrolled with a teacher yet</p>
+                    <p className="mt-1 text-sm">
+                      Join a classroom with a class code, or ask your admin to assign you to a course.
+                    </p>
+                    <Link href="/dashboard/student/classrooms">
+                      <Button variant="outline" size="sm" className="mt-4">
+                        <School className="h-4 w-4 mr-2" />
+                        Join a Classroom
+                      </Button>
+                    </Link>
+                  </>
+                ) : (
+                  <p className="mt-4">No exams available at the moment</p>
+                )}
               </div>
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
+import Link from "next/link";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,22 +24,21 @@ import {
   AlertTriangle,
   Clock,
   Users,
-  Monitor,
   Maximize2,
   Eye,
-  History,
   Image as ImageIcon,
   Shield,
   Activity,
-  X,
   ChevronLeft,
-  ChevronRight,
   Loader2,
   CheckCircle,
-  XCircle,
+  PauseCircle,
+  FileText,
+  AlertCircle,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import LiveVideoTile from "@/components/LiveVideoTile";
+import ExamSuspendControl from "@/components/ExamSuspendControl";
 import { LiveTransport } from "@/lib/services/liveVideo";
 import { useAuth } from "@/hooks/useAuth";
 import { getExamsByTeacher } from "@/lib/firebase/exams";
@@ -71,6 +71,8 @@ export default function TeacherWatchLivePage() {
   const [selectedExamId, setSelectedExamId] = useState<string>("");
   const [liveSessions, setLiveSessions] = useState<LiveStudentSession[]>([]);
   const [loading, setLoading] = useState(true);
+  const [examsError, setExamsError] = useState<string | null>(null);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
 
   // Fullscreen state
   const [fullscreenStudent, setFullscreenStudent] = useState<LiveStudentSession | null>(null);
@@ -81,6 +83,11 @@ export default function TeacherWatchLivePage() {
   const [studentSnapshots, setProctoringSnapshots] = useState<ProctoringSnapshot[]>([]);
   const [studentWarningScreenshots, setStudentWarningScreenshots] = useState<WarningScreenshot[]>([]);
   const [showDetailDialog, setShowDetailDialog] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  // Guards against a slow fetch for a previously-opened student overwriting
+  // the details of the one the teacher is looking at now.
+  const detailRequestRef = useRef(0);
 
   // Which transport each tile is currently receiving video on.
   const [transports, setTransports] = useState<Record<string, LiveTransport>>({});
@@ -98,28 +105,37 @@ export default function TeacherWatchLivePage() {
     if (user) {
       loadExams();
     }
-    return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-      }
-    };
   }, [user]);
 
   useEffect(() => {
-    if (selectedExamId) {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
+    if (!selectedExamId) return;
+
+    setSessionsError(null);
+    const unsubscribe = subscribeToLiveSessions(
+      selectedExamId,
+      (sessions) => {
+        setSessionsError(null);
+        setLiveSessions(sessions);
+      },
+      (error) => {
+        console.error("Live session stream failed:", error);
+        setLiveSessions([]);
+        setSessionsError(
+          "Live session updates stopped. Check your connection and reload the page."
+        );
       }
-      unsubscribeRef.current = subscribeToLiveSessions(
-        selectedExamId,
-        (sessions) => {
-          setLiveSessions(sessions);
-        }
-      );
-    }
+    );
+    unsubscribeRef.current = unsubscribe;
+
+    return () => {
+      unsubscribe();
+      unsubscribeRef.current = null;
+    };
   }, [selectedExamId]);
 
   const loadExams = async () => {
+    setLoading(true);
+    setExamsError(null);
     try {
       const teacherExams = await getExamsByTeacher(user!.id);
       const activeExams = teacherExams.filter(
@@ -127,11 +143,16 @@ export default function TeacherWatchLivePage() {
       );
       // Also include exams that have in-progress sessions even if not "active"
       setExams(activeExams);
-      if (activeExams.length > 0) {
-        setSelectedExamId(activeExams[0].id);
-      }
+      // Keep the current selection if it survived the refresh, so a reload
+      // doesn't yank the teacher back to the first exam mid-invigilation.
+      setSelectedExamId((current) =>
+        current && activeExams.some((e) => e.id === current)
+          ? current
+          : activeExams[0]?.id ?? ""
+      );
     } catch (error) {
       console.error("Error loading exams:", error);
+      setExamsError("Could not load your exams.");
       toast({
         title: "Error",
         description: "Failed to load exams",
@@ -143,23 +164,46 @@ export default function TeacherWatchLivePage() {
   };
 
   const handleViewStudentDetails = async (session: LiveStudentSession) => {
+    const requestId = ++detailRequestRef.current;
     setSelectedStudent(session);
     setShowDetailDialog(true);
+    // Clear the previous student's data immediately — otherwise their events
+    // and snapshots stay on screen, attributed to the newly-opened student.
+    setStudentEvents([]);
+    setProctoringSnapshots([]);
+    setStudentWarningScreenshots([]);
+    setDetailError(null);
+    setDetailLoading(true);
     try {
       const [events, snapshots, warningScreenshots] = await Promise.all([
         getSessionEvents(session.sessionId),
         getSessionSnapshots(session.sessionId, 20),
         getWarningScreenshots(session.sessionId),
       ]);
+      if (requestId !== detailRequestRef.current) return;
       setStudentEvents(events);
       setProctoringSnapshots(snapshots);
       setStudentWarningScreenshots(warningScreenshots);
     } catch (error) {
       console.error("Error loading student details:", error);
+      if (requestId !== detailRequestRef.current) return;
+      setDetailError("Could not load this student's proctoring history.");
+    } finally {
+      if (requestId === detailRequestRef.current) setDetailLoading(false);
     }
   };
 
   const selectedExam = exams.find((e) => e.id === selectedExamId);
+
+  // The dialog and fullscreen viewer hold a snapshot of the session taken when
+  // they were opened; re-reading from the live list keeps warning counts,
+  // behaviour score and lock state current while they stay open.
+  const liveSelectedStudent = selectedStudent
+    ? liveSessions.find((s) => s.sessionId === selectedStudent.sessionId) ?? selectedStudent
+    : null;
+  const liveFullscreenStudent = fullscreenStudent
+    ? liveSessions.find((s) => s.sessionId === fullscreenStudent.sessionId) ?? fullscreenStudent
+    : null;
 
   // Stats
   const totalStudents = liveSessions.length;
@@ -208,31 +252,38 @@ export default function TeacherWatchLivePage() {
 
   // Fullscreen viewer component
   const FullscreenViewer = () => {
-    if (!fullscreenStudent) return null;
-    const cameraStatus = getCameraStatus(fullscreenStudent);
+    const student = liveFullscreenStudent;
+    if (!student) return null;
+    const cameraStatus = getCameraStatus(student);
 
     return (
       <div className="fixed inset-0 z-[100] bg-black flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 bg-gray-900/90">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-gray-900/90">
+          <div className="flex items-center gap-3 min-w-0">
             <Button
               variant="ghost"
               size="sm"
-              className="text-white hover:bg-white/10"
+              className="text-white hover:bg-white/10 flex-shrink-0"
               onClick={() => setFullscreenStudent(null)}
             >
               <ChevronLeft className="h-5 w-5 mr-1" />
               Back
             </Button>
-            <div>
-              <h2 className="text-white font-semibold">{fullscreenStudent.studentName}</h2>
-              <p className="text-gray-400 text-sm">{selectedExam?.title}</p>
+            <div className="min-w-0">
+              <h2 className="text-white font-semibold truncate">{student.studentName}</h2>
+              <p className="text-gray-400 text-sm truncate">{selectedExam?.title}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge className={getRiskColor(fullscreenStudent.riskLevel)}>
-              {fullscreenStudent.riskLevel.toUpperCase()} Risk
+          <div className="flex items-center gap-2 flex-wrap">
+            {student.locked && (
+              <Badge className="bg-amber-500 text-white">
+                <PauseCircle className="h-3 w-3 mr-1" />
+                Suspended
+              </Badge>
+            )}
+            <Badge className={getRiskColor(student.riskLevel)}>
+              {student.riskLevel.toUpperCase()} Risk
             </Badge>
             <Badge className={cameraStatus.color}>
               {cameraStatus.label}
@@ -241,47 +292,54 @@ export default function TeacherWatchLivePage() {
         </div>
 
         {/* Video Feed — high quality stream for the focused student */}
-        <div className="flex-1 flex items-center justify-center p-4">
+        <div className="flex-1 flex items-center justify-center p-4 min-h-0">
           <div className="w-full h-full max-w-5xl rounded-lg overflow-hidden">
             <LiveVideoTile
-              sessionId={fullscreenStudent.sessionId}
-              studentName={fullscreenStudent.studentName}
-              fallbackSnapshotUrl={fullscreenStudent.latestSnapshot?.snapshotUrl}
+              sessionId={student.sessionId}
+              studentName={student.studentName}
+              fallbackSnapshotUrl={student.latestSnapshot?.snapshotUrl}
               quality="high"
               viewerName={user?.name || user?.email}
-              onTransportChange={trackTransport(fullscreenStudent.sessionId)}
+              onTransportChange={trackTransport(student.sessionId)}
             />
           </div>
         </div>
 
         {/* Bottom Bar */}
-        <div className="px-4 py-3 bg-gray-900/90 flex items-center justify-between">
-          <div className="flex items-center gap-4 text-sm text-gray-400">
+        <div className="px-4 py-3 bg-gray-900/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-4 text-sm text-gray-400 flex-wrap">
             <span className="flex items-center gap-1">
               <Activity className="h-4 w-4" />
               Live Feed
             </span>
             <span className="flex items-center gap-1">
               <AlertTriangle className="h-4 w-4" />
-              Warnings: {fullscreenStudent.warningCount}
+              Warnings: {student.warningCount}
             </span>
             <span className="flex items-center gap-1">
               <Shield className="h-4 w-4" />
-              Score: {fullscreenStudent.behaviorScore}/100
+              Score: {student.behaviorScore}/100
             </span>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-white border-white/20 hover:bg-white/10"
-            onClick={() => {
-              setFullscreenStudent(null);
-              handleViewStudentDetails(fullscreenStudent);
-            }}
-          >
-            <Eye className="h-4 w-4 mr-1" />
-            View Details
-          </Button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <ExamSuspendControl
+              sessionId={student.sessionId}
+              studentName={student.studentName}
+              locked={student.locked}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-white border-white/20 hover:bg-white/10"
+              onClick={() => {
+                setFullscreenStudent(null);
+                handleViewStudentDetails(student);
+              }}
+            >
+              <Eye className="h-4 w-4 mr-1" />
+              View Details
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -309,6 +367,16 @@ export default function TeacherWatchLivePage() {
             </Badge>
           </div>
         </div>
+
+        {(examsError || sessionsError) && (
+          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">{examsError || sessionsError}</div>
+            <Button size="sm" variant="outline" onClick={loadExams}>
+              Retry
+            </Button>
+          </div>
+        )}
 
         {/* Exam Selector */}
         <Card>
@@ -480,11 +548,17 @@ export default function TeacherWatchLivePage() {
                               </Badge>
                             </div>
 
-                            {/* Risk Level Badge */}
-                            <div className="absolute top-2 right-2">
+                            {/* Risk / suspension badges */}
+                            <div className="absolute top-2 right-2 flex flex-col items-end gap-1">
                               <Badge className={getRiskColor(session.riskLevel) + " text-[10px]"}>
                                 {session.riskLevel.toUpperCase()}
                               </Badge>
+                              {session.locked && (
+                                <Badge className="bg-amber-500 text-white text-[10px]">
+                                  <PauseCircle className="h-2.5 w-2.5 mr-0.5" />
+                                  Suspended
+                                </Badge>
+                              )}
                             </div>
 
                             {/* Hover overlay controls */}
@@ -603,45 +677,74 @@ export default function TeacherWatchLivePage() {
       {/* Student Detail Dialog */}
       <Dialog open={showDetailDialog} onOpenChange={setShowDetailDialog}>
         <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-          {selectedStudent && (
+          {liveSelectedStudent && (
             <>
               <DialogHeader>
-                <DialogTitle className="flex items-center gap-2 text-xl">
-                  {selectedStudent.studentName}
-                  <Badge className={getRiskColor(selectedStudent.riskLevel)}>
-                    {selectedStudent.riskLevel.toUpperCase()}
+                <DialogTitle className="flex items-center gap-2 text-xl flex-wrap">
+                  {liveSelectedStudent.studentName}
+                  <Badge className={getRiskColor(liveSelectedStudent.riskLevel)}>
+                    {liveSelectedStudent.riskLevel.toUpperCase()}
                   </Badge>
+                  {liveSelectedStudent.locked && (
+                    <Badge className="bg-amber-500 text-white">
+                      <PauseCircle className="h-3 w-3 mr-1" />
+                      Suspended
+                    </Badge>
+                  )}
                 </DialogTitle>
                 <DialogDescription>
-                  Student ID: {selectedStudent.studentId} | Exam: {selectedExam?.title}
+                  Student ID: {liveSelectedStudent.studentId} | Exam: {selectedExam?.title}
                 </DialogDescription>
               </DialogHeader>
+
+              {/* Invigilation actions — freeze a suspicious session in place,
+                  or open the full post-exam review for this attempt. */}
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-gray-50 p-3">
+                <ExamSuspendControl
+                  sessionId={liveSelectedStudent.sessionId}
+                  studentName={liveSelectedStudent.studentName}
+                  locked={liveSelectedStudent.locked}
+                />
+                <Link
+                  href={`/dashboard/teacher/session-results?sessionId=${liveSelectedStudent.sessionId}`}
+                >
+                  <Button variant="outline" size="sm">
+                    <FileText className="h-3.5 w-3.5 mr-1" />
+                    Full Session Review
+                  </Button>
+                </Link>
+                {liveSelectedStudent.lockReason && (
+                  <span className="text-xs text-amber-700">
+                    Reason: {liveSelectedStudent.lockReason}
+                  </span>
+                )}
+              </div>
 
               {/* Quick Stats */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
                 <Card>
                   <CardContent className="pt-4 text-center">
                     <p className="text-xs text-gray-500">Behavior Score</p>
-                    <p className="text-2xl font-bold">{selectedStudent.behaviorScore}</p>
+                    <p className="text-2xl font-bold">{liveSelectedStudent.behaviorScore}</p>
                   </CardContent>
                 </Card>
                 <Card>
                   <CardContent className="pt-4 text-center">
                     <p className="text-xs text-gray-500">Warnings</p>
-                    <p className="text-2xl font-bold">{selectedStudent.warningCount}</p>
+                    <p className="text-2xl font-bold">{liveSelectedStudent.warningCount}</p>
                   </CardContent>
                 </Card>
                 <Card>
                   <CardContent className="pt-4 text-center">
                     <p className="text-xs text-gray-500">Alerts</p>
-                    <p className="text-2xl font-bold">{selectedStudent.alertReasons.length}</p>
+                    <p className="text-2xl font-bold">{liveSelectedStudent.alertReasons.length}</p>
                   </CardContent>
                 </Card>
                 <Card>
                   <CardContent className="pt-4 text-center">
                     <p className="text-xs text-gray-500">Online</p>
                     <p className="text-2xl font-bold">
-                      {selectedStudent.isOnline ? (
+                      {liveSelectedStudent.isOnline ? (
                         <span className="text-green-600">Yes</span>
                       ) : (
                         <span className="text-gray-400">No</span>
@@ -651,17 +754,32 @@ export default function TeacherWatchLivePage() {
                 </Card>
               </div>
 
+              {detailError && (
+                <div className="mt-3 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  <span>{detailError}</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="ml-auto"
+                    onClick={() => handleViewStudentDetails(liveSelectedStudent)}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              )}
+
               <Tabs defaultValue="snapshot" className="mt-4">
-                <TabsList className="w-full justify-start">
+                <TabsList className="w-full justify-start overflow-x-auto">
                   <TabsTrigger value="snapshot">Live Video</TabsTrigger>
                   <TabsTrigger value="events">
-                    Events ({studentEvents.length})
+                    Events {detailLoading ? "" : `(${studentEvents.length})`}
                   </TabsTrigger>
                   <TabsTrigger value="snapshots">
-                    Snapshots ({studentSnapshots.length})
+                    Snapshots {detailLoading ? "" : `(${studentSnapshots.length})`}
                   </TabsTrigger>
                   <TabsTrigger value="warning-screenshots">
-                    Warning SS ({studentWarningScreenshots.length})
+                    Warning SS {detailLoading ? "" : `(${studentWarningScreenshots.length})`}
                   </TabsTrigger>
                 </TabsList>
 
@@ -670,12 +788,12 @@ export default function TeacherWatchLivePage() {
                     <CardContent className="pt-4">
                       <div className="w-full max-w-2xl mx-auto aspect-video rounded-lg border overflow-hidden">
                         <LiveVideoTile
-                          sessionId={selectedStudent.sessionId}
-                          studentName={selectedStudent.studentName}
-                          fallbackSnapshotUrl={selectedStudent.latestSnapshot?.snapshotUrl}
+                          sessionId={liveSelectedStudent.sessionId}
+                          studentName={liveSelectedStudent.studentName}
+                          fallbackSnapshotUrl={liveSelectedStudent.latestSnapshot?.snapshotUrl}
                           quality="high"
                           viewerName={user?.name || user?.email}
-                          onTransportChange={trackTransport(selectedStudent.sessionId)}
+                          onTransportChange={trackTransport(liveSelectedStudent.sessionId)}
                         />
                       </div>
                     </CardContent>
@@ -685,7 +803,12 @@ export default function TeacherWatchLivePage() {
                 <TabsContent value="events" className="mt-4">
                   <ScrollArea className="h-[350px]">
                     <div className="space-y-2">
-                      {studentEvents.length === 0 ? (
+                      {detailLoading ? (
+                        <div className="flex items-center justify-center py-8 text-gray-500">
+                          <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                          Loading events...
+                        </div>
+                      ) : studentEvents.length === 0 ? (
                         <p className="text-center text-gray-500 py-8">
                           No proctoring events recorded
                         </p>
@@ -752,7 +875,12 @@ export default function TeacherWatchLivePage() {
 
                 <TabsContent value="snapshots" className="mt-4">
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    {studentSnapshots.length === 0 ? (
+                    {detailLoading ? (
+                      <div className="col-span-full flex items-center justify-center py-8 text-gray-500">
+                        <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                        Loading snapshots...
+                      </div>
+                    ) : studentSnapshots.length === 0 ? (
                       <p className="col-span-full text-center text-gray-500 py-8">
                         No snapshots captured
                       </p>
@@ -788,7 +916,12 @@ export default function TeacherWatchLivePage() {
 
                 <TabsContent value="warning-screenshots" className="mt-4">
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                    {studentWarningScreenshots.length === 0 ? (
+                    {detailLoading ? (
+                      <div className="col-span-full flex items-center justify-center py-8 text-gray-500">
+                        <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                        Loading warning screenshots...
+                      </div>
+                    ) : studentWarningScreenshots.length === 0 ? (
                       <p className="col-span-full text-center text-gray-500 py-8">
                         No warning screenshots captured
                       </p>

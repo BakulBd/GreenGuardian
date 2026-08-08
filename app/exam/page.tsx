@@ -5,8 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Shield, FileText, Clock, ChevronRight, LogOut } from "lucide-react";
-import { subscribeToPublishedExams } from "@/lib/firebase/exams";
+import { Shield, FileText, Clock, ChevronRight, LogOut, ArrowLeft } from "lucide-react";
+import { subscribeToStudentVisibleExams } from "@/lib/firebase/exams";
 import { Exam } from "@/lib/types";
 import { formatDate } from "@/lib/utils/helpers";
 import { useAuth } from "@/hooks/useAuth";
@@ -34,32 +34,24 @@ export default function ExamPage() {
     }
 
     // Realtime feed (Feature 5): a newly published exam appears without a
-    // manual refresh, and the assignment filter re-runs on every snapshot.
-    const unsubscribe = subscribeToPublishedExams((allExams) => {
-      const assignedTeacherIds = user.assignedTeacherIds || [];
-      const availableExams = allExams.filter((e) => {
-        // A student only sees exams from teachers an admin assigned them
-        // to (Task 10) — see lib/firebase/assignments.ts.
-        if (e.teacherId && !assignedTeacherIds.includes(e.teacherId)) {
-          return false;
-        }
-
-        const studentBatch = user.batch;
-        const studentSections = user.sections || (user.section ? [user.section] : null);
-
-        // If exam specifies batch and student has batch, must match
-        if (e.batch && studentBatch && e.batch !== studentBatch) {
-          return false;
-        }
-
-        // If exam specifies section and student has section list, must match
-        if (e.section && studentSections && !studentSections.includes(e.section)) {
-          return false;
-        }
-
-        return true;
-      });
-      setExams(availableExams);
+    // manual refresh. Visibility itself is enforced server-side (see
+    // firestore.rules `exams` read rule) via `targetStudentIds`, resolved
+    // at exam-creation time from the teacher's Course/Batch/Section
+    // assignment — this query can only ever return exams this student is
+    // actually allowed to see.
+    const unsubscribe = subscribeToStudentVisibleExams(user.id, (availableExams) => {
+      // Apply the same scheduling window the dashboard uses. Without it this
+      // page listed — and offered a live "Start Exam" button for — exams that
+      // hadn't opened yet or had already closed, so the two lists disagreed
+      // and a student could start an exam early via this route.
+      const now = new Date();
+      setExams(
+        availableExams.filter((e) => {
+          if (e.startDate && new Date(e.startDate as any) > now) return false;
+          if (e.endDate && new Date(e.endDate as any) < now) return false;
+          return true;
+        })
+      );
       setLoading(false);
     });
 
@@ -87,8 +79,16 @@ export default function ExamPage() {
             <span className="text-2xl font-bold text-gray-900">GreenGuardian</span>
           </div>
           {user && (
-            <div className="flex items-center space-x-4">
-              <span className="text-sm text-gray-600">Welcome, {user.name}</span>
+            <div className="flex items-center space-x-2 sm:space-x-4">
+              <span className="text-sm text-gray-600 hidden sm:inline">Welcome, {user.name}</span>
+              {/* This page renders outside DashboardLayout, so without an
+                  explicit link back the only exits were browser-back or Logout. */}
+              <Link href="/dashboard/student">
+                <Button variant="outline" size="sm">
+                  <ArrowLeft className="h-4 w-4 mr-2" />
+                  Dashboard
+                </Button>
+              </Link>
               <Button variant="outline" size="sm" onClick={handleLogout}>
                 <LogOut className="h-4 w-4 mr-2" />
                 Logout

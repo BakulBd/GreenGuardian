@@ -17,6 +17,37 @@ import { db } from "./config";
 import { Exam, Question, ExamSession, Answer, ExamLog } from "../types";
 
 // Exams
+/**
+ * The admin's global proctoring defaults (settings/global.proctoring), used to
+ * seed a newly created exam. Exam creation used to hardcode all three flags to
+ * `true`, which made the corresponding admin switches decorative.
+ *
+ * Falls back to the safe (all-on) defaults if the document is missing or
+ * unreadable — creating an exam must never fail because of a settings read.
+ */
+export async function getGlobalProctoringDefaults(): Promise<{
+  faceDetection: boolean;
+  tabSwitchDetection: boolean;
+  fullscreenRequired: boolean;
+}> {
+  const fallback = {
+    faceDetection: true,
+    tabSwitchDetection: true,
+    fullscreenRequired: true,
+  };
+  try {
+    const snap = await getDoc(doc(db, "settings", "global"));
+    const configured = snap.exists() ? (snap.data()?.proctoring ?? {}) : {};
+    return {
+      faceDetection: configured.faceDetection ?? fallback.faceDetection,
+      tabSwitchDetection: configured.tabSwitchDetection ?? fallback.tabSwitchDetection,
+      fullscreenRequired: configured.fullscreenRequired ?? fallback.fullscreenRequired,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export async function createExam(examData: Omit<Exam, "id" | "createdAt" | "updatedAt">): Promise<string> {
   const docRef = await addDoc(collection(db, "exams"), {
     ...examData,
@@ -105,6 +136,89 @@ export async function updateExam(examId: string, data: Partial<Exam>): Promise<v
     ...data,
     updatedAt: serverTimestamp(),
   });
+}
+
+/**
+ * Realtime feed of exams a specific student is allowed to see: published/
+ * active AND this student's ID is in the exam's materialized
+ * `targetStudentIds` (set at creation from the teacher's Course/Batch/
+ * Section assignment — see `computeAssignmentTargetStudentIds`). This one
+ * query is also exactly what `firestore.rules` allows a student to read, so
+ * it can never come back permission-denied.
+ *
+ * Exams created before `targetStudentIds` existed won't appear here until
+ * an admin runs the one-time backfill (`backfillExamTargetStudentIds`) —
+ * the same fail-closed-until-backfilled tradeoff already used for
+ * `assignedTeacherIds` (see `backfillAllAssignedTeacherIds`).
+ */
+export function subscribeToStudentVisibleExams(
+  studentId: string,
+  callback: (exams: Exam[]) => void
+): () => void {
+  const q = query(
+    collection(db, "exams"),
+    where("targetStudentIds", "array-contains", studentId),
+    where("status", "in", ["published", "active"])
+  );
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      callback(snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Exam)));
+    },
+    (error) => console.warn("[Exams] Student-visible exams subscription error:", error.code || error)
+  );
+}
+
+/**
+ * One-time backfill for exams created before `targetStudentIds` existed.
+ * Safe to run repeatedly (recomputes fresh each time). Mirrors
+ * `backfillAllAssignedTeacherIds` in lib/firebase/assignments.ts.
+ */
+export async function backfillExamTargetStudentIds(): Promise<{ examsUpdated: number }> {
+  const { computeAssignmentTargetStudentIds } = await import("./assignments");
+  const snapshot = await getDocs(collection(db, "exams"));
+  let examsUpdated = 0;
+
+  for (const examDoc of snapshot.docs) {
+    const data = examDoc.data();
+    if (!data.teacherId || !data.courseId || !data.batchId || !data.sectionId) continue;
+    if (Array.isArray(data.targetStudentIds) && data.targetStudentIds.length > 0) continue;
+
+    const targetStudentIds = await computeAssignmentTargetStudentIds(
+      data.teacherId,
+      data.courseId,
+      data.batchId,
+      data.sectionId
+    );
+    if (targetStudentIds.length > 0) {
+      await updateDoc(doc(db, "exams", examDoc.id), { targetStudentIds });
+      examsUpdated++;
+    }
+  }
+
+  return { examsUpdated };
+}
+
+/**
+ * Email + in-app notification fan-out when a teacher publishes an exam,
+ * reusing the same server-side pattern as classroom post notifications
+ * (see /api/exams/notify). Fire-and-forget from the caller's perspective —
+ * failures are logged, not surfaced, since the exam itself already saved.
+ */
+export async function notifyExamPublished(examId: string, studentIds: string[]): Promise<void> {
+  if (studentIds.length === 0) return;
+  const { auth } = await import("./config");
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) return;
+  const res = await fetch("/api/exams/notify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ examId, studentIds }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Exam notify failed (${res.status})`);
+  }
 }
 
 export async function deleteExam(examId: string): Promise<void> {

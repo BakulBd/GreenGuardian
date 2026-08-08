@@ -16,6 +16,8 @@ import {
   AlertTriangle,
   KeyRound,
 } from "lucide-react";
+import { signInWithCustomToken, signInWithEmailAndPassword } from "firebase/auth";
+import { auth } from "@/lib/firebase/config";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { OtpInput } from "@/components/ui/otp-input";
@@ -23,6 +25,7 @@ import { useToast } from "@/components/ui/use-toast";
 
 interface RegistrationSession {
   email: string;
+  password?: string;
   verificationToken: string;
   role: "student" | "teacher";
   name: string;
@@ -160,7 +163,21 @@ function VerifyEmailContent() {
         return;
       }
 
-      // Success! Clear session storage.
+      // Sign the browser into the account the server just created. Without
+      // this, contexts/AuthContext.tsx's onAuthStateChanged listener never
+      // fires and the redirect below (to a page gated on useAuth().user)
+      // bounces straight back to /login.
+      try {
+        if (data.customToken) {
+          await signInWithCustomToken(auth, data.customToken);
+        } else if (data.needsPasswordSignIn && session.password) {
+          await signInWithEmailAndPassword(auth, session.email, session.password);
+        }
+      } catch (signInErr) {
+        console.error("Post-verification sign-in failed:", signInErr);
+      }
+
+      // Clear session storage (including the plaintext password, if any).
       sessionStorage.removeItem(SESSION_KEY);
       setSuccess(true);
       setOtp("");

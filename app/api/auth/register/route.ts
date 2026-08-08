@@ -13,6 +13,7 @@ import { renderOtpEmail } from "@/lib/email/templates/otp";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { isEmailRegistered, hasCompleteProfile } from "@/lib/firebase/user-lookup";
 import { getPending, upsertPending, deletePending } from "@/lib/registration-store";
+import { getAdminDb, isAdminSdkConfigured } from "@/lib/firebase/admin";
 
 import { validateName, validateEmail, validatePassword } from "@/lib/utils/validation";
 
@@ -36,6 +37,26 @@ export async function POST(req: NextRequest) {
       },
       { status: 429 }
     );
+  }
+
+  // 1b. Honour the admin "Allow Self-Registration" switch. Enforced here
+  // rather than by hiding the form, so the endpoint itself is closed.
+  if (isAdminSdkConfigured()) {
+    try {
+      const settingsSnap = await getAdminDb().collection("settings").doc("global").get();
+      if (settingsSnap.exists && settingsSnap.data()?.allowRegistration === false) {
+        return NextResponse.json(
+          {
+            error:
+              "Self-registration is currently closed. Please contact your administrator for an account.",
+          },
+          { status: 403 }
+        );
+      }
+    } catch (err) {
+      // A settings read failure must not lock everyone out of signing up.
+      console.warn("[Register] Could not read registration setting:", err);
+    }
   }
 
   let body: RegisterBody;
