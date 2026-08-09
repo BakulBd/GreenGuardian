@@ -48,7 +48,7 @@ import { db } from "@/lib/firebase/config";
 import { getBehaviorLevel, getViolationSummary, ViolationCounts } from "@/lib/utils/helpers";
 import Link from "next/link";
 import ExamAnswerReview, { ReviewExam } from "@/components/ExamAnswerReview";
-import { updateAnswerFeedback } from "@/lib/firebase/exams";
+import { updateAnswerFeedback, getQuestionsByExam } from "@/lib/firebase/exams";
 import { MessageSquare, Save } from "lucide-react";
 
 interface SessionResult {
@@ -128,19 +128,23 @@ function ResultsContent() {
       const data = sessionDoc.data();
       setRawSession({ id: sessionDoc.id, ...data });
 
-      // Get exam title (and full exam data, incl. questions, for the answer review below)
+      // Exam metadata for the answer review below. Note the exam document's
+      // embedded `questions` no longer carry `correctAnswer` (it is
+      // student-readable, so the key was stripped from it) — the review's
+      // question set comes from the submission snapshot instead, below.
       let examTitle = "Unknown Exam";
+      let examDocData: any = null;
       if (data.examId) {
         const examDoc = await getDoc(doc(db, "exams", data.examId));
         if (examDoc.exists()) {
-          const examDocData = examDoc.data();
+          examDocData = { id: examDoc.id, ...examDoc.data() };
           examTitle = examDocData.title;
-          setReviewExam({ id: examDoc.id, ...examDocData } as ReviewExam);
         }
       }
 
       // Teachers/admins can read any answer (isTeacherOrAdmin() in rules) —
       // look it up by the session id, which every submission carries.
+      let reviewQuestions: any[] | null = null;
       try {
         const answersSnap = await getDocs(
           query(collection(db, "answers"), where("examSessionId", "==", sessionDoc.id))
@@ -149,9 +153,32 @@ function ResultsContent() {
           const answerData = { id: answersSnap.docs[0].id, ...answersSnap.docs[0].data() } as any;
           setReviewAnswer(answerData);
           setFeedbackText(answerData.teacherFeedback || "");
+          if (Array.isArray(answerData.questionSnapshot) && answerData.questionSnapshot.length > 0) {
+            reviewQuestions = answerData.questionSnapshot;
+          }
         }
       } catch (e) {
         console.warn("No answer document found for this session:", e);
+      }
+
+      // Submissions from before `questionSnapshot` existed have no snapshot to
+      // review against. Staff may read the `questions` collection, which still
+      // holds the keys, so fall back to it rather than showing a review with
+      // every answer marked unknown.
+      if (!reviewQuestions && data.examId) {
+        try {
+          const liveQuestions = await getQuestionsByExam(data.examId);
+          if (liveQuestions.length > 0) reviewQuestions = liveQuestions;
+        } catch (e) {
+          console.warn("Could not load questions for review:", e);
+        }
+      }
+
+      if (examDocData) {
+        setReviewExam({
+          ...examDocData,
+          ...(reviewQuestions ? { questions: reviewQuestions } : {}),
+        } as ReviewExam);
       }
       
       const result: SessionResult = {

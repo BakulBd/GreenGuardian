@@ -37,7 +37,7 @@ import {
   runTransaction,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
-import { getExam } from "@/lib/firebase/exams";
+import { authedFetch } from "@/lib/utils/api-client";
 import { 
   loadFaceDetectionModel, 
   disposeFaceDetectionModel,
@@ -383,17 +383,6 @@ export default function ExamClient() {
   // The heartbeat is what drives the teacher's online/offline indicator, and the
   // autosave means a crashed or refreshed browser resumes with its answers.
   const answersRef = useRef(answers);
-  /**
-   * Full question set (including `correctAnswer` and `marks`) captured once at
-   * load time, purely so submission never needs a SECOND read of the exam doc.
-   * That re-read used to happen mid-submit and would throw permission-denied —
-   * losing the student's entire submission — the moment a teacher closed the
-   * exam or edited its target group while someone was still writing.
-   * This is not a new disclosure: the same payload already reaches the browser
-   * in the initial load below (server-side grading is the real fix, tracked in
-   * docs/KNOWN_LIMITATIONS.md).
-   */
-  const gradingQuestionsRef = useRef<Array<{ id: string; text?: string; type?: string; options?: string[]; correctAnswer?: string; marks?: number; negativeMarks?: number; explanation?: string }>>([]);
   useEffect(() => {
     answersRef.current = answers;
   }, [answers]);
@@ -594,7 +583,15 @@ export default function ExamClient() {
           // Keep the default on failure (e.g. offline) rather than blocking exam load.
         });
 
-      const examData = (await getExam(examId)) as any;
+      // The paper comes from the server with `correctAnswer` stripped. Reading
+      // the exam document directly (the old `getExam(examId)`) shipped the
+      // whole answer key to the browser, where devtools could read it straight
+      // out of the network response.
+      const paper = await authedFetch<{ success: boolean; exam: any }>(
+        `/api/exams/paper?examId=${encodeURIComponent(examId)}`,
+        { fallbackError: "Failed to load the exam paper." }
+      );
+      const examData = paper.exam as any;
       if (!examData) {
         toast({
           title: "Error",
@@ -614,29 +611,6 @@ export default function ExamClient() {
       // Shuffle questions if enabled
       if (examData.shuffleQuestions && examData.questions) {
         examData.questions = [...examData.questions].sort(() => Math.random() - 0.5);
-      }
-
-      // Capture the gradable question set (with answers/marks) BEFORE stripping
-      // it for render, so handleSubmit can grade without re-reading the exam.
-      gradingQuestionsRef.current = Array.isArray(examData.questions)
-        ? examData.questions.map((q: any) => ({
-            id: q.id,
-            text: q.text,
-            type: q.type,
-            options: q.options,
-            correctAnswer: q.correctAnswer,
-            marks: q.marks,
-            negativeMarks: q.negativeMarks,
-            explanation: q.explanation,
-          }))
-        : [];
-
-      // Remove correct answers from questions
-      if (examData.questions) {
-        examData.questions = examData.questions.map((q: any) => ({
-          ...q,
-          correctAnswer: undefined,
-        })) as Question[];
       }
 
       setExam(examData);
@@ -1330,129 +1304,42 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
     }
     try {
       const submissionReason = reason ?? (auto ? "Auto-submitted" : undefined);
-      const sessionStatus = auto ? "auto-submitted" : "submitted";
-      let gradingSummary: {
-        correctAnswers: number;
-        wrongAnswers: number;
-        attemptedAnswers: number;
-        totalQuestions: number;
-        accuracy: number;
-        obtainedMarks: number;
-        totalMarks: number;
-        pendingManualReview: number;
-      } | null = null;
 
-      if (exam.examMode === "online" || !exam.examMode) {
-        // Graded from the snapshot captured at load — never a second network
-        // read, so a teacher closing/editing the exam mid-attempt can no
-        // longer wipe out the student's submission.
-        const gradingQuestions = gradingQuestionsRef.current;
-        const normalize = (value: unknown) => String(value ?? "").trim().toLowerCase();
-        // Only option-based questions can be auto-graded; free-text answers
-        // are left for the teacher, and must not be counted as "wrong".
-        const isAutoGradable = (type?: string) =>
-          !type || ["mcq", "multiple-choice", "true-false"].includes(type);
-
-        let correctAnswers = 0;
-        let wrongAnswers = 0;
-        let attemptedAnswers = 0;
-        let obtainedMarks = 0;
-        let totalMarks = 0;
-        let pendingManualReview = 0;
-
-        for (const question of gradingQuestions) {
-          const marks = Number(question.marks || 0);
-          totalMarks += marks;
-
-          const submittedAnswer = answers[question.id];
-          if (!submittedAnswer || !submittedAnswer.trim()) {
-            continue;
-          }
-
-          attemptedAnswers += 1;
-
-          if (!isAutoGradable(question.type)) {
-            // Short/long/code answers await the teacher. Counting them as
-            // "wrong" used to make the summary contradict the per-question
-            // review, which labels them "Manually Graded".
-            pendingManualReview += 1;
-            continue;
-          }
-
-          if (normalize(submittedAnswer) === normalize(question.correctAnswer)) {
-            correctAnswers += 1;
-            obtainedMarks += marks;
-          } else {
-            wrongAnswers += 1;
-            obtainedMarks -= Number(question.negativeMarks || 0);
-          }
-        }
-
-        const autoGraded = correctAnswers + wrongAnswers;
-        gradingSummary = {
-          correctAnswers,
-          wrongAnswers,
-          attemptedAnswers,
-          totalQuestions: gradingQuestions.length,
-          accuracy: autoGraded > 0 ? Math.round((correctAnswers / autoGraded) * 100) : 0,
-          obtainedMarks: Math.max(0, obtainedMarks),
-          totalMarks,
-          pendingManualReview,
-        };
-      }
-
-      // Save answers with behavior score and academic details
-      const answerData: any = {
-        sessionId,
-        examSessionId: sessionId, // Required by Firestore rules
-        examId: exam.id,
-        examTitle: exam.title || "",
-        studentId: user.id,
-        studentName: user.name || "",
-        studentCode: (user as any).studentCode || "",
-        studentEmail: user.email || "",
-        courseId: (exam as any).courseId || "",
-        courseName: (exam as any).courseName || "",
-        batch: (exam as any).batch || (user as any).batch || "",
-        section: (exam as any).section || (user as any).section || "",
-        submittedAt: serverTimestamp(),
-        autoSubmitted: auto,
-        behaviorScore, // Include behavior score (0-100)
-        warningCount: warnings,
-        flagged: behaviorScore < 50,
-        flagReasons: behaviorScore < 50 ? ["Poor behavior score"] : [],
-        violationCounts, // Include detailed violation breakdown
-        ...(gradingSummary
-          ? {
-              score: gradingSummary.obtainedMarks,
-              totalMarks: gradingSummary.totalMarks,
-              accuracy: gradingSummary.accuracy,
-              grading: gradingSummary,
+      // Grading, and the write of every field derived from it, happen on the
+      // server. The browser has no answer key to grade against any more, and
+      // the tightened `answers`/`examSessions` rules reject a score written by
+      // a student — so a crafted client can submit answers but cannot decide
+      // what they are worth.
+      const submission = await retryAsync(
+        () =>
+          authedFetch<{ success: boolean; answerId: string | null; grading: any }>(
+            "/api/exams/grade",
+            {
+              method: "POST",
+              body: {
+                sessionId,
+                ...(exam.examMode === "upload"
+                  ? { answerFiles }
+                  : { answers }),
+                behaviorScore,
+                warnings,
+                violationCounts,
+                autoSubmitted: auto,
+                reason: submissionReason,
+              },
+              fallbackError: "Failed to submit your exam.",
             }
-          : {}),
-        ...(submissionReason ? { reason: submissionReason } : {}),
-      };
+          ),
+        "POST /api/exams/grade"
+      );
 
-      // For online mode, include answers object
-      if (exam.examMode === "online" || !exam.examMode) {
-        answerData.answers = answers;
-        // Snapshot the questions alongside the answers so /exam/[id]/review
-        // can render a full review from this document alone. Without it the
-        // review page depends on the live exam doc, and a student loses access
-        // to their OWN past result as soon as the teacher archives the exam or
-        // changes its target course/batch/section.
-        answerData.questionSnapshot = gradingQuestionsRef.current;
-      } else {
-        // For upload mode, include answer files and mark background OCR status
-        answerData.answerFiles = answerFiles;
-        answerData.ocrStatus = "pending_background";
-      }
+      const answerId: string | null = submission?.answerId ?? null;
 
-      // Save answer document immediately so student submission is never delayed
-      const addedDoc = await retryAsync(() => addDoc(collection(db, "answers"), answerData), "addDoc(answers)");
-
-      // Non-blocking background process for OCR & similarity checking
-      if (addedDoc?.id && exam.examMode === "upload" && answerFiles.length > 0) {
+      // Non-blocking background OCR + plagiarism pass for upload-mode exams.
+      // Kept client-initiated (the AI call is slow and the student should not
+      // wait on it), but both the OCR endpoint and the similarity check are
+      // server-side and authenticated.
+      if (answerId && exam.examMode === "upload" && answerFiles.length > 0) {
         (async () => {
           try {
             const analysis = await analyzeSubmittedAnswer(answerFiles);
@@ -1467,61 +1354,31 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
               ...(ocrErrors.length > 0 ? { errors: ocrErrors } : {}),
             };
 
-            await updateDoc(doc(db, "answers", addedDoc.id), {
+            await updateDoc(doc(db, "answers", answerId), {
               ocrAnalysis: ocrAnalysisData,
               ocrText: analysis.extractedText,
               ocrStatus: "completed",
             });
 
             if (analysis.extractedText && analysis.extractedText.trim().length > 20) {
-              await performSimilarityCheck(addedDoc.id, exam.id, user.id, analysis.extractedText);
+              await performSimilarityCheck(answerId, exam.id, user.id, analysis.extractedText);
             }
           } catch (bgErr: any) {
             console.error("Background OCR processing error:", bgErr);
-            await updateDoc(doc(db, "answers", addedDoc.id), {
+            await updateDoc(doc(db, "answers", answerId), {
               ocrStatus: "failed",
               "ocrAnalysis.error": bgErr?.message || "Background analysis failed - can be re-run by teacher",
             }).catch(() => {});
           }
         })();
-      } else if (addedDoc?.id && typeof answers === "object") {
+      } else if (answerId && typeof answers === "object") {
         const textForSimCheck = Object.values(answers).join(" ");
         if (textForSimCheck.trim().length > 20) {
-          performSimilarityCheck(addedDoc.id, exam.id, user.id, textForSimCheck).catch((err) => {
+          performSimilarityCheck(answerId, exam.id, user.id, textForSimCheck).catch((err) => {
             console.warn("Background similarity check error:", err);
           });
         }
       }
-      await retryAsync(() => updateDoc(doc(db, "examSessions", sessionId), {
-        status: sessionStatus,
-        submitted: true,
-        completedAt: serverTimestamp(),
-        studentName: user.name || "",
-        studentCode: (user as any).studentCode || "",
-        courseId: (exam as any).courseId || "",
-        courseName: (exam as any).courseName || "",
-        batch: (exam as any).batch || (user as any).batch || "",
-        section: (exam as any).section || (user as any).section || "",
-        examTitle: exam.title || "",
-        warnings,
-        behaviorScore,
-        violationCounts,
-        autoSubmitted: auto,
-        ...(gradingSummary
-          ? {
-              correctAnswers: gradingSummary.correctAnswers,
-              wrongAnswers: gradingSummary.wrongAnswers,
-              attemptedAnswers: gradingSummary.attemptedAnswers,
-              totalQuestions: gradingSummary.totalQuestions,
-              accuracy: gradingSummary.accuracy,
-              score: gradingSummary.obtainedMarks,
-              totalMarks: gradingSummary.totalMarks,
-            }
-          : {}),
-        "proctoring.suspiciousEvents": warnings,
-        flagged: behaviorScore < 50, // Flag if behavior score is poor
-        flagReasons: behaviorScore < 50 ? ["Poor behavior score"] : [],
-      }), "updateDoc(examSessions)");
 
       // Stop camera
       if (streamRef.current) {

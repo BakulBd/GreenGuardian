@@ -149,15 +149,17 @@ service cloud.firestore {
     // Questions collection
     match /questions/{questionId} {
       // Staff can read any question (needed by the exam builder/review UIs).
+      //
+      // Students get NO read access here at all. Question documents carry
+      // `correctAnswer`, and no rule can hand a student the question text
+      // without also handing them the key. Their paper is served instead by
+      // `/api/exams/paper`, which strips the key server-side, and their
+      // submission is graded by `/api/exams/grade`, which reads this
+      // collection with the Admin SDK. After submitting, the answer key
+      // reaches the student through `answers/{id}.questionSnapshot` — written
+      // by the grading route, once the attempt is over.
       allow read: if isTeacherOrAdmin();
-      // A student may only read questions belonging to an exam they were
-      // actually targeted for. This used to be `isAuthenticated()`, which let
-      // any signed-in student pull `correctAnswer` for EVERY exam in the
-      // system — including drafts and other sections — straight out of this
-      // collection, completely bypassing the exams read rule.
-      allow read: if isStudent() &&
-                     request.auth.uid in get(/databases/$(database)/documents/exams/$(resource.data.examId)).data.get('targetStudentIds', []);
-      
+
       // Teachers can create questions for their exams
       allow create: if isTeacher() && 
                        exists(/databases/$(database)/documents/exams/$(request.resource.data.examId)) &&
@@ -201,8 +203,23 @@ service cloud.firestore {
                    : 1
                );
 
-      // Students can update their own sessions
-      allow update: if isUser(resource.data.studentId) && isActiveUser();
+      // Students can update their own sessions, but only the fields their own
+      // browser is the source of: autosaved answers, the proctoring counters
+      // its sensors produce, and the lifecycle transitions it drives
+      // (resume, and closing out an attempt whose time expired offline).
+      //
+      // Every scoring field is excluded. `score`, `totalMarks`, `accuracy`,
+      // `correctAnswers`, `wrongAnswers`, `grading`, `flagged`, … are written
+      // ONLY by /api/exams/grade through the Admin SDK. Until this allowlist
+      // existed, a student could PATCH their own session with `score: 100`:
+      // grading ran in their browser, so the rules had no way to tell a real
+      // score from an invented one, and simply trusted whatever arrived.
+      allow update: if isUser(resource.data.studentId) && isActiveUser() &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                         'savedAnswers', 'updatedAt', 'status', 'submitted',
+                         'completedAt', 'reason', 'resumedAt',
+                         'warnings', 'behaviorScore', 'violationCounts', 'proctoring'
+                       ]);
 
       // Teachers and admins can update sessions for monitoring
       allow update: if isTeacherOrAdmin() && isActiveUser();
@@ -234,21 +251,39 @@ service cloud.firestore {
       // Teachers and admins can read answers
       allow read: if isTeacherOrAdmin();
       
-      // Students can create/update their own answers
-      allow create, update: if isAuthenticated() && isActiveUser() &&
-               request.resource.data.studentId == request.auth.uid &&
-               exists(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)) &&
-               get(/databases/$(database)/documents/examSessions/$(request.resource.data.examSessionId)).data.studentId == request.auth.uid;
+      // Submissions are CREATED server-side only (/api/exams/grade, Admin SDK,
+      // which bypasses these rules). A student-created answer document was how
+      // a submission used to arrive, carrying a browser-computed `score` that
+      // nothing could verify — the document and its grade are now written
+      // together by the server from the answer key.
+      //
+      // The one thing a student still writes here is the result of the
+      // background OCR pass on their own upload-mode submission, which runs in
+      // their browser after submitting.
+      allow update: if isAuthenticated() && isActiveUser() &&
+               resource.data.studentId == request.auth.uid &&
+               request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                 'ocrAnalysis', 'ocrText', 'ocrStatus'
+               ]);
 
       // Teachers and admins can update answers (for grading, OCR analysis & similarity reports)
       allow update: if isTeacherOrAdmin() && isActiveUser();
     }
 
     // Similarity Reports collection
+    //
+    // Written exclusively by /api/plagiarism/check via the Admin SDK. Client
+    // writes are denied outright: this collection holds the verdict on whether
+    // a student plagiarised, and `allow create, update: if isAuthenticated()`
+    // let the accused student overwrite it with a clean score.
+    //
+    // Reads are STAFF-ONLY, including for the student the report is about: the
+    // `matches` array names the classmates whose answers theirs resembled and
+    // by how much. The student sees only their own verdict, via
+    // `similarityScore`/`similarityLevel` on their answer document.
     match /similarityReports/{reportId} {
-      allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated();
-      allow delete: if isTeacherOrAdmin();
+      allow read: if isTeacherOrAdmin();
+      allow write: if false;
     }
 
     // ============ Live Exam Video (see lib/services/liveVideo.ts) ============

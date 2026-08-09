@@ -16,6 +16,7 @@
     "bootstrap:admin": "node scripts/bootstrap-admin.mjs",
     "setup:email": "node scripts/setup-email-verification.mjs",
     "backfill:access": "node scripts/backfill-classroom-access.mjs",
+    "migrate:answer-keys": "node scripts/migrate-answer-keys.mjs",
     "seed:defaults": "node scripts/seed-defaults.mjs",
     "seed:all": "node scripts/seed-all.mjs",
     "typecheck": "tsc --noEmit",

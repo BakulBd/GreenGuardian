@@ -119,6 +119,43 @@ function AnswerReviewContent() {
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
   const [selectedAnswer, setSelectedAnswer] = useState<Answer | null>(null);
 
+  /**
+   * Open an answer's detail panel, pulling its similarity match list from
+   * `similarityReports`.
+   *
+   * The matches are deliberately NOT stored on the answer document: a student
+   * can read their own answer, and the list names the classmates their work
+   * resembled. The report is staff-read-only, so it is fetched here instead.
+   */
+  const selectAnswer = async (answer: Answer) => {
+    setSelectedAnswer(answer);
+    if (!answer.id) return;
+    try {
+      const reportSnap = await getDoc(doc(db, "similarityReports", answer.id));
+      if (!reportSnap.exists()) return;
+      const report = reportSnap.data() as any;
+      const matches = Array.isArray(report.matches) ? report.matches : [];
+      setSelectedAnswer((prev) =>
+        prev && prev.id === answer.id
+          ? {
+              ...prev,
+              similarityScore: report.score ?? prev.similarityScore,
+              similarityMatches: matches
+                .filter((m: any) => m.sourceType === "student")
+                .map((m: any) => ({
+                  studentId: m.sourceId || "",
+                  studentName: m.sourceName || "",
+                  score: m.matchPercentage,
+                })),
+            }
+          : prev
+      );
+    } catch (e) {
+      // A missing or unreadable report just means "no breakdown to show".
+      console.warn("Could not load similarity report:", e);
+    }
+  };
+
   // Filters
   const [selectedCourse, setSelectedCourse] = useState<string>("all");
   const [selectedBatch, setSelectedBatch] = useState<string>("all");
@@ -856,7 +893,7 @@ function AnswerReviewContent() {
 
                           <Button
                             size="sm"
-                            onClick={() => setSelectedAnswer(answer)}
+                            onClick={() => selectAnswer(answer)}
                             className="bg-emerald-600 hover:bg-emerald-700 text-xs"
                           >
                             <Eye className="h-3.5 w-3.5 mr-1" />
@@ -1089,11 +1126,16 @@ function AnswerReviewContent() {
                                 setSelectedAnswer(prev => prev ? {
                                   ...prev,
                                   similarityScore: res.score,
-                                  similarityMatches: res.matches.map(m => ({
-                                    studentId: m.sourceId || "",
-                                    studentName: m.sourceName,
-                                    score: m.matchPercentage
-                                  }))
+                                  // The AI-authorship signal is reported in its
+                                  // own panel; only peer matches belong in the
+                                  // "Matching Student Scripts" list.
+                                  similarityMatches: res.matches
+                                    .filter(m => m.sourceType === "student")
+                                    .map(m => ({
+                                      studentId: m.sourceId || "",
+                                      studentName: m.sourceName,
+                                      score: m.matchPercentage
+                                    }))
                                 } : null);
                                 toast({ title: "Check Completed", description: `Plagiarism Score: ${res.score}%` });
                               } else {

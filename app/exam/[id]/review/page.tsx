@@ -164,12 +164,24 @@ export default function ExamReviewPage() {
 
       setAnswerData(answerDocData);
 
-      // If the live exam was unreadable, rebuild just enough of it from the
-      // submission snapshot so the review still renders every question.
-      if (!examData) {
-        const snapshot = Array.isArray(answerDocData.questionSnapshot)
-          ? answerDocData.questionSnapshot
-          : [];
+      // The snapshot written by /api/exams/grade is the ONLY source of answer
+      // keys here. The live exam document no longer carries `correctAnswer` —
+      // it is student-readable, so the key was stripped from it — and reviewing
+      // from it would mark every question as having no correct answer.
+      const snapshot = Array.isArray(answerDocData.questionSnapshot)
+        ? answerDocData.questionSnapshot
+        : [];
+
+      if (examData) {
+        // Keep the live exam's metadata, but review against the snapshot.
+        // Submissions from before the snapshot existed fall back to whatever
+        // the exam document still has.
+        if (snapshot.length > 0) {
+          setExam({ ...examData, questions: snapshot } as unknown as Exam);
+        }
+      } else {
+        // The live exam was unreadable (closed or retargeted) — rebuild just
+        // enough of it from the submission so the review still renders.
         setExam({
           id: examId,
           title: answerDocData.examTitle || "Exam Review",

@@ -169,13 +169,13 @@ Nothing in the app requires a paid plan.
 
 ## 6. Known limitations (deliberately not changed)
 
-1. **Grading runs in the browser.** `handleSubmit()` fetches the exam document —
-   including `correctAnswer` — to compute the score. A student can read the
-   answers from network traffic before submitting. Fixing this properly means
-   moving grading to a server route, which changes the submission contract and
-   needs its own testing pass. It is the single biggest integrity gap left.
-2. **One attempt per exam is enforced in the UI**, not by rules. A crafted client
-   could still create a second session document.
+> Items 1 and 2 were **fixed in the exam-integrity pass** — see
+> [§8](#8-exam-integrity-pass-2026-08-09). They are kept here for the history.
+
+1. ~~**Grading runs in the browser.**~~ **Fixed.** Grading moved to
+   `/api/exams/grade`; the answer key no longer reaches the browser.
+2. ~~**One attempt per exam is enforced in the UI**, not by rules.~~ **Fixed**
+   earlier, by the `examAttemptCounters` transaction + rules (Task 4).
 3. **41 `react-hooks/exhaustive-deps` warnings remain.** They are all the
    load-once-when-the-user-arrives pattern (`useEffect(… , [user])` calling a
    `loadX` defined in the component). Each was checked: the loaders only read
@@ -202,3 +202,159 @@ project, browsers, and users, and are **not** claimed as tested:
 - Cross-browser and mobile-device testing; responsive layouts were reviewed in
   code (Tailwind breakpoints are used throughout) but not rendered.
 - Load behaviour with many concurrent students.
+
+---
+
+## 8. Exam-integrity pass (2026-08-09)
+
+A full-project review before production deploy. Everything below was found by
+reading the code; the toolchain confirms the result (`typecheck` 0 errors,
+`lint` 0 errors / 34 pre-existing warnings, `test` 96 passing — up from 59 —
+`build` clean, 51 routes).
+
+Most modules came through clean. **Registration/OTP, login, email verification,
+the approval flow, profile permissions, classroom join, the Course/Batch/Section
+assignment and roster sync, and the notice targeting rules were all reviewed and
+no correctness defects were found** — they had already been hardened by earlier
+passes. Three real defects were found in the exam and plagiarism modules, and
+they were serious.
+
+### 8.1 A student could set their own exam score
+
+`ExamClient.handleSubmit()` computed the score in the browser and wrote it into
+`answers` and `examSessions`. Firestore rules cannot validate a score — checking
+one requires the answer key, which the rules must not expose — so both
+collections simply accepted whatever number arrived. The `examSessions` update
+rule was `allow update: if isUser(resource.data.studentId)` with **no field
+restriction**: a student could `PATCH` their own session with `score: 100`, and
+nothing anywhere would notice.
+
+Grading now happens in **`/api/exams/grade`** (Admin SDK), which re-reads the
+session, the exam and the answer key server-side, grades with
+`lib/server/grading.ts`, and writes the answer document and the session in one
+batch. The route is idempotent — the answer document id *is* the session id — so
+a retried submission after a dropped response updates the same document instead
+of creating a second one.
+
+The matching rules change replaces the open student update with a field
+allowlist (`savedAnswers`, `updatedAt`, `status`, `submitted`, `completedAt`,
+`reason`, `resumedAt`, `warnings`, `behaviorScore`, `violationCounts`,
+`proctoring`). Every scoring field is now server-only. Student `create` on
+`answers` is gone entirely; students may only write back the OCR result of their
+own upload.
+
+### 8.2 The answer key was readable by every student
+
+Two paths delivered it:
+
+- `getExam()` fetched the questions from the `questions` collection, which a
+  targeted student was allowed to read — `correctAnswer` included. `ExamClient`
+  deleted the field before rendering, but the key had already crossed the wire
+  and sat in the browser's network log.
+- `exams/{id}` carries a denormalized copy of the question array and is readable
+  by every student the exam targets, so the key was also one `getDoc` away
+  regardless of how the `questions` collection was locked down.
+
+Now: students get their paper from **`/api/exams/paper`**, which strips
+`correctAnswer` and `explanation` server-side; students have **no read access to
+`questions` at all**; and the embedded copy on the exam document is stripped on
+every write path (`stripAnswerKeys` in `lib/firebase/exams.ts`). The key reaches
+the student only after submitting, via `answers/{id}.questionSnapshot`, which
+the grading route writes once the attempt is over.
+
+**`npm run migrate:answer-keys` must be run for existing exams** — see §9.
+
+### 8.3 Plagiarism detection never actually ran for student submissions
+
+`performSimilarityCheck()` ran in the browser and needed to read every answer
+for the exam:
+
+```js
+query(collection(db, "answers"), where("examId", "==", examId))
+```
+
+Firestore rejects that query outright for a student — the `answers` read rule is
+`isUser(resource.data.studentId)` and the query is not constrained to their own
+id. The rejection landed in a `try/catch` that returned an empty match list, so
+the check "succeeded" with zero matches and stamped **every student submission
+`similarityLevel: "unique"`** — a clean bill of health that had never been
+computed. Teacher-initiated runs did work (teachers may read all answers), which
+is why this was easy to miss.
+
+The comparison moved to **`/api/plagiarism/check`** (Admin SDK), where it can
+actually see peer submissions. `similarityReports` is now server-written only —
+previously `allow create, update: if isAuthenticated()` let the accused student
+overwrite their own verdict.
+
+Making the check work surfaced a privacy question the broken version never had
+to answer: the match list names the classmates a student's answer resembled and
+by how much. So the split is now explicit — the **verdict**
+(`similarityScore` / `similarityLevel`) goes on the answer document, which the
+student may read about their own work; the **match detail** goes only into
+`similarityReports`, which is staff-read-only. The teacher Answers page loads
+the breakdown from there.
+
+### 8.4 Two smaller defects found on the way
+
+- **Two blank answers scored 60% similar.** `"".split(" ")` yields one empty
+  token, so two wordless submissions shared it and scored a perfect cosine
+  match — reported as "partially similar". Fixed in
+  `lib/utils/text-similarity.ts`, with a regression test.
+- **Upload-mode files are `UploadResult` objects, not URL strings.** Caught
+  while wiring the grading route; a string-only filter there would have silently
+  dropped every uploaded file and lost the submission. `sanitizeAnswerFiles()`
+  handles both shapes and is covered by tests.
+
+### 8.5 What did not change
+
+- **Behaviour/proctoring scores are still client-reported.** They come from the
+  student's own camera and tab-visibility sensors; no server can independently
+  verify them without a server-side vision pipeline. The grading route clamps
+  and allowlists what it accepts, but a crafted client can still under-report
+  its own violations. This is inherent to browser-based proctoring.
+- **Similarity scoring does not remove stopwords**, so any two English prose
+  answers score around 20% and are listed as low-percentage matches. The
+  70/30 verdict bands appear to have been tuned around that, so the thresholds
+  and the algorithm were left alone rather than silently re-tuned — changing
+  them would move every historical score's meaning.
+- The `results` / `studentWarnings` gradebook still has no authoring UI
+  (unchanged, see `KNOWN_LIMITATIONS.md`).
+
+---
+
+## 9. Deployment runbook
+
+Order matters — steps 1 and 2 must both happen before students take an exam.
+
+1. **Migrate the answer keys** (once, before deploying the rules):
+   ```
+   npm run migrate:answer-keys -- --dry-run   # review
+   npm run migrate:answer-keys                # apply
+   ```
+   This promotes any exam whose questions live only on the exam document into
+   the `questions` collection, then strips `correctAnswer`/`explanation` from
+   the student-readable copy. Running it **before** the rules deploy matters:
+   afterwards students cannot read `questions`, so an exam whose key exists
+   nowhere else would be ungradable. It is idempotent.
+
+2. **Deploy the rules** — required, not optional:
+   ```
+   npm run firebase:deploy:rules
+   ```
+   This release changes `questions` (student read removed), `examSessions`
+   (student field allowlist), `answers` (no student create; OCR-only update)
+   and `similarityReports` (server-written only). Deploying the app without
+   the rules leaves the score-writing hole open.
+
+3. **Vercel environment.** `FIREBASE_SERVICE_ACCOUNT` is now **load-bearing for
+   exams**, not just for email and OCR: `/api/exams/paper` and
+   `/api/exams/grade` fail closed without it, so students cannot open or submit
+   an exam. Also required: `GEMINI_API_KEY` (server-only),
+   `REGISTRATION_ENC_KEY`, SMTP settings. Optional: `NEXT_PUBLIC_TURN_*`,
+   `CONFIG_CHECK_TOKEN`.
+
+4. **Verify on staging before going live**, in this order: open an exam as a
+   targeted student (paper renders, and the network tab shows **no**
+   `correctAnswer`), submit it (score appears and matches), try to `PATCH` the
+   session's `score` from the console (must be denied), and re-run a similarity
+   check from the teacher Answers page (must report a real comparison count).

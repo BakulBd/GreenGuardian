@@ -16,6 +16,26 @@ import {
 import { db } from "./config";
 import { Exam, Question, ExamSession, Answer, ExamLog } from "../types";
 
+/**
+ * Remove answer keys from the question array that gets denormalized onto the
+ * exam document.
+ *
+ * `exams/{id}` is readable by every targeted student (they need the title,
+ * duration and instructions), so anything stored on it is public to the class.
+ * The embedded `questions` array used to be a verbatim copy — answer keys
+ * included — which meant the key was one `getDoc` away for any student, no
+ * matter how tightly the `questions` collection itself was locked down.
+ *
+ * The full question, with its key, lives only in the `questions` collection
+ * (staff + Admin SDK) and in the post-submission `questionSnapshot`.
+ */
+export function stripAnswerKeys<T extends Record<string, any>>(questions: T[]): T[] {
+  return questions.map((q) => {
+    const { correctAnswer: _correctAnswer, explanation: _explanation, ...rest } = q;
+    return rest as T;
+  });
+}
+
 // Exams
 /**
  * The admin's global proctoring defaults (settings/global.proctoring), used to
@@ -51,6 +71,10 @@ export async function getGlobalProctoringDefaults(): Promise<{
 export async function createExam(examData: Omit<Exam, "id" | "createdAt" | "updatedAt">): Promise<string> {
   const docRef = await addDoc(collection(db, "exams"), {
     ...examData,
+    // The exam document is student-readable; the answer key is not.
+    ...(Array.isArray(examData.questions)
+      ? { questions: stripAnswerKeys(examData.questions as any[]) }
+      : {}),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -143,6 +167,9 @@ export function subscribeToPublishedExams(callback: (exams: Exam[]) => void): ()
 export async function updateExam(examId: string, data: Partial<Exam>): Promise<void> {
   await updateDoc(doc(db, "exams", examId), {
     ...data,
+    ...(Array.isArray(data.questions)
+      ? { questions: stripAnswerKeys(data.questions as any[]) }
+      : {}),
     updatedAt: serverTimestamp(),
   });
 }
@@ -258,7 +285,7 @@ export async function createQuestion(questionData: Omit<Question, "id" | "create
     try {
       const remainingQuestions = await getQuestionsByExam(questionData.examId);
       await updateDoc(doc(db, "exams", questionData.examId), {
-        questions: remainingQuestions,
+        questions: stripAnswerKeys(remainingQuestions as any[]),
         questionCount: remainingQuestions.length,
         updatedAt: serverTimestamp(),
       });
@@ -355,7 +382,7 @@ export async function deleteQuestion(questionId: string): Promise<void> {
     try {
       const remainingQuestions = await getQuestionsByExam(examId);
       await updateDoc(doc(db, "exams", examId), {
-        questions: remainingQuestions,
+        questions: stripAnswerKeys(remainingQuestions as any[]),
         questionCount: remainingQuestions.length,
         updatedAt: serverTimestamp(),
       });

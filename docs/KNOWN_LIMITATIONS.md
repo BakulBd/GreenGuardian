@@ -47,6 +47,13 @@ populated."** Fixed with `backfillAllAssignedTeacherIds()` /
 intentional — only the staleness bug is fixed. A genuinely unassigned
 student still sees nothing, correctly.
 
+> **Superseded (2026-08-09).** The concern below was that a direct
+> `/exam/{id}` URL was not rules-blocked and exam documents carried
+> `correctAnswer`. The exam document no longer carries answer keys at all
+> (`stripAnswerKeys`), and `/api/exams/paper` re-checks `targetStudentIds`
+> server-side before serving a paper. The listing-level filtering described
+> below is still how the exam list is scoped.
+
 ## Exam document reads are not rules-scoped by assignment
 
 Task 10 asked to "update Firebase rules" for exams too. The `exams`
@@ -64,13 +71,20 @@ collection's read rule was deliberately left as `isAuthenticated()`
   any authenticated user — see "Grading runs in the browser" below) rather
   than introducing a new one.
 
-## Grading runs in the browser (pre-existing, unchanged)
+## ~~Grading runs in the browser~~ — FIXED (2026-08-09)
 
-`ExamClient.handleSubmit()` fetches the exam document — including
-`correctAnswer` — client-side to compute the score. A determined student
-can read answers from network traffic before submitting. Fixing this
-properly means moving grading to a server route and changing the
-submission contract; out of scope for this session's task list.
+**Resolved by the exam-integrity pass.** Grading moved to `/api/exams/grade`
+(Admin SDK), papers are served answer-key-free by `/api/exams/paper`, students
+lost read access to the `questions` collection, and the `examSessions`/`answers`
+rules no longer accept a score written by a student. See
+`docs/PRODUCTION_AUDIT.md` §8.1–8.2 for the full account and §9 for the
+required migration + rules deploy.
+
+The residual limitation is narrower: **behaviour and proctoring scores are
+still client-reported.** They originate in the student's own camera and
+tab-visibility sensors, so a crafted client can under-report its own
+violations. The grading route clamps and allowlists what it accepts, but
+verifying these server-side would need a server-side vision pipeline.
 
 ## "Posts" / "Messages" / "Announcements" / "Push Notifications" — mapped to existing features
 
