@@ -59,13 +59,37 @@ function Navbar() {
     }
   };
 
+  /** True only where `#features` / `#how-it-works` actually exist (app/page.tsx). */
+  const onLandingPage = pathname === "/";
+
+  /**
+   * `usePathname()` is typed as possibly-null and returns null during the very
+   * first render of a statically exported page. The previous
+   * `pathname.startsWith(...)` calls would throw there; guarding once here
+   * keeps every call site safe.
+   */
+  const isActive = (href: string, prefix = false) =>
+    prefix ? !!pathname?.startsWith(href) : pathname === href;
+
+  /**
+   * In-page anchors that still work from other routes.
+   *
+   * These handlers used to call `preventDefault()` unconditionally and then
+   * look the section up by id. On `/profile`, `/login`, or any dashboard page
+   * the element does not exist, so the click was swallowed and the link did
+   * nothing at all. Off the landing page the href is a real `/#section` URL and
+   * the default navigation is allowed through; only the same-page case is
+   * intercepted, to keep the smooth scroll.
+   */
+  const anchorHref = (sectionId: string) => (onLandingPage ? `#${sectionId}` : `/#${sectionId}`);
+
   const scrollToSection = (e: React.MouseEvent<HTMLAnchorElement>, sectionId: string) => {
-    e.preventDefault();
-    const element = document.getElementById(sectionId);
-    if (element) {
-      element.scrollIntoView({ behavior: "smooth" });
-    }
     setMobileMenuOpen(false);
+    if (!onLandingPage) return; // let Next.js navigate to /#section
+    const element = document.getElementById(sectionId);
+    if (!element) return; // nothing to scroll to — don't swallow the click
+    e.preventDefault();
+    element.scrollIntoView({ behavior: "smooth" });
   };
 
   return (
@@ -90,30 +114,32 @@ function Navbar() {
 
           {/* Desktop Navigation */}
           <nav className="hidden md:flex items-center space-x-1">
-            <NavLink href="/" active={pathname === "/"}>Home</NavLink>
+            <NavLink href="/" active={isActive("/")}>Home</NavLink>
             {user ? (
               <>
-                <NavLink href={getDashboardLink()} active={pathname.startsWith("/dashboard")}>Dashboard</NavLink>
+                <NavLink href={getDashboardLink()} active={isActive("/dashboard", true)}>Dashboard</NavLink>
                 {user.role === "student" && (
-                  <NavLink href="/exam" active={pathname === "/exam"}>Available Exams</NavLink>
+                  <NavLink href="/exam" active={isActive("/exam", true)}>Available Exams</NavLink>
                 )}
                 {user.role === "teacher" && (
                   <>
-                    <NavLink href="/dashboard/teacher/exams" active={pathname.startsWith("/dashboard/teacher/exams")}>My Exams</NavLink>
-                    <NavLink href="/dashboard/teacher/watch-live" active={pathname.startsWith("/dashboard/teacher/watch-live")}>Watch Live</NavLink>
+                    <NavLink href="/dashboard/teacher/exams" active={isActive("/dashboard/teacher/exams", true)}>My Exams</NavLink>
+                    <NavLink href="/dashboard/teacher/watch-live" active={isActive("/dashboard/teacher/watch-live", true)}>Watch Live</NavLink>
+                    <NavLink href="/dashboard/teacher/analytics" active={isActive("/dashboard/teacher/analytics", true)}>Analytics</NavLink>
                   </>
                 )}
                 {user.role === "admin" && (
                   <>
-                    <NavLink href="/dashboard/admin/teachers" active={pathname.startsWith("/dashboard/admin/teachers")}>Teachers</NavLink>
-                    <NavLink href="/dashboard/admin/students" active={pathname.startsWith("/dashboard/admin/students")}>Students</NavLink>
+                    <NavLink href="/dashboard/admin/teachers" active={isActive("/dashboard/admin/teachers", true)}>Teachers</NavLink>
+                    <NavLink href="/dashboard/admin/students" active={isActive("/dashboard/admin/students", true)}>Students</NavLink>
+                    <NavLink href="/dashboard/admin/health" active={isActive("/dashboard/admin/health", true)}>System Health</NavLink>
                   </>
                 )}
               </>
             ) : (
               <>
-                <NavLink href="#features" active={false} onClick={(e) => scrollToSection(e, "features")}>Features</NavLink>
-                <NavLink href="#how-it-works" active={false} onClick={(e) => scrollToSection(e, "how-it-works")}>How It Works</NavLink>
+                <NavLink href={anchorHref("features")} active={false} onClick={(e) => scrollToSection(e, "features")}>Features</NavLink>
+                <NavLink href={anchorHref("how-it-works")} active={false} onClick={(e) => scrollToSection(e, "how-it-works")}>How It Works</NavLink>
               </>
             )}
           </nav>
@@ -228,10 +254,58 @@ function Navbar() {
             className="md:hidden bg-white border-t border-gray-100 shadow-lg overflow-hidden"
           >
             <div className="container mx-auto px-4 py-4 space-y-3">
+              {/* Signed-in users get their own destinations here. The marketing
+                  anchors were previously shown to everyone on every route,
+                  where they pointed at sections that do not exist. */}
               <nav className="space-y-1">
                 <MobileNavLink href="/" onClick={() => setMobileMenuOpen(false)}>Home</MobileNavLink>
-                <MobileNavLink href="#features" onClick={(e) => scrollToSection(e, "features")}>Features</MobileNavLink>
-                <MobileNavLink href="#how-it-works" onClick={(e) => scrollToSection(e, "how-it-works")}>How It Works</MobileNavLink>
+                {user ? (
+                  <>
+                    <MobileNavLink href={getDashboardLink()} onClick={() => setMobileMenuOpen(false)}>
+                      Dashboard
+                    </MobileNavLink>
+                    {user.role === "student" && (
+                      <MobileNavLink href="/exam" onClick={() => setMobileMenuOpen(false)}>
+                        Available Exams
+                      </MobileNavLink>
+                    )}
+                    {user.role === "teacher" && (
+                      <>
+                        <MobileNavLink href="/dashboard/teacher/exams" onClick={() => setMobileMenuOpen(false)}>
+                          My Exams
+                        </MobileNavLink>
+                        <MobileNavLink href="/dashboard/teacher/watch-live" onClick={() => setMobileMenuOpen(false)}>
+                          Watch Live
+                        </MobileNavLink>
+                        <MobileNavLink href="/dashboard/teacher/analytics" onClick={() => setMobileMenuOpen(false)}>
+                          Analytics
+                        </MobileNavLink>
+                      </>
+                    )}
+                    {user.role === "admin" && (
+                      <>
+                        <MobileNavLink href="/dashboard/admin/students" onClick={() => setMobileMenuOpen(false)}>
+                          Students
+                        </MobileNavLink>
+                        <MobileNavLink href="/dashboard/admin/health" onClick={() => setMobileMenuOpen(false)}>
+                          System Health
+                        </MobileNavLink>
+                      </>
+                    )}
+                    <MobileNavLink href="/profile" onClick={() => setMobileMenuOpen(false)}>
+                      My Profile
+                    </MobileNavLink>
+                  </>
+                ) : (
+                  <>
+                    <MobileNavLink href={anchorHref("features")} onClick={(e) => scrollToSection(e, "features")}>
+                      Features
+                    </MobileNavLink>
+                    <MobileNavLink href={anchorHref("how-it-works")} onClick={(e) => scrollToSection(e, "how-it-works")}>
+                      How It Works
+                    </MobileNavLink>
+                  </>
+                )}
               </nav>
 
               <hr className="border-gray-200 my-3" />

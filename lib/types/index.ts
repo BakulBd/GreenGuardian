@@ -698,6 +698,68 @@ export interface ClassworkItem {
   updatedAt: FirestoreDate;
 }
 
+export type SubmissionStatus =
+  /** The student has handed work in; awaiting the teacher. */
+  | "submitted"
+  /** Marked and released back to the student. */
+  | "returned";
+
+/**
+ * A student's submission for one piece of classwork (assignment or quiz).
+ *
+ * Document id is deterministic — `${classworkId}_${studentId}` — for the same
+ * reason `classroomMembers` uses one: it makes a duplicate submission
+ * impossible to create at the database level rather than by convention, and
+ * lets a student's own submission be fetched by id without a query.
+ *
+ * Marks live here rather than on the classwork item so a teacher can grade
+ * each student independently, and so the teacher's override survives any
+ * later re-run of the automated pass.
+ */
+export interface ClassworkSubmission {
+  id: string;
+  classroomId: string;
+  classworkId: string;
+  classworkTitle: string;
+  /** Denormalized from the classroom so grading rules need no extra lookup. */
+  teacherId: string;
+  studentId: string;
+  studentName: string;
+  studentEmail?: string;
+  studentCode?: string;
+
+  /** Typed answer, file uploads, or both — the classwork decides what it wants. */
+  text?: string;
+  attachments?: ClassroomAttachment[];
+
+  status: SubmissionStatus;
+  /** Resolved against the classwork's due date at submit time. */
+  late?: boolean;
+  submittedAt: FirestoreDate;
+  updatedAt?: FirestoreDate;
+
+  // ---- Teacher evaluation ----
+  /** Final mark. Present only once a teacher has returned the submission. */
+  marks?: number;
+  totalMarks?: number;
+  feedback?: string;
+  gradedBy?: string;
+  gradedByName?: string;
+  gradedAt?: FirestoreDate;
+
+  // ---- Machine-assisted pre-pass ----
+  /**
+   * Output of the OCR/AI reading of the submission, offered to the teacher as
+   * a starting point. Deliberately kept separate from `marks`: the suggestion
+   * is never the grade until a human has accepted or replaced it, and keeping
+   * both means an override is visible as an override.
+   */
+  ocrText?: string;
+  aiSuggestedMarks?: number;
+  aiRationale?: string;
+  aiCheckedAt?: FirestoreDate;
+}
+
 /**
  * Per-recipient delivery record for classroom email notifications — the
  * audit trail behind "log delivery status" / "retry failed emails".

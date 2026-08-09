@@ -1,54 +1,17 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import DashboardLayout from "@/components/layouts/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Save, Loader2, Shield, Eye, AlertCircle, Activity, CheckCircle2, XCircle } from "lucide-react";
+import { Save, Loader2, Shield, Eye, AlertCircle, Activity, ArrowRight } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { doc, getDoc, setDoc } from "firebase/firestore";
-import { db, auth } from "@/lib/firebase/config";
-
-interface HealthState {
-  adminSdk: boolean;
-  email: boolean;
-  encryption: boolean;
-}
-
-function HealthRow({
-  ok,
-  label,
-  okText,
-  failText,
-}: {
-  ok: boolean;
-  label: string;
-  okText: string;
-  failText: string;
-}) {
-  return (
-    <div
-      className={`flex items-start gap-3 rounded-lg border p-3 ${
-        ok ? "border-green-200 bg-green-50/50" : "border-red-200 bg-red-50/50"
-      }`}
-    >
-      {ok ? (
-        <CheckCircle2 className="h-5 w-5 text-green-600 shrink-0 mt-0.5" />
-      ) : (
-        <XCircle className="h-5 w-5 text-red-600 shrink-0 mt-0.5" />
-      )}
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-gray-900">{label}</p>
-        <p className={`text-xs mt-0.5 leading-relaxed ${ok ? "text-green-800" : "text-red-800"}`}>
-          {ok ? okText : failText}
-        </p>
-      </div>
-    </div>
-  );
-}
+import { db } from "@/lib/firebase/config";
 
 /**
  * Only settings that something actually reads live here.
@@ -92,43 +55,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [health, setHealth] = useState<HealthState | null>(null);
   const { toast } = useToast();
-
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const current = auth.currentUser;
-        if (!current) return;
-        const res = await fetch("/api/admin/health", {
-          headers: { Authorization: `Bearer ${await current.getIdToken()}` },
-        });
-        if (!active) return;
-        if (res.status === 503) {
-          // requireAdmin returns 503 precisely when the Admin SDK is absent —
-          // which is itself the answer to the first health question.
-          setHealth({ adminSdk: false, email: false, encryption: false });
-          return;
-        }
-        const data = await res.json().catch(() => null);
-        if (!data?.success) {
-          setHealth({ adminSdk: false, email: false, encryption: false });
-          return;
-        }
-        setHealth({
-          adminSdk: !!data.adminSdk?.firestoreOk && !!data.adminSdk?.authOk,
-          email: !!data.email?.configured,
-          encryption: !!data.encryption?.configured,
-        });
-      } catch {
-        if (active) setHealth({ adminSdk: false, email: false, encryption: false });
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, []);
 
   const update = (next: Settings) => {
     setSettings(next);
@@ -247,53 +174,26 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Deployment health.
-            The two failure modes below are otherwise completely silent: with no
-            Admin credentials every admin-only server action 503s, and with no
-            SMTP the OTP and reset emails are written to the server log instead
-            of being delivered. Both look like "the feature is broken". */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-3">
-              <Activity className="h-5 w-5 text-indigo-600" />
-              <div>
-                <CardTitle>System Health</CardTitle>
-                <CardDescription>
-                  Server-side capabilities available in this deployment
-                </CardDescription>
+        {/* System Health used to be a card on this page. It is now its own
+            navigation destination — Settings is for changing configuration,
+            and a diagnostics panel nested inside it was only ever found by
+            accident. This pointer keeps the old route to the information
+            working for anyone who learned where it was. */}
+        <Link href="/dashboard/admin/health" className="block">
+          <Card className="transition-colors hover:border-indigo-300 hover:bg-indigo-50/40">
+            <CardContent className="pt-6 flex items-center gap-4">
+              <Activity className="h-6 w-6 text-indigo-600 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-gray-900">System Health</p>
+                <p className="text-sm text-gray-500">
+                  Live diagnostics, database connectivity, and active sessions have moved to
+                  their own page.
+                </p>
               </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {health === null ? (
-              <div className="flex items-center gap-2 text-sm text-gray-500">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Checking...
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                <HealthRow
-                  ok={health.adminSdk}
-                  label="Firebase Admin credentials"
-                  okText="Configured and working"
-                  failText="Missing — admin account creation and password resets are unavailable. Set FIREBASE_SERVICE_ACCOUNT in your hosting environment."
-                />
-                <HealthRow
-                  ok={health.email}
-                  label="Email delivery (SMTP)"
-                  okText="Configured — verification and reset emails are sent"
-                  failText="Not configured — emails are only written to the server log, so users never receive their code. Set SMTP_HOST, SMTP_USER, SMTP_PASS and MAIL_FROM."
-                />
-                <HealthRow
-                  ok={health.encryption}
-                  label="Registration encryption key"
-                  okText="Configured"
-                  failText="REGISTRATION_ENC_KEY is unset — a fallback key is derived, which will invalidate in-flight registrations if the project id changes."
-                />
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              <ArrowRight className="h-5 w-5 text-gray-400 shrink-0" />
+            </CardContent>
+          </Card>
+        </Link>
 
         {/* Proctoring Settings */}
         <Card>

@@ -13,6 +13,8 @@
     "firebase:deploy:hosting": "firebase deploy --only hosting",
     "firebase:deploy:all": "firebase deploy --only firestore:rules,firestore:indexes,storage,hosting",
     "emulators": "firebase emulators:start --only firestore,auth,storage",
+    "storage:cors": "node scripts/apply-storage-cors.mjs",
+    "storage:cors:show": "node scripts/apply-storage-cors.mjs --show",
     "bootstrap:admin": "node scripts/bootstrap-admin.mjs",
     "setup:email": "node scripts/setup-email-verification.mjs",
     "backfill:access": "node scripts/backfill-classroom-access.mjs",

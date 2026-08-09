@@ -107,6 +107,16 @@ service cloud.firestore {
       allow read, write: if false;
     }
     
+    // Batch-wise student ID sequences (lib/server/student-ids.ts).
+    //
+    // Written ONLY by the Admin SDK, which bypasses these rules. Client access
+    // is denied outright: a client that could write a counter could rewind it
+    // and mint a duplicate student ID, and one that could only read it still
+    // learns the exact size of every batch for nothing in return.
+    match /studentCodeCounters/{counterId} {
+      allow read, write: if false;
+    }
+
     // Exams collection
     match /exams/{examId} {
       // Teachers can read their own exams (any status).
@@ -555,8 +565,18 @@ service cloud.firestore {
 
     // ============ Classroom Module (Phase 2, Feature 1) ============
 
+    // `classroomId` is passed in rather than read here so the caller decides
+    // whether it is reading it off `resource` or `request.resource`.
+    //
+    // The empty-string guard is load-bearing. A rule that dereferences a field
+    // a document does not have RAISES, and a raise is a denial — so on a LIST
+    // query (the comment/post/classwork streams are all live subscriptions) a
+    // single legacy document without `classroomId` denied the entire query,
+    // not just that one document. That is the `permission-denied` the comment
+    // subscription was failing with. Callers now pass `.get('classroomId','')`,
+    // and an empty id can never match a real membership document id.
     function isClassroomMember(classroomId) {
-      return isAuthenticated() &&
+      return isAuthenticated() && classroomId != '' &&
         exists(/databases/$(database)/documents/classroomMembers/$(classroomId + '_' + request.auth.uid));
     }
 
@@ -595,7 +615,7 @@ service cloud.firestore {
       // rendered "No students found").
       allow read: if isTeacherOrAdmin() ||
         (isAuthenticated() && resource.data.studentId == request.auth.uid) ||
-        isClassroomMember(resource.data.classroomId);
+        isClassroomMember(resource.data.get('classroomId', ''));
       // Self-join by code: classroom membership is its own access boundary
       // now (no separate admin Course/Batch/Section assignment required —
       // see lib/firebase/classrooms.ts#joinClassroomByCode). The submitted
@@ -624,7 +644,7 @@ service cloud.firestore {
 
     // Stream posts (announcements/notices/materials)
     match /classroomPosts/{postId} {
-      allow read: if isTeacherOrAdmin() || isClassroomMember(resource.data.classroomId);
+      allow read: if isTeacherOrAdmin() || isClassroomMember(resource.data.get('classroomId', ''));
       allow create: if isTeacher() && isActiveUser() && request.resource.data.teacherId == request.auth.uid;
       allow update, delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
       allow delete: if isAdmin();
@@ -632,10 +652,10 @@ service cloud.firestore {
 
     // Stream comments
     match /classroomComments/{commentId} {
-      allow read: if isTeacherOrAdmin() || isClassroomMember(resource.data.classroomId);
+      allow read: if isTeacherOrAdmin() || isClassroomMember(resource.data.get('classroomId', ''));
       allow create: if isAuthenticated() && isActiveUser() &&
         request.resource.data.authorId == request.auth.uid &&
-        (isTeacherOrAdmin() || isClassroomMember(request.resource.data.classroomId));
+        (isTeacherOrAdmin() || isClassroomMember(request.resource.data.get('classroomId', '')));
       allow delete: if isTeacherOrAdmin() ||
         (isAuthenticated() && resource.data.authorId == request.auth.uid);
     }
@@ -644,10 +664,67 @@ service cloud.firestore {
     match /classroomClasswork/{itemId} {
       // Students only ever see published classwork; drafts are teacher-only.
       allow read: if isTeacherOrAdmin() ||
-        (resource.data.status == 'published' && isClassroomMember(resource.data.classroomId));
+        (resource.data.get('status', '') == 'published' &&
+         isClassroomMember(resource.data.get('classroomId', '')));
       allow create: if isTeacher() && isActiveUser() && request.resource.data.teacherId == request.auth.uid;
       allow update, delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
       allow delete: if isAdmin();
+    }
+
+    // Classwork submissions (student hand-in + teacher evaluation).
+    //
+    // Document id is deterministic `${classworkId}_${studentId}`, which is what
+    // makes a duplicate submission impossible: a second `create` on the same id
+    // is an `update`, and the update rules below only ever let a student touch
+    // their OWN document.
+    match /classroomSubmissions/{submissionId} {
+      // The student it belongs to, the classroom's teacher, or an admin.
+      // Students may not read each other's work — an assignment answer is
+      // exactly as sensitive as an exam answer.
+      allow read: if isAdmin() ||
+        (isAuthenticated() && resource.data.studentId == request.auth.uid) ||
+        (isTeacher() && resource.data.teacherId == request.auth.uid);
+
+      // Hand-in. The student must be a member of the classroom, must be
+      // submitting as themselves, must use the deterministic id, and must
+      // carry the classwork's REAL teacherId — the field the read and grading
+      // rules above trust. Reading it off the classwork document rather than
+      // the request is what stops a student naming any teacher they like.
+      allow create: if isStudent() && isActiveUser() &&
+        request.resource.data.studentId == request.auth.uid &&
+        submissionId == request.resource.data.classworkId + '_' + request.auth.uid &&
+        isClassroomMember(request.resource.data.get('classroomId', '')) &&
+        request.resource.data.status == 'submitted' &&
+        request.resource.data.teacherId ==
+          get(/databases/$(database)/documents/classroomClasswork/$(request.resource.data.classworkId)).data.teacherId &&
+        get(/databases/$(database)/documents/classroomClasswork/$(request.resource.data.classworkId)).data.status == 'published' &&
+        // Grading fields are the teacher's alone. Without this a student could
+        // submit their own work pre-marked.
+        !request.resource.data.keys().hasAny([
+          'marks', 'feedback', 'gradedBy', 'gradedByName', 'gradedAt',
+          'aiSuggestedMarks', 'aiRationale'
+        ]);
+
+      // Revising before it is marked. The allowlist is what keeps `marks`,
+      // `status`, and `late` out of the student's reach — `late` in particular
+      // is resolved once at hand-in and must not be editable afterwards.
+      allow update: if isStudent() && isActiveUser() &&
+        resource.data.studentId == request.auth.uid &&
+        resource.data.status != 'returned' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'text', 'attachments', 'updatedAt', 'submittedAt'
+        ]);
+
+      // Withdrawing work that has not been marked yet.
+      allow delete: if isAdmin() ||
+        (isStudent() && resource.data.studentId == request.auth.uid &&
+         resource.data.status != 'returned');
+
+      // Evaluation — marks, feedback, returning, and the machine-assisted
+      // pre-pass. Scoped to the classwork's own teacher, not any teacher.
+      allow update: if isAdmin() ||
+        (isTeacher() && isActiveUser() && resource.data.teacherId == request.auth.uid);
+      allow delete: if isTeacher() && resource.data.teacherId == request.auth.uid;
     }
 
     // Email delivery log for classroom notifications — written by the

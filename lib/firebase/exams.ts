@@ -247,18 +247,12 @@ export async function backfillExamTargetStudentIds(): Promise<{ examsUpdated: nu
  */
 export async function notifyExamPublished(examId: string, studentIds: string[]): Promise<void> {
   if (studentIds.length === 0) return;
-  const { auth } = await import("./config");
-  const token = await auth.currentUser?.getIdToken();
-  if (!token) return;
-  const res = await fetch("/api/exams/notify", {
+  const { authedFetch } = await import("../utils/api-client");
+  await authedFetch("/api/exams/notify", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ examId, studentIds }),
+    body: { examId, studentIds },
+    fallbackError: "Could not notify the assigned students.",
   });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Exam notify failed (${res.status})`);
-  }
 }
 
 export async function deleteExam(examId: string): Promise<void> {

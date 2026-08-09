@@ -5,7 +5,7 @@ import { KeyRound, X, Loader2, Copy, Check, Mail, ShieldAlert } from "lucide-rea
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
-import { auth } from "@/lib/firebase/config";
+import { authedFetch } from "@/lib/utils/api-client";
 
 interface ResetPasswordControlProps {
   userId: string;
@@ -43,33 +43,25 @@ export default function ResetPasswordControl({
   };
 
   const run = async (mode: "link" | "set") => {
-    const currentUser = auth.currentUser;
-    if (!currentUser) {
-      toast({
-        title: "Session expired",
-        description: "Please sign in again.",
-        variant: "destructive",
-      });
-      return;
-    }
-
     setSubmitting(true);
     try {
-      const token = await currentUser.getIdToken();
-      const res = await fetch("/api/admin/reset-password", {
+      // `authedFetch` waits for session restoration and retries once with a
+      // freshly minted ID token on a 401. Reading `auth.currentUser` and its
+      // cached token directly is what made this action fail with "Session
+      // expired" on a perfectly valid admin session.
+      const data = await authedFetch<{
+        success: boolean;
+        results?: { temporaryPassword?: string; error?: string }[];
+      }>("/api/admin/reset-password", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ userId, mode }),
+        body: { userId, mode },
+        fallbackError: "The reset could not be completed.",
       });
-      const data = await res.json().catch(() => ({}));
 
-      if (!res.ok || !data?.success) {
-        throw new Error(
-          data?.results?.[0]?.error || data?.error || "The reset could not be completed."
-        );
+      // The route reports per-target outcomes, so a 200 with every target
+      // failed is still a failure the admin needs to see.
+      if (!data?.success) {
+        throw new Error(data?.results?.[0]?.error || "The reset could not be completed.");
       }
 
       if (mode === "set") {

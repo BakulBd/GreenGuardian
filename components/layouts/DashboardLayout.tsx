@@ -25,6 +25,8 @@ Megaphone,
   UserCog,
   Image as ImageIcon,
   School,
+  Activity,
+  BarChart3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
@@ -132,6 +134,8 @@ export default function DashboardLayout({ children, role }: DashboardLayoutProps
     { icon: Users, label: "Students", href: "/dashboard/admin/students" },
     { icon: UserCog, label: "Assignments", href: "/dashboard/admin/assignments" },
     { icon: FileText, label: "Exams", href: "/dashboard/admin/exams" },
+    { icon: BarChart3, label: "Analytics", href: "/dashboard/admin/analytics" },
+    { icon: Activity, label: "System Health", href: "/dashboard/admin/health" },
     { icon: Settings, label: "Settings", href: "/dashboard/admin/settings" },
     { icon: User, label: "My Profile", href: "/profile" },
   ];
@@ -146,6 +150,7 @@ const teacherMenuItems = [
     { icon: Camera, label: "Watch Live", href: "/dashboard/teacher/watch-live" },
     { icon: ImageIcon, label: "Snapshots", href: "/dashboard/teacher/snapshots" },
     { icon: Users, label: "Students", href: "/dashboard/teacher/students" },
+    { icon: BarChart3, label: "Analytics", href: "/dashboard/teacher/analytics" },
     { icon: User, label: "My Profile", href: "/profile" },
   ];
 

@@ -228,12 +228,55 @@ export async function changePassword(
   newPassword: string
 ): Promise<{ success: boolean; error?: string }> {
   const firebaseUser = auth.currentUser;
-  if (!firebaseUser || !firebaseUser.email) {
+  if (!firebaseUser) {
     return { success: false, error: "You must be signed in to change your password." };
   }
 
+  if (!currentPassword) {
+    return { success: false, error: "Please enter your current password." };
+  }
+
   try {
-    const credential = EmailAuthProvider.credential(firebaseUser.email, currentPassword);
+    // Refresh the locally cached Auth record before building the credential.
+    //
+    // `reauthenticateWithCredential` posts `currentUser.email` to
+    // `accounts:signInWithPassword`, and that field is a *snapshot* taken when
+    // the session was established. Anything that changes the account
+    // server-side — an admin issuing a temporary password or correcting an
+    // email address through the Admin SDK — leaves the browser holding a stale
+    // copy, and the reauth request then carries an email/password pair the
+    // backend has no record of. That is the HTTP 400 this flow was failing
+    // with: not a wrong password, but a reauthentication built from stale
+    // parameters. Reloading first makes the request describe the account as it
+    // actually is.
+    await firebaseUser.reload().catch((reloadError) => {
+      // A failed reload is not fatal — the cached values may still be correct.
+      console.warn("[Auth] Could not refresh the account before reauth:", reloadError);
+    });
+
+    const email = firebaseUser.email;
+    if (!email) {
+      return {
+        success: false,
+        error:
+          "This account has no email sign-in credential, so its password cannot be changed here.",
+      };
+    }
+
+    // A password can only be changed on an account that actually has a
+    // password provider. Saying so beats a raw "invalid credential".
+    const hasPasswordProvider = firebaseUser.providerData.some(
+      (provider) => provider?.providerId === EmailAuthProvider.PROVIDER_ID
+    );
+    if (firebaseUser.providerData.length > 0 && !hasPasswordProvider) {
+      return {
+        success: false,
+        error:
+          "This account signs in through an external provider and has no password to change.",
+      };
+    }
+
+    const credential = EmailAuthProvider.credential(email, currentPassword);
     await reauthenticateWithCredential(firebaseUser, credential);
     await updatePassword(firebaseUser, newPassword);
 
@@ -251,21 +294,39 @@ export async function changePassword(
 
     return { success: true };
   } catch (error: any) {
-    let errorMessage = error.message || "Failed to change password.";
-    if (
-      error.code === "auth/wrong-password" ||
-      error.code === "auth/invalid-credential"
-    ) {
-      errorMessage = "Current password is incorrect.";
-    } else if (error.code === "auth/weak-password") {
-      errorMessage = "New password is too weak.";
-    } else if (error.code === "auth/requires-recent-login") {
-      errorMessage = "Please log out and log back in, then try again.";
-    } else if (error.code === "auth/too-many-requests") {
-      errorMessage = "Too many attempts. Please try again later.";
-    } else if (error.code === "auth/network-request-failed") {
-      errorMessage = "Network error. Please check your connection and try again.";
-    }
-    return { success: false, error: errorMessage };
+    // The raw code is the only thing that distinguishes "wrong password" from
+    // "your session no longer matches this account" — both surface as a 400
+    // from `signInWithPassword`, and collapsing them is what made this
+    // undiagnosable from a bug report.
+    console.warn("[Auth] Password change failed:", error?.code, error?.message);
+
+    const messagesByCode: Record<string, string> = {
+      "auth/wrong-password": "Current password is incorrect.",
+      "auth/invalid-credential": "Current password is incorrect.",
+      "auth/invalid-login-credentials": "Current password is incorrect.",
+      "auth/missing-password": "Please enter your current password.",
+      "auth/weak-password":
+        "New password is too weak. Use at least 8 characters with upper and lower case, a number, and a symbol.",
+      "auth/requires-recent-login": "Please log out and log back in, then try again.",
+      "auth/too-many-requests":
+        "Too many attempts. Please wait a few minutes before trying again.",
+      "auth/network-request-failed":
+        "Network error. Please check your connection and try again.",
+      // The three below all mean the browser's session no longer describes the
+      // account — typically because an admin changed it underneath us. A
+      // re-login rebuilds the session and the change then succeeds.
+      "auth/user-mismatch": "Please sign out and sign in again, then try once more.",
+      "auth/user-token-expired": "Your session has expired. Please sign in again.",
+      "auth/invalid-user-token": "Your session is no longer valid. Please sign in again.",
+      "auth/user-not-found": "This account no longer exists. Please contact an administrator.",
+      "auth/user-disabled": "This account has been disabled. Please contact an administrator.",
+      "auth/operation-not-allowed":
+        "Email/password sign-in is disabled for this project. Please contact an administrator.",
+    };
+
+    return {
+      success: false,
+      error: messagesByCode[error?.code] || error?.message || "Failed to change password.",
+    };
   }
 }

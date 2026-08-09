@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminAuth, getAdminDb, isAdminSdkConfigured } from "@/lib/firebase/admin";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { nextStudentCode } from "@/lib/server/student-ids";
 
 const RATE_LIMIT_MAX = 30;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -148,6 +149,20 @@ export async function POST(req: NextRequest) {
       throw err;
     }
 
+    // An explicit code from the form wins; otherwise allocate the next
+    // sequential one for this batch. Failing to allocate must not lose an
+    // account that Firebase Auth has already created, so fall back to a
+    // timestamped code and let an admin correct it.
+    let resolvedStudentCode = studentCode;
+    if (!resolvedStudentCode) {
+      try {
+        resolvedStudentCode = await nextStudentCode(adminDb, batch);
+      } catch (codeError) {
+        console.error("[admin/students] Student ID allocation failed:", codeError);
+        resolvedStudentCode = `STU-${Date.now().toString().slice(-6)}`;
+      }
+    }
+
     const now = new Date();
     await adminDb
       .collection("users")
@@ -160,7 +175,7 @@ export async function POST(req: NextRequest) {
         approved: true,
         rejected: false,
         status: "active",
-        studentCode: studentCode || `STU-${Date.now().toString().slice(-6)}`,
+        studentCode: resolvedStudentCode,
         department,
         batch,
         section,
@@ -170,7 +185,7 @@ export async function POST(req: NextRequest) {
         updatedAt: now,
       });
 
-    return NextResponse.json({ success: true, studentId: uid });
+    return NextResponse.json({ success: true, studentId: uid, studentCode: resolvedStudentCode });
   } catch (error: any) {
     console.error("API /api/admin/students error:", error);
     return NextResponse.json(

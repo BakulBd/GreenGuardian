@@ -33,6 +33,9 @@ import {
   subscribeToClasswork,
   notifyClassroom,
 } from "@/lib/firebase/classrooms";
+import { isSubmittable } from "@/lib/firebase/submissions";
+import SubmissionPanel from "@/components/classroom/SubmissionPanel";
+import SubmissionReview from "@/components/classroom/SubmissionReview";
 import { CLASSROOM_MATERIAL_ALLOWED_TYPES, CLASSROOM_MAX_FILE_SIZE, UploadResult } from "@/lib/firebase/storage";
 import { Classroom, ClassworkItem, ClassworkType, ClassroomAttachment, User } from "@/lib/types";
 
@@ -331,6 +334,17 @@ export default function ClassworkTab({ classroom, isTeacher, currentUser }: Clas
                     ))}
                   </div>
                 )}
+
+                {/* Hand-in and evaluation. Only assignments and quizzes take a
+                    submission — materials, resources and links are one-way. */}
+                {isSubmittable(item) &&
+                  (isTeacher ? (
+                    <SubmissionReview classwork={item} teacher={currentUser} />
+                  ) : (
+                    item.status === "published" && (
+                      <SubmissionPanel classwork={item} student={currentUser} />
+                    )
+                  ))}
               </CardContent>
             </Card>
           );

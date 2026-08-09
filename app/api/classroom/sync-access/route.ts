@@ -62,6 +62,7 @@ export async function POST(req: NextRequest) {
 
     const unique = Array.from(new Set(studentIds));
     let synced = 0;
+    let skipped = 0;
 
     for (const studentId of unique) {
       const [mappingsSnap, membershipsSnap] = await Promise.all([
@@ -81,17 +82,28 @@ export async function POST(req: NextRequest) {
       // A teacher may only sync students who share a classroom with them —
       // stops one teacher from touching another teacher's roster.
       if (!isSelfOnly && callerRole === "teacher" && !teacherIds.includes(authResult.uid)) {
+        skipped++;
         continue;
       }
 
-      await db.collection("users").doc(studentId).update({
-        assignedTeacherIds: teacherIds,
-        updatedAt: new Date(),
-      });
-      synced++;
+      try {
+        // `set(..., { merge: true })` rather than `update()`: a bulk enrolment
+        // can name a student whose profile document was deleted (or was never
+        // created, for an Auth-only account). `update()` throws NOT_FOUND on
+        // the first such id and abandoned the whole batch, so one stale roster
+        // row could block access for every other student in the request.
+        await db.collection("users").doc(studentId).set(
+          { assignedTeacherIds: teacherIds, updatedAt: new Date() },
+          { merge: true }
+        );
+        synced++;
+      } catch (writeError) {
+        console.warn(`[classroom/sync-access] Could not sync ${studentId}:`, writeError);
+        skipped++;
+      }
     }
 
-    return NextResponse.json({ success: true, synced, total: unique.length });
+    return NextResponse.json({ success: true, synced, skipped, total: unique.length });
   } catch (error: any) {
     console.error("API /api/classroom/sync-access error:", error);
     return NextResponse.json({ success: false, error: error.message || "Internal server error." }, { status: 500 });

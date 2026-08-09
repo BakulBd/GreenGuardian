@@ -27,6 +27,7 @@ import {
   User,
 } from "../types";
 import { getStudentGroup } from "./assignments";
+import { authedFetch } from "../utils/api-client";
 
 /**
  * Ask the server to recompute `users/{id}.assignedTeacherIds` for these
@@ -35,22 +36,39 @@ import { getStudentGroup } from "./assignments";
  * This cannot run on the client: students may not read
  * `teacher_student_mapping` and teachers may not write another user's doc,
  * so a client-side recompute would silently drop admin assignments (or fail
- * outright) and leave the student unable to see notices/exams. Failures are
- * surfaced to the caller so join/add can report honestly.
+ * outright) and leave the student unable to see notices/exams.
+ *
+ * It is deliberately NON-FATAL. Every caller has already committed the write
+ * the user actually asked for (the membership document) before getting here,
+ * so a failed sync means "teacher content may take a moment to appear", not
+ * "the operation failed". Throwing was what surfaced a server-side problem —
+ * a 503 from an unconfigured Admin SDK, a 401 from a stale token — as
+ * "Invalid or Expired Session" on a classroom that had, in fact, just been
+ * created. The outcome is reported back so callers can mention a delay
+ * without claiming failure.
  */
-async function syncClassroomAccess(studentIds: string[]): Promise<void> {
-  if (studentIds.length === 0) return;
-  const currentUser = auth.currentUser;
-  if (!currentUser) return;
-  const token = await currentUser.getIdToken();
-  const res = await fetch("/api/classroom/sync-access", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ studentIds }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Access sync failed (${res.status})`);
+export interface AccessSyncOutcome {
+  ok: boolean;
+  /** Present when the sync did not complete; already user-readable. */
+  error?: string;
+}
+
+async function syncClassroomAccess(
+  studentIds: string[],
+  options?: { keepalive?: boolean }
+): Promise<AccessSyncOutcome> {
+  if (studentIds.length === 0) return { ok: true };
+  try {
+    await authedFetch("/api/classroom/sync-access", {
+      method: "POST",
+      body: { studentIds },
+      fallbackError: "Could not refresh classroom access.",
+      keepalive: options?.keepalive,
+    });
+    return { ok: true };
+  } catch (error: any) {
+    console.warn("[Classrooms] Access sync failed (non-fatal):", error?.message || error);
+    return { ok: false, error: error?.message || "Could not refresh classroom access." };
   }
 }
 
@@ -219,7 +237,17 @@ function toMillis(value: any): number {
 // ===================== Membership (join/leave/roster) =====================
 
 export type JoinClassroomResult =
-  | { success: true; classroomId: string; classroomName: string }
+  | {
+      success: true;
+      classroomId: string;
+      classroomName: string;
+      /**
+       * The join committed, but `assignedTeacherIds` could not be recomputed.
+       * The classroom is joined; this teacher's notices and exams may not
+       * appear until the next sync.
+       */
+      accessSyncPending?: boolean;
+    }
   | { success: false; error: string };
 
 /**
@@ -273,13 +301,14 @@ export async function joinClassroomByCode(code: string, student: User): Promise<
   // Membership is already committed at this point — a sync failure must not
   // be reported as a failed join. It only means teacher content may take a
   // moment (or an admin re-sync) to appear.
-  try {
-    await syncClassroomAccess([student.id]);
-  } catch (syncError) {
-    console.warn("[Classrooms] Joined, but access sync failed:", syncError);
-  }
+  const sync = await syncClassroomAccess([student.id]);
 
-  return { success: true, classroomId: classroom.id, classroomName: classroom.name };
+  return {
+    success: true,
+    classroomId: classroom.id,
+    classroomName: classroom.name,
+    accessSyncPending: !sync.ok,
+  };
 }
 
 export async function leaveClassroom(classroomId: string, studentId: string): Promise<void> {
@@ -289,7 +318,13 @@ export async function leaveClassroom(classroomId: string, studentId: string): Pr
   await batch.commit();
   // Recompute rather than blindly unassign — the student may still be
   // linked to this teacher via an admin assignment or another classroom.
-  await syncClassroomAccess([studentId]);
+  //
+  // `keepalive` matters here: leaving is frequently the last thing a student
+  // does before navigating away, and a normal fetch is cancelled the moment
+  // the page starts unloading — which is what made this call look like a 503
+  // rather than an aborted request. The membership row is already gone either
+  // way, so a missed sync self-corrects on the student's next join/leave.
+  await syncClassroomAccess([studentId], { keepalive: true });
 }
 
 export async function removeClassroomMember(classroomId: string, studentId: string): Promise<void> {
@@ -332,7 +367,7 @@ export async function addStudentsToClassroomByGroup(
   courseId: string,
   batchName: string,
   sectionName: string
-): Promise<{ added: number; alreadyMembers: number }> {
+): Promise<{ added: number; alreadyMembers: number; accessSyncPending?: boolean }> {
   const [group, existingMembers] = await Promise.all([
     getStudentGroup(courseId, batchName, sectionName),
     getClassroomMembers(classroom.id),
@@ -361,8 +396,12 @@ export async function addStudentsToClassroomByGroup(
     await batch.commit();
   }
 
-  await syncClassroomAccess(toAdd.map((s) => s.id));
-  return { added: toAdd.length, alreadyMembers: group.length - toAdd.length };
+  const sync = await syncClassroomAccess(toAdd.map((s) => s.id));
+  return {
+    added: toAdd.length,
+    alreadyMembers: group.length - toAdd.length,
+    accessSyncPending: !sync.ok,
+  };
 }
 
 export async function isClassroomMember(classroomId: string, studentId: string): Promise<boolean> {
@@ -553,8 +592,25 @@ export async function deleteClassroomComment(commentId: string): Promise<void> {
   await deleteDoc(doc(db, COMMENTS, commentId));
 }
 
-export function subscribeToPostComments(postId: string, callback: (comments: ClassroomComment[]) => void): () => void {
-  const q = query(collection(db, COMMENTS), where("postId", "==", postId));
+/**
+ * Live comments on one post.
+ *
+ * The query filters on `classroomId` as well as `postId` so it matches the
+ * shape the security rule authorises on (classroom membership). Equality-only
+ * filters need no composite index, so this costs nothing and keeps the query
+ * and the rule describing the same set of documents.
+ */
+export function subscribeToPostComments(
+  postId: string,
+  classroomId: string,
+  callback: (comments: ClassroomComment[]) => void,
+  onError?: (error: any) => void
+): () => void {
+  const q = query(
+    collection(db, COMMENTS),
+    where("classroomId", "==", classroomId),
+    where("postId", "==", postId)
+  );
   return onSnapshot(
     q,
     (snap) => {
@@ -563,7 +619,11 @@ export function subscribeToPostComments(postId: string, callback: (comments: Cla
     },
     (error) => {
       console.warn("[Classrooms] Comments subscription error:", error.code || error);
+      // Resolve the caller's loading state, but tell it the list is empty
+      // *because it failed* — silently showing "no comments" for a
+      // permission error is what hid this bug in the first place.
       callback([]);
+      onError?.(error);
     }
   );
 }
@@ -660,14 +720,7 @@ export function subscribeToClasswork(
  */
 export async function notifyClassroom(input: { classroomId: string; postId?: string; classworkId?: string; kind: "post" | "classwork" }): Promise<void> {
   try {
-    const currentUser = auth.currentUser;
-    if (!currentUser) return;
-    const token = await currentUser.getIdToken();
-    await fetch("/api/classroom/notify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify(input),
-    });
+    await authedFetch("/api/classroom/notify", { method: "POST", body: input });
   } catch (error) {
     console.warn("[Classrooms] Notification trigger failed (non-fatal):", error);
   }

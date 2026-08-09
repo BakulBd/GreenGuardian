@@ -8,6 +8,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -55,12 +62,28 @@ import {
 } from "@/lib/services/proctoring";
 import { getBehaviorLevel } from "@/lib/utils/helpers";
 
-// Grid helper: determine columns based on student count
-function getGridCols(count: number): string {
-  if (count <= 1) return "grid-cols-1";
-  if (count <= 4) return "grid-cols-1 sm:grid-cols-2";
-  if (count <= 9) return "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3";
-  return "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4";
+/**
+ * Invigilation grid density.
+ *
+ * "Auto" keeps the previous behaviour — widen the grid as more students join —
+ * while 3x3 and 4x4 pin it, so a teacher watching a hall can fix the tile size
+ * they can actually read faces at and have it stay put as students come and go.
+ *
+ * These strings must contain complete Tailwind class names: the compiler scans
+ * source text, so a constructed `grid-cols-${n}` would be purged from the CSS
+ * and silently do nothing.
+ */
+export type GridDensity = "auto" | "3x3" | "4x4";
+
+function getGridCols(count: number, density: GridDensity = "auto"): string {
+  // `grid` itself was missing here, so every `grid-cols-*` below was inert and
+  // the tiles rendered as stacked block elements regardless of student count.
+  if (density === "3x3") return "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3";
+  if (density === "4x4") return "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4";
+  if (count <= 1) return "grid grid-cols-1";
+  if (count <= 4) return "grid grid-cols-1 sm:grid-cols-2";
+  if (count <= 9) return "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3";
+  return "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4";
 }
 
 export default function TeacherWatchLivePage() {
@@ -69,6 +92,7 @@ export default function TeacherWatchLivePage() {
 
   const [exams, setExams] = useState<Exam[]>([]);
   const [selectedExamId, setSelectedExamId] = useState<string>("");
+  const [gridDensity, setGridDensity] = useState<GridDensity>("auto");
   const [liveSessions, setLiveSessions] = useState<LiveStudentSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [examsError, setExamsError] = useState<string | null>(null);
@@ -378,12 +402,13 @@ export default function TeacherWatchLivePage() {
           </div>
         )}
 
-        {/* Exam Selector */}
+        {/* Exam filter + grid density.
+            This was a horizontally scrolling row of one button per exam, which
+            grew without limit and pushed the camera grid off the first screen.
+            A dropdown states the current selection in one line and takes the
+            same space whether there are two exams or fifty. */}
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-lg">Select Active Exam</CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardContent className="py-4">
             {loading ? (
               <div className="flex items-center gap-2 text-gray-500">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -394,20 +419,39 @@ export default function TeacherWatchLivePage() {
                 No active exams. Publish an exam and students must start it to appear here.
               </p>
             ) : (
-              <ScrollArea className="w-full whitespace-nowrap">
-                <div className="flex gap-2 pb-2">
-                  {exams.map((exam) => (
-                    <Button
-                      key={exam.id}
-                      variant={selectedExamId === exam.id ? "default" : "outline"}
-                      onClick={() => setSelectedExamId(exam.id)}
-                      className="flex-shrink-0"
-                    >
-                      {exam.title}
-                    </Button>
-                  ))}
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="min-w-[240px] flex-1">
+                  <label className="text-xs font-medium text-gray-500 block mb-1.5">Active exam</label>
+                  <Select value={selectedExamId} onValueChange={setSelectedExamId}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Choose an exam to invigilate" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {exams.map((exam) => (
+                        <SelectItem key={exam.id} value={exam.id}>
+                          {exam.title}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-              </ScrollArea>
+
+                <div>
+                  <label className="text-xs font-medium text-gray-500 block mb-1.5">Grid layout</label>
+                  <div className="flex gap-1">
+                    {(["auto", "3x3", "4x4"] as GridDensity[]).map((option) => (
+                      <Button
+                        key={option}
+                        size="sm"
+                        variant={gridDensity === option ? "default" : "outline"}
+                        onClick={() => setGridDensity(option)}
+                      >
+                        {option === "auto" ? "Auto" : option.toUpperCase()}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -491,7 +535,7 @@ export default function TeacherWatchLivePage() {
               ) : (
                 <>
                   {/* Grid Layout - Google Meet/Zoom style */}
-                  <div className={getGridCols(totalStudents) + " gap-4"}>
+                  <div className={getGridCols(totalStudents, gridDensity) + " gap-4"}>
                     {liveSessions.map((session) => {
                       const cameraStatus = getCameraStatus(session);
                       const CameraIcon = cameraStatus.icon;

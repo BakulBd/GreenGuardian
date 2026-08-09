@@ -7,6 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Users,
   Mail,
   Search,
@@ -29,6 +36,9 @@ import { TeacherStudentMapping, TeacherAssignment, User as UserType } from "@/li
 import { getUsersByRole } from "@/lib/firebase/firestore";
 import { downloadStudentInfoPdf } from "@/lib/utils/studentPdf";
 import { formatDate } from "@/lib/utils/helpers";
+
+/** Sentinel for "no filter" — Radix Select forbids an empty-string value. */
+const ALL = "__all__";
 
 interface StudentInfo {
   id: string;
@@ -55,6 +65,9 @@ export default function TeacherStudentsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [courseFilter, setCourseFilter] = useState(ALL);
+  const [batchFilter, setBatchFilter] = useState(ALL);
+  const [sectionFilter, setSectionFilter] = useState(ALL);
 
   const loadData = useCallback(async (teacherId: string) => {
     try {
@@ -143,21 +156,35 @@ export default function TeacherStudentsPage() {
     toast({ title: "Refreshed", description: "Student list updated successfully." });
   };
 
-  // Get unique courses for filter
+  // Filter options.
+  //
+  // Courses and batches come from this teacher's assignments (the authoritative
+  // list of what they teach). Sections come from the loaded roster instead: a
+  // section only matters here if a student is actually in it, and reading them
+  // off the students avoids offering a filter that can only ever return zero
+  // rows. These three were previously computed and used only as stat counts —
+  // the filters they were named for did not exist.
   const courseOptions = Array.from(
     new Map(
       assignments.map((a) => [a.courseId, { id: a.courseId, name: a.courseName || a.courseId }])
     ).values()
   );
 
-  // Get unique batches for filter
   const batchOptions = Array.from(
-    new Map(
-      assignments.map((a) => [a.batchId, a.batchName || a.batchId])
-    ).values()
+    new Map(assignments.map((a) => [a.batchId, a.batchName || a.batchId])).values()
   );
 
+  const sectionOptions = Array.from(
+    new Set(students.map((s) => s.section).filter(Boolean) as string[])
+  ).sort();
+
   const filteredStudents = students.filter((student) => {
+    if (courseFilter !== ALL && !student.courses.some((c) => c.courseId === courseFilter)) {
+      return false;
+    }
+    if (batchFilter !== ALL && student.batch !== batchFilter) return false;
+    if (sectionFilter !== ALL && student.section !== sectionFilter) return false;
+
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
     return (
@@ -168,6 +195,17 @@ export default function TeacherStudentsPage() {
       student.courses.some((c) => c.courseName.toLowerCase().includes(q))
     );
   });
+
+  /** Names the active filters so the exported PDF says what it contains. */
+  const activeFilterLabel = [
+    courseFilter !== ALL
+      ? courseOptions.find((c) => c.id === courseFilter)?.name
+      : null,
+    batchFilter !== ALL ? `Batch ${batchFilter}` : null,
+    sectionFilter !== ALL ? `Section ${sectionFilter}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
@@ -202,7 +240,7 @@ export default function TeacherStudentsPage() {
         registrationDate: s.createdAt ? formatDate(s.createdAt) : undefined,
         status: s.status ? s.status.charAt(0).toUpperCase() + s.status.slice(1) : "Active",
       })),
-      "My Students Report"
+      activeFilterLabel ? `My Students — ${activeFilterLabel}` : "My Students Report"
     );
     toast({ title: "PDF Generated", description: `Exported ${toExport.length} student${toExport.length !== 1 ? "s" : ""}.` });
   };
@@ -294,10 +332,13 @@ export default function TeacherStudentsPage() {
           </Card>
         </div>
 
-        {/* Search */}
+        {/* Search + Course / Batch / Section filters.
+            Filters narrow the list, and the PDF export follows whatever is on
+            screen — so "filter, then download" produces exactly the roster the
+            teacher is looking at. */}
         {students.length > 0 && (
         <Card>
-          <CardContent className="p-4">
+          <CardContent className="p-4 space-y-3">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
               <Input
@@ -306,6 +347,69 @@ export default function TeacherStudentsPage() {
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-9"
               />
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Select value={courseFilter} onValueChange={setCourseFilter}>
+                <SelectTrigger className="w-[200px]">
+                  <SelectValue placeholder="All courses" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL}>All courses</SelectItem>
+                  {courseOptions.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <Select value={batchFilter} onValueChange={setBatchFilter}>
+                <SelectTrigger className="w-[160px]">
+                  <SelectValue placeholder="All batches" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL}>All batches</SelectItem>
+                  {batchOptions.map((b) => (
+                    <SelectItem key={b} value={b}>
+                      Batch {b}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <Select value={sectionFilter} onValueChange={setSectionFilter}>
+                <SelectTrigger className="w-[160px]">
+                  <SelectValue placeholder="All sections" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL}>All sections</SelectItem>
+                  {sectionOptions.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      Section {s}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {activeFilterLabel && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setCourseFilter(ALL);
+                    setBatchFilter(ALL);
+                    setSectionFilter(ALL);
+                  }}
+                >
+                  Clear filters
+                </Button>
+              )}
+
+              <span className="ml-auto self-center text-sm text-gray-500">
+                Showing <strong className="text-gray-900">{filteredStudents.length}</strong> of{" "}
+                {students.length}
+              </span>
             </div>
           </CardContent>
         </Card>

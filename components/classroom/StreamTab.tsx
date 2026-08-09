@@ -260,14 +260,22 @@ function PostCard({
   const Icon = meta.icon;
   const [showComments, setShowComments] = useState(false);
   const [comments, setComments] = useState<ClassroomComment[]>([]);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
   const [commentText, setCommentText] = useState("");
   const [submittingComment, setSubmittingComment] = useState(false);
 
   useEffect(() => {
     if (!showComments) return;
-    const unsub = subscribeToPostComments(post.id, setComments);
+    setCommentsError(null);
+    const unsub = subscribeToPostComments(post.id, post.classroomId, setComments, (error) => {
+      setCommentsError(
+        error?.code === "permission-denied"
+          ? "You need to be a member of this class to read its comments."
+          : "Comments could not be loaded. Check your connection and try again."
+      );
+    });
     return () => unsub();
-  }, [showComments, post.id]);
+  }, [showComments, post.id, post.classroomId]);
 
   const handleAddComment = async () => {
     if (!commentText.trim()) return;
@@ -354,6 +362,11 @@ function PostCard({
 
           {showComments && (
             <div className="mt-3 space-y-2">
+              {commentsError && (
+                <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded p-2">
+                  {commentsError}
+                </p>
+              )}
               {comments.map((c) => (
                 <div key={c.id} className="flex items-start justify-between gap-2 p-2 rounded bg-gray-50 text-sm">
                   <div>

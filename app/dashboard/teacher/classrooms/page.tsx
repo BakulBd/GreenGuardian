@@ -122,7 +122,15 @@ export default function TeacherClassroomsPage() {
               );
               toast({
                 title: "Students Enrolled",
-                description: `Enrolled ${result.added} student${result.added === 1 ? "" : "s"} from ${bulkCourse.courseName} / Batch ${bulkBatch.batchName} / Section ${section.sectionName}.`,
+                description:
+                  `Enrolled ${result.added} student${result.added === 1 ? "" : "s"} from ${bulkCourse.courseName} / Batch ${bulkBatch.batchName} / Section ${section.sectionName}.` +
+                  // The enrolment itself is committed either way; only the
+                  // downstream access recompute can lag. Saying so beats the
+                  // old behaviour of reporting a session error for a step the
+                  // teacher did not initiate and does not need to act on.
+                  (result.accessSyncPending
+                    ? " Your notices and exams will reach them once access finishes syncing."
+                    : ""),
               });
             } catch (enrollError: any) {
               toast({
