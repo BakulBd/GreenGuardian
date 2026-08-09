@@ -20,6 +20,7 @@
 import { cert, getApps, initializeApp, applicationDefault, type App } from "firebase-admin/app";
 import { getAuth, type Auth } from "firebase-admin/auth";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
+import { getStorage, type Storage } from "firebase-admin/storage";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -27,12 +28,17 @@ interface AdminServices {
   app: App;
   auth: Auth;
   db: Firestore;
+  storage: Storage;
 }
 
 let cached: AdminServices | null = null;
 
 function fallbackProjectId(): string {
   return process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || "greenguardian2026";
+}
+
+function fallbackStorageBucket(): string {
+  return process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || "";
 }
 
 /** True when a local Firebase emulator is configured. */
@@ -155,7 +161,7 @@ export function getAdmin(): AdminServices {
       existing.length > 0
         ? existing[0]
         : initializeApp({ projectId: fallbackProjectId() });
-    cached = { app, auth: getAuth(app), db: getFirestore(app) };
+    cached = { app, auth: getAuth(app), db: getFirestore(app), storage: getStorage(app) };
     return cached;
   }
 
@@ -187,6 +193,7 @@ export function getAdmin(): AdminServices {
     app,
     auth: getAuth(app),
     db: getFirestore(app),
+    storage: getStorage(app),
   };
 
   return cached;
@@ -200,5 +207,17 @@ export function getAdminAuth(): Auth {
 /** Server-only Firestore (Admin SDK). Throws if not initialized. */
 export function getAdminDb(): Firestore {
   return getAdmin().db;
+}
+
+/**
+ * Server-only Cloud Storage bucket (Admin SDK). Uses
+ * `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` — the same bucket the client SDK
+ * uploads to — since the Admin SDK has no bucket name of its own to infer it
+ * from once initialized with just a project id + credential.
+ */
+export function getAdminBucket() {
+  const bucketName = fallbackStorageBucket();
+  const storage = getAdmin().storage;
+  return bucketName ? storage.bucket(bucketName) : storage.bucket();
 }
 

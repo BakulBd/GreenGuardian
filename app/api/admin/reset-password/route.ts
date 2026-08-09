@@ -78,6 +78,7 @@ export async function POST(req: NextRequest) {
   const auth = await requireAdmin(req, "reset passwords");
   if (auth instanceof NextResponse) return auth;
 
+  try {
   const rate = checkRateLimit(
     `admin-reset-password:${auth.uid}:${getClientIp(req)}`,
     20,
@@ -251,4 +252,11 @@ export async function POST(req: NextRequest) {
     failed: results.length - succeeded,
     results,
   });
+  } catch (error: any) {
+    console.error("API /api/admin/reset-password error:", error);
+    return NextResponse.json(
+      { success: false, error: error?.message || "Failed to reset password(s)." },
+      { status: 500 }
+    );
+  }
 }

@@ -37,6 +37,41 @@ export function jsonError(error: string, status: number): NextResponse {
   return NextResponse.json({ success: false, error }, { status });
 }
 
+/** Error codes the Admin SDK raises for a genuinely bad/expired user token. */
+const USER_TOKEN_ERROR_CODES = new Set([
+  "auth/id-token-expired",
+  "auth/id-token-revoked",
+  "auth/argument-error",
+  "auth/invalid-argument",
+]);
+
+/**
+ * Maps a `verifyIdToken()` failure to the right response.
+ *
+ * Not every failure here means the user's session is bad. If the Admin SDK's
+ * own service-account credential is missing, revoked, or malformed, or the
+ * verification call can't reach Google at all, `verifyIdToken` throws too —
+ * but that is a server outage, not something "signing in again" fixes. Telling
+ * a user to re-login for a problem on our end is actively misleading, and
+ * collapsing both cases into one message is what made this class of bug hard
+ * to diagnose. The real error is always logged server-side (never the
+ * credential itself) so it's actually possible to tell the two apart in logs.
+ */
+export function tokenVerificationErrorResponse(err: any): NextResponse {
+  const code = String(err?.code || "");
+  const isUserTokenProblem = USER_TOKEN_ERROR_CODES.has(code) || code.startsWith("auth/id-token");
+
+  if (isUserTokenProblem) {
+    return jsonError("Invalid or expired session. Please sign in again.", 401);
+  }
+
+  console.error("[api-auth] Token verification failed for a reason other than the user's session:", err);
+  return jsonError(
+    "Server authentication is temporarily unavailable. This is not a problem with your session — please try again shortly.",
+    503
+  );
+}
+
 /**
  * Verify the caller and load their profile.
  *
@@ -46,10 +81,15 @@ export function jsonError(error: string, status: number): NextResponse {
  * check rather than re-implementing it.
  *
  * @param allowedRoles When given, the caller's role must be one of these.
+ * @param forbiddenMessage Overrides the message used for a role mismatch
+ *   specifically (not the hold/suspended case, which always keeps its own
+ *   message). Lets callers like `requireAdmin` say what the caller tried to
+ *   do without duplicating the whole auth check.
  */
 export async function requireAuthedUser(
   req: NextRequest,
-  allowedRoles?: UserRole[]
+  allowedRoles?: UserRole[],
+  forbiddenMessage?: string
 ): Promise<AuthedUser | NextResponse> {
   const token = bearerToken(req);
   if (!token) return jsonError("Authentication required.", 401);
@@ -67,8 +107,8 @@ export async function requireAuthedUser(
     const decoded = await getAdminAuth().verifyIdToken(token);
     uid = decoded.uid;
     email = decoded.email || "";
-  } catch {
-    return jsonError("Invalid or expired session. Please sign in again.", 401);
+  } catch (err: any) {
+    return tokenVerificationErrorResponse(err);
   }
 
   const snap = await getAdminDb().collection("users").doc(uid).get();
@@ -87,7 +127,7 @@ export async function requireAuthedUser(
 
   const role = String(data.role || "") as UserRole;
   if (allowedRoles && !allowedRoles.includes(role)) {
-    return jsonError("You do not have permission to perform this action.", 403);
+    return jsonError(forbiddenMessage || "You do not have permission to perform this action.", 403);
   }
 
   return {

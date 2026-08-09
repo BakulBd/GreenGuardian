@@ -17,9 +17,10 @@ import {
   increment,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
-import { ref, uploadString, getDownloadURL, deleteObject } from "firebase/storage";
+import { ref, uploadString, getDownloadURL } from "firebase/storage";
 import { storage } from "@/lib/firebase/config";
 import { getExamsByTeacher } from "@/lib/firebase/exams";
+import { authedFetch } from "@/lib/utils/api-client";
 
 // Proctoring event types
 export type ProctoringEventType = 
@@ -881,22 +882,23 @@ export async function getWarningScreenshotsByTeacher(teacherId?: string): Promis
 }
 
 /**
- * Permanently delete a warning screenshot: the Storage object first (if it
- * was actually uploaded there rather than falling back to inline base64),
- * then the Firestore record.
+ * Permanently delete a warning screenshot — the Storage object (if it was
+ * actually uploaded there rather than falling back to inline base64) and the
+ * Firestore record.
+ *
+ * This goes through `/api/proctoring/snapshots` (Admin SDK) rather than
+ * deleting from the browser: `storage.rules` denies client-side deletes on
+ * `warningScreenshots/*` outright (a student must not be able to destroy
+ * proctoring evidence raised against them), and a direct browser DELETE also
+ * depends on the live bucket's CORS configuration, which is a separate
+ * failure mode this route sidesteps entirely. The API enforces that only the
+ * exam's owning teacher (or an admin) may delete.
  */
 export async function deleteWarningScreenshot(screenshot: WarningScreenshot): Promise<void> {
   if (!screenshot.id) throw new Error("Screenshot has no id");
 
-  if (screenshot.storagePath) {
-    try {
-      await deleteObject(ref(storage, screenshot.storagePath));
-    } catch (error) {
-      // Already gone, or it was never actually uploaded to Storage (the
-      // base64 fallback path) — either way, still remove the Firestore record.
-      console.warn("Failed to delete screenshot from Storage (continuing):", error);
-    }
-  }
-
-  await deleteDoc(doc(db, "warningScreenshots", screenshot.id));
+  await authedFetch(`/api/proctoring/snapshots?id=${encodeURIComponent(screenshot.id)}`, {
+    method: "DELETE",
+    fallbackError: "Failed to delete the snapshot.",
+  });
 }
