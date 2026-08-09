@@ -71,10 +71,18 @@ service firebase.storage {
     // Delete is split out from create/update: a delete request has no
     // request.resource, so folding it into the size/type-checked `write`
     // rule below would silently deny every delete attempt.
+    //
+    // Deletion is server-only (see /api/proctoring/snapshots). Evidence of a
+    // proctoring warning must not be deletable by the student it was raised
+    // against — `isAuthenticated()` here would let exactly that happen, since
+    // any signed-in user (including the accused student) satisfies it.
+    // Ownership (teacher owns the exam / admin) is checked server-side with
+    // the Admin SDK, which rules cannot express (it would need to read the
+    // related exam/session document to know who "owns" a given screenshot).
     match /warningScreenshots/{allPaths=**} {
       allow read: if isAuthenticated();
       allow create, update: if isAuthenticated() && isImage() && isValidSize();
-      allow delete: if isAuthenticated();
+      allow delete: if false;
     }
     
     // Exam papers and materials

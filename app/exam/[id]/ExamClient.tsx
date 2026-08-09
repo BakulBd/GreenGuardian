@@ -592,15 +592,6 @@ export default function ExamClient() {
         { fallbackError: "Failed to load the exam paper." }
       );
       const examData = paper.exam as any;
-      if (!examData) {
-        toast({
-          title: "Error",
-          description: "Exam not found",
-          variant: "destructive",
-        });
-        router.push("/dashboard/student");
-        return;
-      }
       const now = new Date();
       const isPast = (examData.endDate && new Date(examData.endDate) < now) || examData.status === "archived";
 
@@ -623,13 +614,19 @@ export default function ExamClient() {
           ? remainingSeconds
           : examData.duration * 60
       );
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error loading exam:", error);
+      // authedFetch() already throws the server's specific, status-derived
+      // message (401 "Invalid or expired session", 403 "You are not
+      // assigned to this exam.", 404 "Exam not found.") — show that instead
+      // of a generic string, so an auth/permission failure doesn't read as
+      // if the exam doesn't exist.
       toast({
-        title: "Error",
-        description: "Failed to load exam",
+        title: "Error Loading Exam",
+        description: error?.message || "Failed to load the exam paper.",
         variant: "destructive",
       });
+      router.push("/dashboard/student");
     } finally {
       setLoading(false);
     }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAdminAuth, getAdminDb, isAdminSdkConfigured } from "@/lib/firebase/admin";
+import { getAdminDb } from "@/lib/firebase/admin";
+import { requireAuthedUser } from "@/lib/server/api-auth";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 const RATE_LIMIT_MAX = 30;
@@ -26,30 +27,9 @@ const MAX_STUDENTS_PER_CALL = 500;
  * makes leaving one classroom safe when the student still has an admin
  * assignment or another classroom with the same teacher.
  */
-async function requireUser(req: NextRequest): Promise<{ uid: string } | NextResponse> {
-  const header = req.headers.get("authorization") || "";
-  const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
-
-  if (!token) {
-    return NextResponse.json({ success: false, error: "Authentication required." }, { status: 401 });
-  }
-  if (!isAdminSdkConfigured()) {
-    return NextResponse.json(
-      { success: false, error: "Server auth is not configured. Set FIREBASE_SERVICE_ACCOUNT so classroom access can sync." },
-      { status: 503 }
-    );
-  }
-  try {
-    const decoded = await getAdminAuth().verifyIdToken(token);
-    return { uid: decoded.uid };
-  } catch {
-    return NextResponse.json({ success: false, error: "Invalid or expired session. Please sign in again." }, { status: 401 });
-  }
-}
-
 export async function POST(req: NextRequest) {
   try {
-    const authResult = await requireUser(req);
+    const authResult = await requireAuthedUser(req);
     if (authResult instanceof NextResponse) return authResult;
 
     const rate = checkRateLimit(`classroom-sync:${authResult.uid}:${getClientIp(req)}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
@@ -73,8 +53,7 @@ export async function POST(req: NextRequest) {
 
     // Authorize: the caller may sync only themselves (self-join), or — if
     // they are a teacher/admin — students in a classroom they actually own.
-    const callerSnap = await db.collection("users").doc(authResult.uid).get();
-    const callerRole = callerSnap.data()?.role;
+    const callerRole = authResult.role;
     const isSelfOnly = studentIds.length === 1 && studentIds[0] === authResult.uid;
 
     if (!isSelfOnly && callerRole !== "teacher" && callerRole !== "admin") {

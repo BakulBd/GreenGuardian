@@ -101,23 +101,38 @@ export default function TeacherClassroomsPage() {
         await updateClassroom(editing.id, form);
         toast({ title: "Classroom Updated" });
       } else {
+        // The classroom write below is the operation the user asked for and
+        // is what "Classroom Created" reports on. Bulk-enrolling students is
+        // a secondary, best-effort step layered on top — if it fails (e.g. a
+        // transient server/session error while syncing access), that must
+        // not make the UI claim the whole thing failed when the classroom
+        // was, in fact, created.
         const classroomId = await createClassroom({ ...form, teacherId: user.id, teacherName: user.name });
-        let description = `${form.name} is ready.`;
+        toast({ title: "Classroom Created", description: `${form.name} is ready.` });
 
         if (bulkEnroll && bulkCourse && bulkBatch && bulkSectionId) {
           const section = bulkBatch.sections.find((s) => s.sectionId === bulkSectionId);
           if (section) {
-            const result = await addStudentsToClassroomByGroup(
-              { id: classroomId, teacherId: user.id },
-              bulkCourse.courseId,
-              bulkBatch.batchName,
-              section.sectionName
-            );
-            description += ` Enrolled ${result.added} student${result.added === 1 ? "" : "s"} from ${bulkCourse.courseName} / Batch ${bulkBatch.batchName} / Section ${section.sectionName}.`;
+            try {
+              const result = await addStudentsToClassroomByGroup(
+                { id: classroomId, teacherId: user.id },
+                bulkCourse.courseId,
+                bulkBatch.batchName,
+                section.sectionName
+              );
+              toast({
+                title: "Students Enrolled",
+                description: `Enrolled ${result.added} student${result.added === 1 ? "" : "s"} from ${bulkCourse.courseName} / Batch ${bulkBatch.batchName} / Section ${section.sectionName}.`,
+              });
+            } catch (enrollError: any) {
+              toast({
+                title: "Classroom created, but auto-enroll failed",
+                description: `${enrollError.message || "Could not enroll students automatically."} You can add students to "${form.name}" manually from the classroom page.`,
+                variant: "destructive",
+              });
+            }
           }
         }
-
-        toast({ title: "Classroom Created", description });
       }
       resetForm();
     } catch (error: any) {
