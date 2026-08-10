@@ -217,3 +217,82 @@ here so it isn't mistaken for a working feature.
 hundreds of students) this is bounded by the client's memory/CPU, not a
 server. Fine for a single class/department; would need a server-side export
 if this app ever needs to export the entire student body at once.
+
+---
+
+# Green Room — Phase 1 (2026-08-10)
+
+## Capacity ceiling: ~8 participants (full-mesh WebRTC)
+
+**This is the single most important thing to know about Green Room.**
+
+Green Room carries media over **full-mesh WebRTC**: every participant holds a
+peer connection to every other participant, and uploads their camera once per
+peer. Connections grow as N x (N-1) / 2, and each browser's encode/upload cost
+grows linearly with the room. Past roughly 8 people, ordinary laptops and home
+uplinks saturate — video freezes, audio breaks up.
+
+`MAX_MESH_PARTICIPANTS` (default 8, override with
+`NEXT_PUBLIC_GREENROOM_MAX_PARTICIPANTS`) is enforced **server-side at join**
+(`/api/greenroom/join`), so the 9th person gets a clean "this meeting is full"
+rather than everyone's call degrading. `audioOnly` mode doubles the effective
+cap, since audio costs a fraction of video.
+
+This was a deliberate, explicit choice: the alternative — an SFU/media server —
+cannot run on this deployment (Vercel serverless + Firebase Spark host no
+long-lived process) and would require an external paid service. **Green Room
+will not host a 40-student lecture until an SFU is added.**
+
+Mitigations already in place, so that swap is cheap when it happens:
+- `videoConstraintsForPeerCount()` steps outbound resolution down as the room
+  grows, so degradation is gradual rather than a cliff.
+- `MAX_VISIBLE_TILES` caps rendered `<video>` elements at 12 regardless of
+  roster size.
+- All media logic is confined to `lib/greenroom/mesh.ts`. The UI talks to it
+  through events only, so replacing it with an SFU client (LiveKit et al.)
+  touches that one module, not the components.
+
+## TURN is not configured — 10-20% of connections may fail
+
+Green Room reuses `getIceServers()` from `lib/services/liveVideo.ts`, which is
+STUN-only unless `NEXT_PUBLIC_TURN_URLS` / `_USERNAME` / `_CREDENTIAL` are set.
+On symmetric NAT, corporate/campus firewalls, and some mobile carriers, a
+direct peer connection can never be established. Those participants see
+"Connection failed" on the affected tiles. The mesh attempts one ICE restart
+before giving up. **Configuring TURN is required for reliable off-campus use.**
+
+Unlike the proctoring live-video feature, Green Room has **no Firestore relay
+fallback** — relaying JPEG frames is viable for one proctored student but not
+for an N-way call on the Spark plan's write quota.
+
+## Not verified live (no browser or Firebase project in the build environment)
+
+Verified here: `typecheck` (0 errors), `lint` (0 errors, 35 pre-existing
+warnings, none in Green Room files), `test` (178 passing, 48 of them new
+Green Room tests), `build` (clean, all routes emitted), and
+`firebase deploy --only firestore:rules --dry-run`, which **compiled the new
+rules successfully against the real project**.
+
+Not verified — these need two browsers and two accounts:
+- Actual peer-to-peer audio/video between two machines.
+- Screen share, and the browser's own "Stop sharing" bar driving teardown.
+- Waiting-room admit/reject round trip.
+- Host-forced mute reaching the participant's client.
+- Reconnect/attendance banking after a dropped connection.
+
+## Attendance on an unclean exit is best-effort
+
+`/api/greenroom/leave` is called on an explicit leave and via `sendBeacon` on
+`pagehide`. A hard crash, a killed tab, or a lost network sends neither. Those
+sessions stay `joined` until the participant rejoins (which banks the previous
+session) — so a student who crashes and never returns keeps an open session and
+their attendance under-counts. The roster hides them from the mesh after
+`PRESENCE_TIMEOUT_MS`, and ending the meeting closes every open session, which
+covers the common case.
+
+## Deferred to Phase 2 (not built, not stubbed)
+
+Whiteboard, screen annotation, breakout rooms, and recording were explicitly
+scoped out of Phase 1 and are **absent**, not half-implemented. Recording, when
+built, is planned as client-side `MediaRecorder` uploaded to B2 — which only
+captures what the host's browser composites and stops if their tab closes.

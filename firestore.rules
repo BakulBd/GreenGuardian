@@ -798,5 +798,122 @@ service cloud.firestore {
       allow read: if isTeacherOrAdmin();
       allow create: if isTeacherOrAdmin();
     }
+
+    // =====================================================================
+    // GREEN ROOM (live classroom / video meetings)
+    //
+    // Split of responsibility, deliberately:
+    //   - Everything that grants AUTHORITY (meeting role, admission state,
+    //     attendance timings, meeting lifecycle) is written ONLY by the
+    //     Admin SDK through /api/greenroom/*, which bypasses these rules.
+    //     Clients are denied those writes here, so a participant cannot
+    //     promote themselves or fake attendance by PATCHing Firestore.
+    //   - Everything that is merely SELF-REPORTED presence (my mic is on, my
+    //     hand is up) is client-writable on the participant's OWN document,
+    //     via a field allowlist — the same pattern used by examSessions.
+    // =====================================================================
+
+    // Is the caller a joined/admitted participant of this meeting? Used to
+    // scope reads of chat, reactions and the roster to people actually in
+    // the room, rather than any authenticated user who knows a meeting id.
+    function isMeetingParticipant(meetingId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/greenRoomParticipants/$(meetingId + '_' + request.auth.uid));
+    }
+
+    // The meeting's owning teacher. Reads the meeting doc, so only call it
+    // where a meeting id is already in hand.
+    function isMeetingOwner(meetingId) {
+      return isAuthenticated() &&
+        get(/databases/$(database)/documents/greenRoomMeetings/$(meetingId)).data.teacherId == request.auth.uid;
+    }
+
+    match /greenRoomMeetings/{meetingId} {
+      // Broad authenticated read: a student needs to resolve a meeting by
+      // code on the pre-join screen before any participant document exists
+      // for them. The document carries no secret — the passcode lives in
+      // greenRoomSecrets, which no client may read at all.
+      allow read: if isAuthenticated();
+
+      // All writes go through /api/greenroom/* (Admin SDK). Creating a
+      // meeting client-side would let a student mint one with themselves as
+      // teacher, and updating one would let a participant flip `locked` or
+      // `settings` without being a host.
+      allow create, update, delete: if false;
+    }
+
+    // Passcode hashes. No client access whatsoever, in either direction —
+    // this is the whole reason the passcode is not a field on the meeting.
+    match /greenRoomSecrets/{meetingId} {
+      allow read, write: if false;
+    }
+
+    match /greenRoomParticipants/{participantId} {
+      // Staff and fellow participants can see the roster (names, mic/cam
+      // state) — that is what the Participants panel renders.
+      allow read: if isTeacherOrAdmin() ||
+        (resource != null && (
+          resource.data.userId == request.auth.uid ||
+          isMeetingParticipant(resource.data.get('meetingId', ''))
+        ));
+      // Probing your own (not yet existing) participant doc must not raise.
+      allow read: if isAuthenticated() && isMissingDoc();
+
+      // Admission, role and attendance are server-assigned: /api/greenroom/join
+      // creates the document and /api/greenroom/moderate changes authority.
+      allow create, delete: if false;
+
+      // Self-reported presence only, on your own document. `role`, `state`,
+      // `userId`, `meetingId` and every attendance field are absent from this
+      // allowlist, so a participant cannot promote themselves to host, admit
+      // themselves past the waiting room, or inflate their attended time.
+      allow update: if isAuthenticated() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'micOn', 'camOn', 'handRaised', 'screenSharing', 'lastSeenAt', 'updatedAt'
+        ]);
+    }
+
+    // WebRTC signalling (SDP offers/answers and ICE candidates) for the mesh.
+    // Scoped to participants of the meeting: these blobs are useless without
+    // the peer, but there is no reason to expose them room-wide either.
+    match /greenRoomSignals/{meetingId} {
+      allow read, write: if isMeetingParticipant(meetingId);
+
+      match /peers/{peerId} {
+        allow read, write: if isMeetingParticipant(meetingId);
+      }
+    }
+
+    match /greenRoomMessages/{messageId} {
+      allow read: if isTeacherOrAdmin() ||
+        (resource != null && isMeetingParticipant(resource.data.get('meetingId', '')));
+
+      // Send as yourself, into a meeting you are actually in. Whether chat is
+      // *permitted* (settings.allowChat) is enforced in the client and by the
+      // host's ability to moderate — rules cannot cheaply read meeting
+      // settings on every message write.
+      allow create: if isAuthenticated() && isActiveUser() &&
+        request.resource.data.senderId == request.auth.uid &&
+        isMeetingParticipant(request.resource.data.get('meetingId', '')) &&
+        request.resource.data.get('type', 'chat') == 'chat';
+
+      // Chat is an attendance/conduct record: authors may not rewrite history.
+      allow update: if false;
+      allow delete: if isAdmin() || isMeetingOwner(resource.data.get('meetingId', ''));
+    }
+
+    match /greenRoomReactions/{reactionId} {
+      allow read: if isTeacherOrAdmin() ||
+        (resource != null && isMeetingParticipant(resource.data.get('meetingId', '')));
+      allow create: if isAuthenticated() &&
+        request.resource.data.senderId == request.auth.uid &&
+        isMeetingParticipant(request.resource.data.get('meetingId', ''));
+      allow update: if false;
+      // Reactions are ephemeral; the sender or the host may clear them.
+      allow delete: if isAdmin() ||
+        (resource != null && resource.data.senderId == request.auth.uid) ||
+        isMeetingOwner(resource.data.get('meetingId', ''));
+    }
   }
 }
