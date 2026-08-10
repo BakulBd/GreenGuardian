@@ -17,8 +17,7 @@ import {
   increment,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
-import { ref, uploadString, getDownloadURL } from "firebase/storage";
-import { storage } from "@/lib/firebase/config";
+import { uploadDataUrl } from "@/lib/storage/client";
 import { getExamsByTeacher } from "@/lib/firebase/exams";
 import { authedFetch } from "@/lib/utils/api-client";
 
@@ -426,21 +425,19 @@ export function analyzeFrameLightingAndCoverage(
 }
 
 /**
- * Upload snapshot to Firebase Storage and get URL
+ * Upload snapshot to object storage and get a URL for it.
  */
 export async function uploadSnapshot(
   sessionId: string,
   base64Data: string
 ): Promise<string | null> {
-  try {
-    const timestamp = Date.now();
-    const storageRef = ref(storage, `proctoring/${sessionId}/${timestamp}.jpg`);
-    await uploadString(storageRef, base64Data, 'data_url');
-    return await getDownloadURL(storageRef);
-  } catch (error) {
-    console.error("Failed to upload snapshot:", error);
-    return null;
-  }
+  const timestamp = Date.now();
+  const result = await uploadDataUrl(
+    base64Data,
+    `proctoring/${sessionId}/${timestamp}.jpg`,
+    `${timestamp}.jpg`
+  );
+  return result?.url ?? null;
 }
 
 /** A session is treated as "online" while it has reported activity recently. */
@@ -726,20 +723,16 @@ export async function captureAndUploadWarningScreenshot(
     const timestamp = Date.now();
     const randomSuffix = Math.random().toString(36).substring(2, 8);
     const fileName = `${timestamp}_${randomSuffix}.jpg`;
-    const storagePath = `warningScreenshots/${sessionId}/${fileName}`;
-    
-    let screenshotUrl = base64Data;
-    try {
-      // Upload to Firebase Storage
-      const storageRef = ref(storage, storagePath);
-      await uploadString(storageRef, base64Data, 'data_url', {
-        contentType: 'image/jpeg',
-      });
-      screenshotUrl = await getDownloadURL(storageRef);
-    } catch (storageError) {
-      console.warn("Firebase Storage upload fallback to inline base64:", storageError);
-    }
-    
+    const requestedPath = `warningScreenshots/${sessionId}/${fileName}`;
+
+    // A failed upload keeps the inline base64 as the image and records the
+    // path as `inline:…`, which is what tells /api/proctoring/snapshots there
+    // is no stored object to delete later. Evidence is never dropped just
+    // because storage was briefly unreachable.
+    const uploaded = await uploadDataUrl(base64Data, requestedPath, fileName);
+    const screenshotUrl = uploaded?.url ?? base64Data;
+    const storagePath = uploaded?.path ?? `inline:${requestedPath}`;
+
     // Create document in Firestore warningScreenshots collection
     const docRef = await addDoc(collection(db, "warningScreenshots"), {
       sessionId,

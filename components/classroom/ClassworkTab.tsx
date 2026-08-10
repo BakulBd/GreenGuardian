@@ -36,7 +36,7 @@ import {
 import { isSubmittable } from "@/lib/firebase/submissions";
 import SubmissionPanel from "@/components/classroom/SubmissionPanel";
 import SubmissionReview from "@/components/classroom/SubmissionReview";
-import { CLASSROOM_MATERIAL_ALLOWED_TYPES, CLASSROOM_MAX_FILE_SIZE, UploadResult } from "@/lib/firebase/storage";
+import { CLASSROOM_MATERIAL_ALLOWED_TYPES, CLASSROOM_MAX_FILE_SIZE, UploadResult } from "@/lib/storage/constants";
 import { Classroom, ClassworkItem, ClassworkType, ClassroomAttachment, User } from "@/lib/types";
 
 interface ClassworkTabProps {

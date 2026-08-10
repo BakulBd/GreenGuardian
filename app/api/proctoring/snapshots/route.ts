@@ -1,24 +1,19 @@
 /**
  * Server-side deletion of proctoring warning screenshots.
  *
- * This used to happen directly from the browser (Firebase Storage SDK
- * `deleteObject()`), which had two problems:
- *   - `storage.rules` allowed ANY authenticated user to delete a
- *     `warningScreenshots/*` object — including the student the warning was
- *     raised against, who has every incentive to destroy the evidence.
- *   - A direct-from-browser DELETE requires the live Storage bucket's CORS
- *     config to allow it; a committed `cors.json` in the repo does nothing
- *     until it's actually applied to the bucket, and in the meantime the
- *     preflight request is blocked by the browser.
+ * Deletion has to happen here rather than in the browser: proctoring evidence
+ * must not be destroyable by the student it was raised against, and deciding
+ * that requires reading the related exam document to establish who owns the
+ * screenshot. `lib/storage/policy.ts` refuses `warningScreenshots/` deletes
+ * from the generic storage route for exactly that reason, so this route — which
+ * checks exam ownership first — is the only way one is ever removed.
  *
- * Moving deletion here fixes both: the Admin SDK call has no CORS
- * involved at all, and ownership (the caller's teacher owns the exam this
- * screenshot belongs to, or is an admin) is enforced before anything is
- * deleted — something `storage.rules` cannot express on its own, since that
- * would require reading the related exam document.
+ * The object itself lives in the private Backblaze B2 bucket and is deleted
+ * with the server's credentials, so no CORS or client permission is involved.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getAdminDb, getAdminBucket } from "@/lib/firebase/admin";
+import { getAdminDb } from "@/lib/firebase/admin";
+import { deleteObject, isB2Configured } from "@/lib/storage/b2";
 import { requireAuthedUser, jsonError } from "@/lib/server/api-auth";
 
 export const dynamic = "force-dynamic";
@@ -53,11 +48,11 @@ export async function DELETE(req: NextRequest) {
     // Admins may delete any snapshot.
 
     const storagePath = String(snapshot.storagePath || "");
-    // `inline:` paths come from the base64 fallback (Storage was unavailable
-    // at capture time) — there is no actual Storage object to delete.
-    if (storagePath && !storagePath.startsWith("inline:")) {
+    // `inline:` paths come from the base64 fallback (object storage was
+    // unavailable at capture time) — there is no stored object to delete.
+    if (storagePath && !storagePath.startsWith("inline:") && isB2Configured()) {
       try {
-        await getAdminBucket().file(storagePath).delete();
+        await deleteObject(storagePath);
       } catch (error) {
         // Already gone, or never actually uploaded — the Firestore record is
         // the source of truth for whether the warning still "exists".

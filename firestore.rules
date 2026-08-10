@@ -580,6 +580,20 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/classroomMembers/$(classroomId + '_' + request.auth.uid));
     }
 
+    // A membership document id is always `${classroomId}_${studentId}`, so the
+    // id alone identifies whose membership it is — no document read required.
+    //
+    // This exists because `resource` is NULL when the document does not exist,
+    // and dereferencing null RAISES, which Firestore treats as a denial. The
+    // "have I already joined?" check that runs before every join-by-code reads
+    // exactly such a document, so it failed with permission-denied for every
+    // student who had not joined yet — the "authorization error" students hit
+    // on the join screen. Granting a read of an id that encodes the caller's
+    // own uid discloses nothing they are not already entitled to see.
+    function isOwnMembershipDocId(membershipId) {
+      return isAuthenticated() && membershipId.matches('.*_' + request.auth.uid);
+    }
+
     // Classrooms collection
     match /classrooms/{classroomId} {
       // Broad read: needed so a student can look up a classroom by code
@@ -613,9 +627,16 @@ service cloud.firestore {
       // classroom (so the People tab roster loads for students — previously
       // a student's roster query was denied outright and the tab silently
       // rendered "No students found").
+      //
+      // The `resource != null` guard is load-bearing for the same reason the
+      // empty-string guard in isClassroomMember() is: a rule that dereferences
+      // a null resource raises, and a raise is a denial.
       allow read: if isTeacherOrAdmin() ||
-        (isAuthenticated() && resource.data.studentId == request.auth.uid) ||
-        isClassroomMember(resource.data.get('classroomId', ''));
+        isOwnMembershipDocId(memberId) ||
+        (resource != null && (
+          (isAuthenticated() && resource.data.studentId == request.auth.uid) ||
+          isClassroomMember(resource.data.get('classroomId', ''))
+        ));
       // Self-join by code: classroom membership is its own access boundary
       // now (no separate admin Course/Batch/Section assignment required —
       // see lib/firebase/classrooms.ts#joinClassroomByCode). The submitted

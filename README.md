@@ -154,7 +154,7 @@ Returns:
 | Layer | Technologies |
 |-------|--------------|
 | **Frontend** | Next.js 15.5.6, React, TailwindCSS, Framer Motion |
-| **Backend** | Firebase (Auth, Firestore, Storage), Serverless |
+| **Backend** | Firebase (Auth, Firestore) + Backblaze B2 (object storage), Serverless |
 | **AI Models** | TensorFlow.js BlazeFace, Google Gemini AI |
 | **OCR** | Gemini Vision API (PDF/Image text extraction) |
 | **Database** | Firebase Firestore |
@@ -235,7 +235,7 @@ A production-grade web application for online exam proctoring with AI-powered fa
 - **Styling**: Tailwind CSS with custom green theme
 - **UI Components**: shadcn/ui + Radix UI
 - **Animations**: Framer Motion
-- **Backend**: Firebase (Auth, Firestore, Storage)
+- **Backend**: Firebase (Auth, Firestore) + Backblaze B2 (object storage)
 - **AI/ML**: TensorFlow.js, Blazeface model
 - **OCR**: Tesseract.js
 - **Analytics**: Recharts
@@ -244,7 +244,8 @@ A production-grade web application for online exam proctoring with AI-powered fa
 ## 📋 Prerequisites
 
 - **Bun** 1.0+ (recommended) or Node.js 18+
-- Firebase project with Firestore, Authentication, and Storage enabled
+- Firebase project with Firestore and Authentication enabled
+- Backblaze B2 account with a **private** bucket (file storage — see `docs/STORAGE_B2.md`)
 - Modern web browser with webcam support
 
 ## 🔧 Installation
@@ -276,11 +277,29 @@ The Firebase configuration is already set up in `.env.local`:
 NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyCDeNhPVZpuRd7I28Oh_Csc_XshcuXrKgk
 NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=greenguardian2026.firebaseapp.com
 NEXT_PUBLIC_FIREBASE_PROJECT_ID=greenguardian2026
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=greenguardian2026.firebasestorage.app
 NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=1066634347018
 NEXT_PUBLIC_FIREBASE_APP_ID=1:1066634347018:web:df7fc3be32bb1b18d195f3
 NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-1EVBQX5J7V
 ```
+
+File uploads do **not** use Firebase Cloud Storage. They go to a private
+Backblaze B2 bucket, configured with server-only variables:
+
+```env
+B2_ENDPOINT=https://s3.us-east-005.backblazeb2.com
+B2_REGION=us-east-005
+B2_KEY_ID=...
+B2_APPLICATION_KEY=...
+B2_BUCKET_NAME=...
+```
+
+Then apply the bucket CORS rule once so browsers can upload directly:
+
+```bash
+npm run storage:cors
+```
+
+See `docs/STORAGE_B2.md` for how uploads, downloads and deletes work.
 
 ### 4. Set up Firestore Security Rules
 

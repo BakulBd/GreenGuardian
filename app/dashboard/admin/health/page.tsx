@@ -23,6 +23,8 @@ import {
   RefreshCw,
   Database,
   HardDrive,
+  Cloud,
+  Lock,
   Mail,
   KeyRound,
   ShieldCheck,
@@ -54,8 +56,20 @@ interface HealthPayload {
     firestore: Check;
     auth: Check;
     storage: Check;
+    storageCors: Check;
     email: Check;
     encryption: Check;
+  };
+  storage?: {
+    provider: string;
+    configured: boolean;
+    bucket: string | null;
+    region: string | null;
+    endpoint: string | null;
+    publicBucket: boolean;
+    corsRules: number | null;
+    directUploads: "enabled" | "proxy-only" | "unknown";
+    missingEnv: string[];
   };
   database: {
     users: number | null;
@@ -190,7 +204,14 @@ export default function SystemHealthPage() {
 
   const checks = health?.checks;
   const allOk = checks
-    ? checks.firestore.ok && checks.auth.ok && checks.storage.ok && checks.email.ok && checks.encryption.ok
+    ? checks.firestore.ok &&
+      checks.auth.ok &&
+      checks.storage.ok &&
+      // Missing bucket CORS is degraded, not down: uploads still complete
+      // through the server proxy, but only up to 4 MB.
+      (checks.storageCors?.ok ?? true) &&
+      checks.email.ok &&
+      checks.encryption.ok
     : false;
 
   return (
@@ -277,10 +298,18 @@ export default function SystemHealthPage() {
                 />
                 <CheckRow
                   icon={HardDrive}
-                  label="Cloud Storage (uploads, proctoring evidence)"
+                  label="Object storage — Backblaze B2 (uploads, proctoring evidence)"
                   check={checks!.storage}
-                  okText="Bucket reachable with a CORS policy applied."
+                  okText="Private bucket reachable; presigned URLs can be issued."
                 />
+                {checks!.storageCors && (
+                  <CheckRow
+                    icon={Cloud}
+                    label="Direct browser uploads (bucket CORS)"
+                    check={checks!.storageCors}
+                    okText="Uploads go straight to B2."
+                  />
+                )}
                 <CheckRow
                   icon={Mail}
                   label="Email delivery (SMTP)"
@@ -295,6 +324,70 @@ export default function SystemHealthPage() {
                 />
               </CardContent>
             </Card>
+
+            {/* Object storage — where every uploaded file actually lives */}
+            {health.storage && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <HardDrive className="h-5 w-5 text-cyan-600" />
+                    Object storage
+                  </CardTitle>
+                  <CardDescription>
+                    Exam papers, answers, classroom materials, avatars and proctoring evidence.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2 text-sm">
+                    <div className="flex justify-between gap-3 border-b border-dashed pb-1.5">
+                      <dt className="text-gray-500">Provider</dt>
+                      <dd className="font-medium text-gray-900">Backblaze B2 (S3 API)</dd>
+                    </div>
+                    <div className="flex justify-between gap-3 border-b border-dashed pb-1.5">
+                      <dt className="text-gray-500">Bucket</dt>
+                      <dd className="font-mono text-xs text-gray-900 truncate">
+                        {health.storage.bucket || "—"}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-3 border-b border-dashed pb-1.5">
+                      <dt className="text-gray-500">Region</dt>
+                      <dd className="font-mono text-xs text-gray-900">{health.storage.region || "—"}</dd>
+                    </div>
+                    <div className="flex justify-between gap-3 border-b border-dashed pb-1.5">
+                      <dt className="text-gray-500">Upload path</dt>
+                      <dd className="font-medium text-gray-900">
+                        {health.storage.directUploads === "enabled"
+                          ? "Direct (presigned)"
+                          : health.storage.directUploads === "proxy-only"
+                            ? "Server proxy (4 MB cap)"
+                            : "Unknown"}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <div className="flex items-start gap-2 rounded-lg border border-cyan-200 bg-cyan-50/60 p-3">
+                    <Lock className="h-4 w-4 shrink-0 mt-0.5 text-cyan-700" />
+                    <p className="text-xs leading-relaxed text-cyan-900">
+                      The bucket is private. Files are never served from a public URL — every link goes
+                      through <span className="font-mono">/api/storage/download</span>, which mints a
+                      short-lived presigned URL. B2 credentials stay on the server and are never sent to
+                      the browser.
+                    </p>
+                  </div>
+
+                  {health.storage.missingEnv.length > 0 && (
+                    <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-600" />
+                      <p className="text-xs leading-relaxed text-red-900">
+                        Missing environment variables:{" "}
+                        <span className="font-mono">{health.storage.missingEnv.join(", ")}</span>. Set
+                        them in the hosting environment and redeploy — uploads cannot work without them.
+                      </p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
 
             {/* Live activity */}
             <Card>

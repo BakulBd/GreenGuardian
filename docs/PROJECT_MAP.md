@@ -11,10 +11,12 @@ codebase.
 GreenGuardian is a proctored online exam system: students take webcam-
 monitored exams, teachers create exams and review submissions, admins manage
 users/courses/assignments. Next.js 16 (App Router) frontend deployed to
-Vercel, Firebase (Auth + Firestore + Storage, Spark/free plan) as the only
-backend. **There are no Cloud Functions and no custom server beyond a
-handful of Vercel API routes** — almost all business logic lives in the
-browser and is enforced by Firestore/Storage security rules.
+Vercel, Firebase (Auth + Firestore, Spark/free plan) plus a private
+Backblaze B2 bucket for file storage as the only backend. **There are no
+Cloud Functions and no custom server beyond a handful of Vercel API routes**
+— almost all business logic lives in the browser and is enforced by
+Firestore security rules; file access is enforced by the `/api/storage/*`
+routes, since the B2 bucket is private and has no client-side rules layer.
 
 ## Folder structure
 
@@ -34,14 +36,15 @@ components/                   Shared React components
 contexts/AuthContext.tsx      Client auth state, cached-user flicker guard, live status watch
 hooks/                        useAuth, useCameraPermission, useAcademicCatalog
 lib/
-  firebase/                   Firestore/Auth/Storage read-write functions, one file per domain
+  firebase/                   Firestore/Auth read-write functions, one file per domain
+  storage/                    Backblaze B2: client uploader, server SDK, key policy, link signing
   services/                   proctoring.ts (live video, warnings, snapshots), liveVideo.ts
   utils/                      Pure logic: validation, behavior scoring, question types, helpers
   types/index.ts              All shared TypeScript interfaces
   academics/catalog.ts        Default department/batch/section/course seed data
 scripts/                      One-off admin/seed scripts (node, run manually)
 docs/                         This file and its siblings, plus prior audit docs
-firestore.rules, storage.rules, firestore.indexes.json, firebase.json
+firestore.rules, firestore.indexes.json, firebase.json
 ```
 
 ## Architecture
@@ -50,8 +53,8 @@ firestore.rules, storage.rules, firestore.indexes.json, firebase.json
   document holding `role`, `approved`, `status`, academic fields. No server
   session/cookie — `contexts/AuthContext.tsx` mirrors `onAuthStateChanged`
   into React state, with a 24h localStorage cache to avoid a loading flash.
-- **Authorization**: Firestore/Storage **security rules** are the actual
-  enforcement layer (`firestore.rules`, `storage.rules`), not middleware
+- **Authorization**: Firestore **security rules** are the actual enforcement
+  layer for data (`firestore.rules`), not middleware
   (there is none — deleted in a prior pass, see `docs/PRODUCTION_AUDIT.md`).
   Role checks (`isAdmin()`, `isTeacher()`, `isStudent()`) call `get()` on the
   requester's own `users/{uid}` doc.
@@ -135,11 +138,19 @@ firestore.rules, storage.rules, firestore.indexes.json, firebase.json
 
 ## Storage structure
 
+Files live in a **private Backblaze B2 bucket** (S3 API), not Firebase Cloud
+Storage. Same key layout as before:
+
 `avatars/{uid}/`, `answers/{examId}/{sessionId}/`, `proctoring/**`,
 `warningScreenshots/{sessionId}/{file}.jpg` (permanent), `exams/**` (papers),
-`uploads/{uid}/`, `classrooms/{classroomId}/{posts|classwork}/**` (Phase 2 —
-broader file types incl. video/zip/ppt, 100MB ceiling; see
-`isClassroomFileType()`/`isClassroomFileSize()` in `storage.rules`).
+`notices/{uid}/`, `uploads/{uid}/`,
+`classrooms/{classroomId}/{posts|classwork}/**` (broader file types incl.
+video/zip/ppt, 100MB ceiling).
+
+Who may write which prefix is decided in `lib/storage/policy.ts` — the direct
+replacement for the deleted `storage.rules`. Uploads use presigned PUTs from
+`/api/storage/upload-url`; stored links are signed capability URLs resolved by
+`/api/storage/download`. Full detail in `docs/STORAGE_B2.md`.
 
 ## Shared components worth knowing about
 

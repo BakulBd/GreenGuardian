@@ -10,10 +10,13 @@
  *     returns 503. Nothing on-screen would otherwise say why.
  *   - No SMTP: OTP and password-reset emails are written to the server console
  *     instead of being delivered, so users simply never receive a code.
- *   - Cloud Storage unavailable (disabled billing, missing bucket, absent CORS
- *     policy): uploads silently degrade to inline base64 and every delete
- *     fails in the browser as an opaque CORS/ERR_FAILED. This is invisible from
- *     the app itself, which is precisely why it belongs here.
+ *   - Object storage (Backblaze B2) unavailable (wrong key, missing bucket,
+ *     unset environment): uploads silently degrade to the server proxy and then
+ *     to inline base64, and deletes fail. This is invisible from the app
+ *     itself, which is precisely why it belongs here.
+ *   - B2 bucket CORS not applied: direct browser uploads fail and every upload
+ *     quietly takes the 4 MB-capped proxy path, so large classroom material
+ *     uploads start failing with no obvious cause.
  *
  * Every probe EXERCISES the dependency rather than only checking that a
  * variable is set — an expired or wrong-project key looks identical to a
@@ -25,9 +28,18 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/require-admin";
-import { getAdminAuth, getAdminDb, getAdminBucket } from "@/lib/firebase/admin";
+import { getAdminAuth, getAdminDb } from "@/lib/firebase/admin";
+import {
+  getB2Config,
+  isB2Configured,
+  missingB2EnvVars,
+  listObjects,
+  createPresignedDownloadUrl,
+} from "@/lib/storage/b2";
+import { getB2CorsStatus } from "@/lib/storage/b2-native";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 /** A single dependency probe: did it work, how slow was it, and why not. */
 interface Probe {
@@ -46,8 +58,8 @@ async function probe(run: () => Promise<string | void>): Promise<Probe> {
     return {
       ok: false,
       latencyMs: Date.now() - started,
-      // Storage failures are reported verbatim by GCS as a JSON blob; the
-      // first line carries the actionable part.
+      // S3/B2 failures arrive as long serialized error objects; the leading
+      // part carries the actionable message.
       detail: message.length > 300 ? `${message.slice(0, 300)}…` : message,
     };
   }
@@ -96,17 +108,38 @@ export async function GET(req: NextRequest) {
       return `${page.users.length ? "accounts present" : "no accounts yet"}`;
     }),
     probe(async () => {
-      const bucket = getAdminBucket();
-      const [metadata] = await bucket.getMetadata();
-      const corsRules = Array.isArray(metadata.cors) ? metadata.cors.length : 0;
-      if (corsRules === 0) {
+      if (!isB2Configured()) {
         throw new Error(
-          `Bucket ${bucket.name} has no CORS policy. Browser uploads and deletes will be blocked by preflight. Run "npm run storage:cors".`
+          `Backblaze B2 is not configured. Missing: ${missingB2EnvVars().join(", ")}. Uploads will fail.`
         );
       }
-      return `${bucket.name} — ${corsRules} CORS rule${corsRules === 1 ? "" : "s"}`;
+      const config = getB2Config()!;
+
+      // Listing exercises the credential, the endpoint and the bucket name in
+      // one call — a wrong key, a wrong region or a typo'd bucket all fail
+      // here rather than later, in front of a student mid-upload.
+      const listing = await listObjects("", 1);
+      // Presigning is pure signature maths, but it is the operation every
+      // upload and download depends on, so it is worth failing loudly here.
+      await createPresignedDownloadUrl("healthcheck/probe", { expiresIn: 60 });
+
+      const objects = typeof listing.KeyCount === "number" ? listing.KeyCount : 0;
+      return `${config.bucket} @ ${config.region} — reachable${objects === 0 ? " (empty)" : ""}`;
     }),
   ]);
+
+  // Informational rather than a pass/fail dependency: without CORS the app
+  // still uploads, just through the slower proxy path with a 4 MB ceiling.
+  // Reading it needs the native B2 API and a key with "listBuckets", so an
+  // unreadable value is reported as unknown, never as a failure.
+  const origin = req.nextUrl.origin;
+  const cors = storage.ok
+    ? await getB2CorsStatus(origin).catch(() => ({
+        ruleCount: null,
+        allowsOrigin: null,
+        detail: "CORS status could not be determined.",
+      }))
+    : { ruleCount: null, allowsOrigin: null, detail: "Skipped — object storage is unavailable." };
 
   // Counts are cheap aggregation queries, but a failure here must not take the
   // whole health page down — it is diagnostics, not a dependency.
@@ -144,6 +177,14 @@ export async function GET(req: NextRequest) {
       firestore,
       auth: adminAuth,
       storage,
+      // `ok` is true when CORS is applied OR when it could not be read — an
+      // unverifiable value is not a fault, and flagging it red would train
+      // operators to ignore this row.
+      storageCors: {
+        ok: cors.allowsOrigin !== false && cors.ruleCount !== 0,
+        latencyMs: null,
+        detail: cors.detail,
+      },
       email: {
         ok: smtpConfigured,
         latencyMs: null,
@@ -158,6 +199,20 @@ export async function GET(req: NextRequest) {
           ? undefined
           : "REGISTRATION_ENC_KEY is unset — a fallback key is derived, which invalidates in-flight registrations if the project id changes.",
       },
+    },
+    storage: {
+      provider: "backblaze-b2",
+      configured: isB2Configured(),
+      bucket: getB2Config()?.bucket || null,
+      region: getB2Config()?.region || null,
+      endpoint: getB2Config()?.endpoint || null,
+      // The bucket is private; every read goes through a presigned URL minted
+      // by /api/storage/download. Stated explicitly because "is the bucket
+      // public?" is the first question in any storage incident review.
+      publicBucket: false,
+      corsRules: cors.ruleCount,
+      directUploads: cors.ruleCount === null ? "unknown" : cors.ruleCount > 0 ? "enabled" : "proxy-only",
+      missingEnv: missingB2EnvVars(),
     },
     email: { configured: smtpConfigured, mode: smtpConfigured ? "smtp" : "console-only" },
     encryption: { configured: !!process.env.REGISTRATION_ENC_KEY },

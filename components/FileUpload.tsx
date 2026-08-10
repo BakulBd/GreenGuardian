@@ -22,7 +22,7 @@ import {
   UploadProgress,
   EXAM_PAPER_ALLOWED_TYPES,
   MAX_FILE_SIZE
-} from "@/lib/firebase/storage";
+} from "@/lib/storage/client";
 import { cn } from "@/lib/utils";
 
 interface FileUploadProps {

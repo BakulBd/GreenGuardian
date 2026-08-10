@@ -55,7 +55,7 @@ import { performSimilarityCheck } from "@/lib/utils/similarity";
 import { startStudentLiveBroadcast } from "@/lib/services/liveVideo";
 import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
-import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/firebase/storage";
+import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/storage/constants";
 import { captureVideoFrame, sendProctoringSnapshot, captureAndUploadWarningScreenshot, analyzeFrameLightingAndCoverage } from "@/lib/services/proctoring";
 import { isOptionBasedQuestion } from "@/lib/utils/questionTypes";
 

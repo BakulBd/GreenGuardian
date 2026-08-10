@@ -13,7 +13,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { getNotice, updateNotice, getTargetedStudentIds, publishNoticeWithNotifications, notifyNoticePublished } from "@/lib/firebase/notices";
 import { subscribeToAssignedCatalog, AssignedCatalogEntry } from "@/lib/firebase/assignments";
-import { uploadFile } from "@/lib/firebase/storage";
+import { uploadFile } from "@/lib/storage/client";
 import { Notice, NoticeTargetType } from "@/lib/types";
 import {
   Loader2,

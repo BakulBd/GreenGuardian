@@ -32,7 +32,7 @@ import {
   submitClasswork,
   unsubmitClasswork,
 } from "@/lib/firebase/submissions";
-import { CLASSROOM_MATERIAL_ALLOWED_TYPES, CLASSROOM_MAX_FILE_SIZE, UploadResult } from "@/lib/firebase/storage";
+import { CLASSROOM_MATERIAL_ALLOWED_TYPES, CLASSROOM_MAX_FILE_SIZE, UploadResult } from "@/lib/storage/constants";
 import type { ClassroomAttachment, ClassworkItem, ClassworkSubmission, User } from "@/lib/types";
 
 function formatDateTime(value: any): string {

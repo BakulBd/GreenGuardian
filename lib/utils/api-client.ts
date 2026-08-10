@@ -14,6 +14,12 @@ import type { User as FirebaseUser } from "firebase/auth";
 
 export interface AuthedRequestOptions {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  /**
+   * JSON-serialised, unless it is a `FormData` — which is passed through
+   * untouched so the browser can set its own `multipart/form-data` boundary.
+   * Setting `Content-Type` by hand for a FormData body produces a boundary-less
+   * header the server cannot parse.
+   */
   body?: unknown;
   /** Message used when the server sends no error of its own. */
   fallbackError?: string;
@@ -71,15 +77,17 @@ export async function authedFetch<T>(
 ): Promise<T> {
   const user = await currentUser();
 
+  const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+
   const send = async (forceRefresh: boolean): Promise<Response> => {
     const token = await user.getIdToken(forceRefresh);
     return fetch(path, {
       method,
       headers: {
         Authorization: `Bearer ${token}`,
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(body !== undefined && !isFormData ? { "Content-Type": "application/json" } : {}),
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      ...(body !== undefined ? { body: isFormData ? (body as FormData) : JSON.stringify(body) } : {}),
       ...(signal ? { signal } : {}),
       ...(keepalive ? { keepalive: true } : {}),
     });

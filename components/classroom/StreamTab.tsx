@@ -35,7 +35,7 @@ import {
   subscribeToPostComments,
   notifyClassroom,
 } from "@/lib/firebase/classrooms";
-import { CLASSROOM_MATERIAL_ALLOWED_TYPES, CLASSROOM_MAX_FILE_SIZE, UploadResult } from "@/lib/firebase/storage";
+import { CLASSROOM_MATERIAL_ALLOWED_TYPES, CLASSROOM_MAX_FILE_SIZE, UploadResult } from "@/lib/storage/constants";
 import { Classroom, ClassroomPost, ClassroomPostType, ClassroomComment, ClassroomAttachment, User } from "@/lib/types";
 
 interface StreamTabProps {

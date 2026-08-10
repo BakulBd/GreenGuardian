@@ -39,14 +39,22 @@ function JoinClassroomContent() {
   const handleJoin = async () => {
     if (!user) return;
     setStatus("joining");
-    const result = await joinClassroomByCode(code, user);
-    if (result.success) {
-      setStatus("success");
-      setClassroomId(result.classroomId);
-      setMessage(`You've joined ${result.classroomName}.`);
-    } else {
+    try {
+      const result = await joinClassroomByCode(code, user);
+      if (result.success) {
+        setStatus("success");
+        setClassroomId(result.classroomId);
+        setMessage(`You've joined ${result.classroomName}.`);
+      } else {
+        setStatus("error");
+        setMessage(result.error);
+      }
+    } catch (error: any) {
+      // Without this the button spun forever on any unexpected throw and the
+      // student was left with no message at all — worse than a wrong one.
+      console.error("[Classrooms] Join by invite link failed:", error);
       setStatus("error");
-      setMessage(result.error);
+      setMessage(error?.message || "Could not join this classroom. Please try again.");
     }
   };
 

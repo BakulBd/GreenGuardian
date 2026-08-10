@@ -268,12 +268,37 @@ export async function joinClassroomByCode(code: string, student: User): Promise<
   if (!classroom) return { success: false, error: "Invalid classroom code." };
   if (classroom.status !== "active") return { success: false, error: "This classroom is archived and not accepting new members." };
 
-  const existing = await getDoc(doc(db, MEMBERS, memberId(classroom.id, student.id)));
-  if (existing.exists()) return { success: false, error: "You have already joined this classroom." };
+  const membershipRef = doc(db, MEMBERS, memberId(classroom.id, student.id));
+
+  /**
+   * Has this student already joined?
+   *
+   * Returns `null` when the answer cannot be read. This check MUST NOT be able
+   * to fail the join: reading a document that does not exist evaluates the read
+   * rule against a null `resource`, and a rules deployment that dereferences it
+   * denies the request outright — so the pre-check threw `permission-denied`
+   * for precisely the students who had not joined yet, and the join screen
+   * reported an authorization error for a join that was actually allowed.
+   * `firestore.rules` now grants a read of one's own membership id whether or
+   * not the document exists; this stays defensive so an un-redeployed ruleset
+   * degrades to "let the write decide" instead of blocking every student.
+   */
+  const readExistingMembership = async (): Promise<boolean | null> => {
+    try {
+      return (await getDoc(membershipRef)).exists();
+    } catch (error: any) {
+      console.warn("[Classrooms] Membership pre-check unavailable:", error?.code || error);
+      return null;
+    }
+  };
+
+  if ((await readExistingMembership()) === true) {
+    return { success: false, error: "You have already joined this classroom." };
+  }
 
   try {
     const batch = writeBatch(db);
-    batch.set(doc(db, MEMBERS, memberId(classroom.id, student.id)), stripUndefined({
+    batch.set(membershipRef, stripUndefined({
       classroomId: classroom.id,
       teacherId: classroom.teacherId,
       studentId: student.id,
@@ -289,13 +314,24 @@ export async function joinClassroomByCode(code: string, student: User): Promise<
     // Log the real cause — collapsing every permission-denied into one
     // friendly string previously made this failure undiagnosable in prod.
     console.error("[Classrooms] Join failed:", error?.code, error?.message);
-    return {
-      success: false,
-      error:
-        error?.code === "permission-denied"
-          ? "You are not allowed to join this classroom."
-          : error?.message || "Failed to join classroom.",
-    };
+
+    if (error?.code === "permission-denied") {
+      // A duplicate join is rejected by the same rule as a forbidden one: the
+      // membership id is deterministic, so a second create lands on an
+      // existing document and becomes an update, which students may not do.
+      // Distinguishing them here is the difference between "you are already in
+      // this class" and a dead end that reads as a permissions bug.
+      if ((await readExistingMembership()) === true) {
+        return { success: false, error: "You have already joined this classroom." };
+      }
+      return {
+        success: false,
+        error:
+          "You are not allowed to join this classroom. If it was just created, ask your teacher to confirm it is active.",
+      };
+    }
+
+    return { success: false, error: error?.message || "Failed to join classroom." };
   }
 
   // Membership is already committed at this point — a sync failure must not

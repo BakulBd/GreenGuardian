@@ -54,6 +54,12 @@ export default function StudentClassroomsPage() {
       } else {
         toast({ title: "Could Not Join", description: result.error, variant: "destructive" });
       }
+    } catch (error: any) {
+      toast({
+        title: "Could Not Join",
+        description: error?.message || "Something went wrong. Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setJoining(false);
     }
@@ -70,6 +76,12 @@ export default function StudentClassroomsPage() {
       } else {
         toast({ title: "Could Not Join", description: result.error, variant: "destructive" });
       }
+    } catch (error: any) {
+      toast({
+        title: "Could Not Join",
+        description: error?.message || "Something went wrong. Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setJoiningSuggestedId(null);
     }

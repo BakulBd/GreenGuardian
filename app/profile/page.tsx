@@ -11,7 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { updateUserProfile, changePassword } from "@/lib/firebase/auth";
-import { uploadFile } from "@/lib/firebase/storage";
+import { uploadFile } from "@/lib/storage/client";
 import { validateStrongPassword } from "@/lib/utils/validation";
 import { formatDate } from "@/lib/utils/helpers";
 import Navbar from "@/components/Navbar";

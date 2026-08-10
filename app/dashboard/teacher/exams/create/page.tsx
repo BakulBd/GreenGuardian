@@ -26,7 +26,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 import FileUpload from "@/components/FileUpload";
-import { UploadResult } from "@/lib/firebase/storage";
+import { UploadResult } from "@/lib/storage/constants";
 import {
   subscribeToAssignedCatalog,
   computeAssignmentTargetStudentIds,
