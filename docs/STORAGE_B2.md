@@ -108,6 +108,21 @@ The route also accepts a bearer ID token instead of a signature. An unsigned,
 unauthenticated request is refused — a bare `?key=` never resolves, so the
 bucket cannot be walked by guessing paths.
 
+### Reading a file on the server (OCR / AI)
+
+`lib/storage/read-object.ts#readFileReference` resolves any stored reference to
+bytes. Server code must use it rather than `fetch(url)`:
+
+| Reference | Resolution |
+| --- | --- |
+| `/api/storage/download?key=…` | Read straight from B2. `fetch()` cannot take a relative URL in Node — this is what would otherwise break every OCR run after the migration. |
+| `data:…;base64,…` | Decoded inline (the small-file upload fallback). |
+| `https://…` | Fetched normally — legacy Firebase Storage links still resolve. |
+
+`urlToBase64()` in `lib/utils/gemini.ts` delegates to it, so the OCR pipeline
+reads private objects with the server's own credentials, one round trip fewer,
+and without the deployment needing to call itself.
+
 ### Delete
 
 `DELETE /api/storage/object?key=…`, authorised by prefix and role. The browser

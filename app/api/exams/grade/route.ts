@@ -203,6 +203,15 @@ export async function POST(req: NextRequest) {
       answerData.ocrStatus = "pending_background";
     } else {
       answerData.answers = answers;
+      // Online-mode exams may ALSO carry attachments when the teacher enabled
+      // `allowAnswerUpload` — a scan of working-out for a derivation, a chart
+      // drawn on paper. They are stored alongside the typed answers and go
+      // through the same OCR pass; they do not change how the typed answers
+      // are auto-graded, which stays the server's decision from the answer key.
+      if (answerFiles.length > 0) {
+        answerData.answerFiles = answerFiles;
+        answerData.ocrStatus = "pending_background";
+      }
       // Snapshot the graded question set — answer keys included — onto the
       // submission so /exam/[id]/review renders from this document alone. The
       // key is safe to expose here: the attempt is over, and it keeps a past

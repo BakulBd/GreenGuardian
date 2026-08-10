@@ -32,8 +32,11 @@ import {
   Users,
   Radio,
   AlertTriangle,
+  Boxes,
+  ToggleRight,
 } from "lucide-react";
 import { authedFetch } from "@/lib/utils/api-client";
+import ServerLogPanel from "@/components/admin/ServerLogPanel";
 
 interface Check {
   ok: boolean;
@@ -51,7 +54,19 @@ interface HealthPayload {
     nodeVersion: string;
     uptimeSeconds: number;
     projectId: string | null;
+    commit?: string | null;
+    branch?: string | null;
+    memoryMb?: number;
   };
+  modules?: {
+    accounts: Record<string, number | null>;
+    exams: Record<string, number | null>;
+    proctoring: Record<string, number | null>;
+    ai: Record<string, number | null>;
+    classroom: Record<string, number | null>;
+    notices: Record<string, number | null>;
+  };
+  features?: Record<string, boolean | null>;
   checks: {
     firestore: Check;
     auth: Check;
@@ -147,6 +162,36 @@ function Stat({ icon: Icon, label, value, hint }: { icon: any; label: string; va
         {value === null ? "—" : value.toLocaleString()}
       </p>
       {hint && <p className="text-xs text-gray-500 mt-0.5">{hint}</p>}
+    </div>
+  );
+}
+
+/** "pendingTeacherApprovals" → "Pending teacher approvals". */
+function humanizeKey(key: string): string {
+  const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/** One module's counters. `null` means the query failed, not zero — they read very differently. */
+function ModuleCard({ title, rows }: { title: string; rows: Record<string, number | null> }) {
+  return (
+    <div className="rounded-lg border bg-white p-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{title}</p>
+      <dl className="mt-2 space-y-1.5">
+        {Object.entries(rows).map(([key, value]) => (
+          <div key={key} className="flex items-baseline justify-between gap-3">
+            <dt className="text-sm text-gray-600">{humanizeKey(key)}</dt>
+            <dd
+              className={`text-sm font-semibold tabular-nums ${
+                value === null ? "text-gray-400" : "text-gray-900"
+              }`}
+              title={value === null ? "This query could not be run" : undefined}
+            >
+              {value === null ? "—" : value.toLocaleString()}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }
@@ -267,6 +312,14 @@ export default function SystemHealthPage() {
                     <span className="font-mono">{health.runtime.projectId || "unknown"}</span> ·{" "}
                     {health.runtime.deployment} · Node {health.runtime.nodeVersion} · up{" "}
                     {formatUptime(health.runtime.uptimeSeconds)}
+                    {health.runtime.memoryMb ? ` · ${health.runtime.memoryMb} MB RSS` : ""}
+                    {health.runtime.commit ? (
+                      <>
+                        {" · build "}
+                        <span className="font-mono">{health.runtime.commit}</span>
+                        {health.runtime.branch ? ` (${health.runtime.branch})` : ""}
+                      </>
+                    ) : null}
                   </p>
                 </div>
               </CardContent>
@@ -413,6 +466,69 @@ export default function SystemHealthPage() {
                 />
               </CardContent>
             </Card>
+
+            {/* Per-module detail — the numbers behind "is module X working?" */}
+            {health.modules && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Boxes className="h-5 w-5 text-violet-600" />
+                    Modules
+                  </CardTitle>
+                  <CardDescription>
+                    What each subsystem has actually produced. A module reported as broken but
+                    showing rising counts here is usually a permissions or visibility problem,
+                    not an outage.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-4 md:grid-cols-2">
+                  <ModuleCard title="Accounts" rows={health.modules.accounts} />
+                  <ModuleCard title="Exams & results" rows={health.modules.exams} />
+                  <ModuleCard title="Proctoring" rows={health.modules.proctoring} />
+                  <ModuleCard title="AI / OCR" rows={health.modules.ai} />
+                  <ModuleCard title="Classroom" rows={health.modules.classroom} />
+                  <ModuleCard title="Notices" rows={health.modules.notices} />
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Feature matrix — what this deployment can do right now */}
+            {health.features && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <ToggleRight className="h-5 w-5 text-teal-600" />
+                    Capabilities in this deployment
+                  </CardTitle>
+                  <CardDescription>
+                    Each of these is a silent degradation when off — the app keeps working, but
+                    part of it quietly stops.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-2 sm:grid-cols-2">
+                  {Object.entries(health.features).map(([key, value]) => (
+                    <div
+                      key={key}
+                      className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2"
+                    >
+                      <span className="text-sm text-gray-700">{humanizeKey(key)}</span>
+                      {value === null ? (
+                        <Badge variant="outline" className="text-[10px]">Unknown</Badge>
+                      ) : value ? (
+                        <Badge className="text-[10px] bg-green-600 hover:bg-green-600">Enabled</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px] text-amber-700 border-amber-300">
+                          Off
+                        </Badge>
+                      )}
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Server logs */}
+            <ServerLogPanel />
 
             {/* Database contents */}
             <Card>

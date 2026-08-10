@@ -78,3 +78,27 @@ export async function detectAIContent(text: string): Promise<AIDetectionResult> 
 export async function extractQuestionsFromPaper(fileUrl: string): Promise<any> {
   return callAiApi<any>({ action: "extract_questions", fileUrl });
 }
+
+export interface AnswerQualitySuggestion {
+  success: boolean;
+  score?: number;
+  feedback?: string;
+  strengths?: string[];
+  improvements?: string[];
+  error?: string;
+}
+
+/**
+ * Asks the model to read an answer against the question and suggest a mark.
+ *
+ * ADVISORY ONLY. The suggestion is shown to the teacher next to the mark box;
+ * what is stored is whatever the teacher submits through
+ * `/api/exams/evaluate`. Grading a student by model output alone is not
+ * something this system does.
+ */
+export async function suggestAnswerGrade(
+  question: string,
+  answer: string
+): Promise<AnswerQualitySuggestion> {
+  return callAiApi<AnswerQualitySuggestion>({ action: "grade_answer", question, answer });
+}

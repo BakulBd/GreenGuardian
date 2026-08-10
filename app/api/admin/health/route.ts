@@ -143,13 +143,62 @@ export async function GET(req: NextRequest) {
 
   // Counts are cheap aggregation queries, but a failure here must not take the
   // whole health page down — it is diagnostics, not a dependency.
+  const count = (build: () => FirebaseFirestore.Query | FirebaseFirestore.CollectionReference) =>
+    Promise.resolve()
+      .then(() => build().count().get())
+      .then((snap) => snap.data().count)
+      .catch(() => null);
+
   const counts = await Promise.all([
-    db.collection("users").count().get().then((s) => s.data().count).catch(() => null),
-    db.collection("users").where("role", "==", "student").count().get().then((s) => s.data().count).catch(() => null),
-    db.collection("users").where("role", "==", "teacher").count().get().then((s) => s.data().count).catch(() => null),
-    db.collection("users").where("approved", "==", false).where("role", "==", "teacher").count().get().then((s) => s.data().count).catch(() => null),
-    db.collection("exams").where("status", "==", "active").count().get().then((s) => s.data().count).catch(() => null),
-    db.collection("classrooms").where("status", "==", "active").count().get().then((s) => s.data().count).catch(() => null),
+    count(() => db.collection("users")),
+    count(() => db.collection("users").where("role", "==", "student")),
+    count(() => db.collection("users").where("role", "==", "teacher")),
+    count(() => db.collection("users").where("approved", "==", false).where("role", "==", "teacher")),
+    count(() => db.collection("exams").where("status", "==", "active")),
+    count(() => db.collection("classrooms").where("status", "==", "active")),
+  ]);
+
+  // Per-module figures. Each is the number an admin actually asks for when a
+  // module is reported broken ("are submissions arriving at all?"), and each
+  // failure is isolated so one missing composite index cannot blank the page.
+  const [
+    admins,
+    suspendedUsers,
+    totalExams,
+    draftExams,
+    completedSessions,
+    flaggedSessions,
+    totalAnswers,
+    answersAwaitingMarking,
+    answersWithFiles,
+    ocrCompleted,
+    warningScreenshots,
+    proctoringEvents,
+    classworkItems,
+    classroomSubmissions,
+    classroomMembers,
+    notices,
+    publishedResults,
+  ] = await Promise.all([
+    count(() => db.collection("users").where("role", "==", "admin")),
+    count(() => db.collection("users").where("status", "in", ["hold", "suspended"])),
+    count(() => db.collection("exams")),
+    count(() => db.collection("exams").where("status", "==", "draft")),
+    count(() => db.collection("examSessions").where("status", "in", ["submitted", "auto-submitted"])),
+    count(() => db.collection("examSessions").where("flagged", "==", true)),
+    count(() => db.collection("answers")),
+    // Written/scanned work that auto-grading could not score. This is the
+    // teacher's real marking queue and the number most worth watching.
+    count(() => db.collection("answers").where("gradedBy", "==", "server").where("ocrStatus", "==", "pending_background")),
+    count(() => db.collection("answers").where("ocrStatus", "in", ["pending_background", "completed"])),
+    count(() => db.collection("answers").where("ocrStatus", "==", "completed")),
+    count(() => db.collection("warningScreenshots")),
+    count(() => db.collection("proctoringEvents")),
+    count(() => db.collection("classroomClasswork")),
+    count(() => db.collection("classroomSubmissions")),
+    count(() => db.collection("classroomMembers")),
+    count(() => db.collection("notices")),
+    count(() => db.collection("results").where("isPublished", "==", true)),
   ]);
 
   const sessions = await countActiveSessions(db).catch(() => ({
@@ -169,6 +218,12 @@ export async function GET(req: NextRequest) {
       nodeVersion: process.version,
       uptimeSeconds: Math.round(process.uptime()),
       projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || null,
+      // Identifies the exact build an admin is looking at, which is the first
+      // question in any "is the fix deployed yet?" conversation.
+      commit: (process.env.VERCEL_GIT_COMMIT_SHA || "").slice(0, 7) || null,
+      branch: process.env.VERCEL_GIT_COMMIT_REF || null,
+      deployedAt: process.env.VERCEL_DEPLOYMENT_ID ? null : undefined,
+      memoryMb: Math.round(process.memoryUsage().rss / (1024 * 1024)),
     },
     // `configured: true` is a statement of fact here: requireAdmin cannot have
     // succeeded without working credentials.
@@ -223,6 +278,63 @@ export async function GET(req: NextRequest) {
       pendingTeachers: counts[3],
       activeExams: counts[4],
       activeClassrooms: counts[5],
+    },
+    // Per-module detail — what each subsystem has actually produced, so a
+    // report of "the classroom module is broken" can be checked against
+    // whether anything is arriving in it at all.
+    modules: {
+      accounts: {
+        total: counts[0],
+        students: counts[1],
+        teachers: counts[2],
+        admins,
+        pendingTeacherApprovals: counts[3],
+        restricted: suspendedUsers,
+      },
+      exams: {
+        total: totalExams,
+        active: counts[4],
+        drafts: draftExams,
+        sessionsCompleted: completedSessions,
+        sessionsInProgress: sessions.inProgress,
+        flaggedSessions,
+        submissions: totalAnswers,
+        awaitingManualMarking: answersAwaitingMarking,
+        publishedResults,
+      },
+      proctoring: {
+        warningScreenshots,
+        events: proctoringEvents,
+        snapshotsLastFiveMinutes: sessions.snapshotsLastFiveMinutes,
+      },
+      ai: {
+        submissionsWithFiles: answersWithFiles,
+        ocrCompleted,
+        // The gap between the two is work the background OCR pass has not
+        // finished (or never started, if the key is missing).
+        ocrPending:
+          answersWithFiles !== null && ocrCompleted !== null
+            ? Math.max(0, answersWithFiles - ocrCompleted)
+            : null,
+      },
+      classroom: {
+        activeClassrooms: counts[5],
+        memberships: classroomMembers,
+        classworkItems,
+        submissions: classroomSubmissions,
+      },
+      notices: { total: notices },
+    },
+    // What this deployment can actually do, as opposed to what the code
+    // supports. Every one of these is a silent degradation when off.
+    features: {
+      objectStorage: isB2Configured(),
+      directBrowserUploads: cors.ruleCount === null ? null : cors.ruleCount > 0,
+      aiOcrAndGrading: !!process.env.GEMINI_API_KEY,
+      emailDelivery: smtpConfigured,
+      registrationEncryption: !!process.env.REGISTRATION_ENC_KEY,
+      liveVideoTurn: !!process.env.NEXT_PUBLIC_TURN_URLS,
+      firebaseEmulator: process.env.USE_FIREBASE_EMULATOR === "true",
     },
     sessions,
     passwordReset: {

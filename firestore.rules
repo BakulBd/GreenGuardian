@@ -45,6 +45,22 @@ service cloud.firestore {
       return examId + '_' + studentId;
     }
 
+    /**
+     * True when the requested document does not exist.
+     *
+     * A document that is not there discloses nothing, but a rule that reaches
+     * for `resource.data.X` on a missing document RAISES, and a raise is a
+     * denial. Every "does this exist?" probe therefore fails as
+     * permission-denied unless a rule says otherwise — which is a bug that has
+     * now been found four separate times in this project (first attempt at an
+     * exam, first classroom join, first assignment hand-in, and opening a
+     * result by session id). Collections whose ids clients legitimately probe
+     * carry an explicit branch for it.
+     */
+    function isMissingDoc() {
+      return resource == null;
+    }
+
     // Is the requesting teacher one this student is actually assigned to?
     // (Phase 2 Feature 6.) Looks up the STUDENT's own assignedTeacherIds
     // rather than requiring a denormalized teacher->students list — reuses
@@ -186,9 +202,13 @@ service cloud.firestore {
     
     // Exam Sessions collection
     match /examSessions/{sessionId} {
+      // `getResultDetails()` probes results/{id} and then examSessions/{id}
+      // with the same id, so one of the two is always a miss by design.
+      allow read: if isAuthenticated() && isMissingDoc();
+
       // Students can read their own sessions
-      allow read: if isUser(resource.data.studentId);
-      
+      allow read: if !isMissingDoc() && isUser(resource.data.studentId);
+
       // Teachers and admins can read sessions for monitoring and evaluation
       allow read: if isTeacherOrAdmin();
       
@@ -410,13 +430,20 @@ service cloud.firestore {
 
     // Results collection
     match /results/{resultId} {
+      // A student opening a result by exam-session id lands here first and
+      // misses; without this branch the miss was a permission error, the
+      // caller's catch swallowed it, and the examSessions fallback that would
+      // have rendered the result never ran. See getResultDetails().
+      allow read: if isAuthenticated() && isMissingDoc();
+
       // Students can only read their own published results
-      allow read: if isStudent() && resource.data.studentId == request.auth.uid && resource.data.isPublished == true;
+      allow read: if !isMissingDoc() && isStudent() &&
+        resource.data.studentId == request.auth.uid && resource.data.isPublished == true;
       // Teachers can only read results for their own assigned students —
       // the comment here used to claim "via batch/section filtering" but no
       // such check actually existed, letting any teacher read any student's
       // results (Phase 2 Feature 6 audit finding).
-      allow read: if isTeacher() && isAssignedToStudent(resource.data.studentId);
+      allow read: if !isMissingDoc() && isTeacher() && isAssignedToStudent(resource.data.studentId);
       // Admins can read all results
       allow read: if isAdmin();
       // Only teachers and admins can create results
@@ -702,9 +729,25 @@ service cloud.firestore {
       // The student it belongs to, the classroom's teacher, or an admin.
       // Students may not read each other's work — an assignment answer is
       // exactly as sensitive as an exam answer.
+      //
+      // The `resource == null` branch is load-bearing, and its absence was the
+      // "insufficient permissions" students hit when handing in an assignment
+      // for the FIRST time. `submitClasswork()` reads the submission document
+      // before writing it (to refuse editing work that has already been
+      // marked), and on a first hand-in that document does not exist yet.
+      // Rules evaluate a missing document with `resource == null`, and
+      // `resource.data.X` on null RAISES — which Firestore treats as a denial.
+      // So the read failed for exactly the students who had never submitted.
+      // The id is `${classworkId}_${studentId}`, so a caller probing their own
+      // is identifiable from the id alone, with no document to read. Same fix
+      // as examAttemptCounters above and classroomMembers below.
       allow read: if isAdmin() ||
-        (isAuthenticated() && resource.data.studentId == request.auth.uid) ||
-        (isTeacher() && resource.data.teacherId == request.auth.uid);
+        (isAuthenticated() && resource == null &&
+         submissionId.matches('.*_' + request.auth.uid)) ||
+        (resource != null && (
+          (isAuthenticated() && resource.data.studentId == request.auth.uid) ||
+          (isTeacher() && resource.data.teacherId == request.auth.uid)
+        ));
 
       // Hand-in. The student must be a member of the classroom, must be
       // submitting as themselves, must use the deterministic id, and must

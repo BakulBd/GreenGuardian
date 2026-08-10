@@ -127,6 +127,10 @@ export default function TeacherExamEditClient() {
         startDate: examData.startDate,
         endDate: examData.endDate,
         settings: examData.settings || defaultSettings,
+        // Older exams carry this only inside `settings`; normalise to the
+        // top-level field the exam client reads.
+        allowAnswerUpload:
+          examData.allowAnswerUpload === true || examData.settings?.fileUploadsAllowed === true,
       });
       
       const questionsData = await getQuestionsByExam(examId);
@@ -495,6 +499,26 @@ export default function TeacherExamEditClient() {
                   min="1"
                   value={editedExam.attemptsAllowed || 1}
                   onChange={(e) => setEditedExam({ ...editedExam, attemptsAllowed: parseInt(e.target.value) || 1 })}
+                />
+              </div>
+
+              <div className="sm:col-span-2 flex items-center justify-between rounded-lg border p-3">
+                <div>
+                  <Label>Allow Answer File Uploads</Label>
+                  <p className="text-sm text-gray-500">
+                    Students can attach a PDF or photo of handwritten work alongside their typed
+                    answers. Upload-mode exams always accept files.
+                  </p>
+                </div>
+                <Switch
+                  checked={editedExam.allowAnswerUpload === true}
+                  onCheckedChange={(checked) =>
+                    setEditedExam({
+                      ...editedExam,
+                      allowAnswerUpload: checked,
+                      settings: { ...(editedExam.settings || defaultSettings), fileUploadsAllowed: checked },
+                    })
+                  }
                 />
               </div>
 

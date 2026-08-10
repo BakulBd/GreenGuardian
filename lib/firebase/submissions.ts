@@ -91,15 +91,85 @@ export async function submitClasswork(input: SubmitInput): Promise<string> {
   }
 
   const id = submissionId(classwork.id, student.id);
-  const existing = await getDoc(doc(db, SUBMISSIONS, id));
-  if (existing.exists() && existing.data()?.status === "returned") {
+  const ref = doc(db, SUBMISSIONS, id);
+  const existing = await readSubmissionSafely(ref);
+
+  if (existing?.exists() && existing.data()?.status === "returned") {
     throw new Error("This submission has already been marked and can no longer be changed.");
   }
 
+  // `null` means the pre-read itself was refused (an older ruleset that still
+  // denies the not-yet-existing document). Optimistically take the create
+  // path; if the document turns out to exist, the rules reject the create and
+  // the revision path below runs instead. The student never sees either.
+  if (existing === null) {
+    try {
+      await createSubmission(ref, input, text, attachments);
+      return id;
+    } catch (error: any) {
+      if (error?.code !== "permission-denied") throw error;
+      await updateDoc(ref, stripUndefined({ text, attachments, updatedAt: serverTimestamp() }));
+      return id;
+    }
+  }
+
+  if (existing.exists()) {
+    // REVISION. `firestore.rules` lets a student change only
+    // ['text', 'attachments', 'updatedAt', 'submittedAt'] on their own
+    // submission, and `diff().affectedKeys()` counts every field whose value
+    // actually changed. Re-sending the whole create payload therefore failed
+    // with permission-denied the moment any of the other fields drifted —
+    // `late` flipping once the due date passed, or `classworkTitle` after the
+    // teacher renamed the assignment. Writing only what a student is allowed
+    // to change keeps the write inside the rule by construction.
+    await updateDoc(
+      ref,
+      stripUndefined({
+        text,
+        attachments,
+        updatedAt: serverTimestamp(),
+      })
+    );
+    return id;
+  }
+
+  await createSubmission(ref, input, text, attachments);
+  return id;
+}
+
+/**
+ * Reads the student's own submission, returning `null` when the read itself
+ * was refused rather than propagating the error.
+ *
+ * A first hand-in necessarily reads a document that does not exist yet, and a
+ * ruleset that dereferences the missing `resource` denies that read — which
+ * surfaced to students as "insufficient permissions" on an assignment they
+ * were perfectly entitled to submit. `firestore.rules` now allows a student to
+ * probe their own submission id whether or not the document exists; this stays
+ * defensive so a deployment running an older ruleset degrades to "let the
+ * write decide" instead of blocking hand-in entirely.
+ */
+async function readSubmissionSafely(ref: ReturnType<typeof doc>) {
+  try {
+    return await getDoc(ref);
+  } catch (error: any) {
+    console.warn("[Submissions] Submission pre-read unavailable:", error?.code || error);
+    return null;
+  }
+}
+
+/** Writes the full first-hand-in payload. Split out so it has exactly one caller shape. */
+async function createSubmission(
+  ref: ReturnType<typeof doc>,
+  input: SubmitInput,
+  text: string,
+  attachments: ClassroomAttachment[]
+): Promise<void> {
+  const { classwork, student } = input;
   const due = toDate(classwork.dueDate);
 
   await setDoc(
-    doc(db, SUBMISSIONS, id),
+    ref,
     stripUndefined({
       classroomId: classwork.classroomId,
       classworkId: classwork.id,
@@ -116,19 +186,21 @@ export async function submitClasswork(input: SubmitInput): Promise<string> {
       // let a teacher extending the deadline retroactively un-flag work that
       // genuinely arrived late — and vice versa.
       late: due ? Date.now() > due.getTime() : false,
-      submittedAt: existing.exists() ? existing.data()?.submittedAt || serverTimestamp() : serverTimestamp(),
+      submittedAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    }),
-    { merge: true }
+    })
   );
-
-  return id;
 }
 
 /** Withdraws a submission so the student can work on it again. */
 export async function unsubmitClasswork(classworkId: string, studentId: string): Promise<void> {
   const id = submissionId(classworkId, studentId);
-  const existing = await getDoc(doc(db, SUBMISSIONS, id));
+  const existing = await readSubmissionSafely(doc(db, SUBMISSIONS, id));
+  if (!existing) {
+    // Could not read it; the delete rule still checks ownership and status.
+    await deleteDoc(doc(db, SUBMISSIONS, id));
+    return;
+  }
   if (!existing.exists()) return;
   if (existing.data()?.status === "returned") {
     throw new Error("This submission has already been marked and can no longer be withdrawn.");
@@ -140,8 +212,8 @@ export async function getOwnSubmission(
   classworkId: string,
   studentId: string
 ): Promise<ClassworkSubmission | null> {
-  const snap = await getDoc(doc(db, SUBMISSIONS, submissionId(classworkId, studentId)));
-  return snap.exists() ? ({ ...snap.data(), id: snap.id } as ClassworkSubmission) : null;
+  const snap = await readSubmissionSafely(doc(db, SUBMISSIONS, submissionId(classworkId, studentId)));
+  return snap?.exists() ? ({ ...snap.data(), id: snap.id } as ClassworkSubmission) : null;
 }
 
 /** Live view of one student's own submission. */

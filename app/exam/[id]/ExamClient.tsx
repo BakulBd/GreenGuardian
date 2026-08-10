@@ -20,6 +20,7 @@ import {
   Monitor,
   TrendingDown,
   PauseCircle,
+  Paperclip,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
@@ -85,7 +86,9 @@ interface Exam {
   shuffleQuestions: boolean;
   showResults: boolean;
   passingScore: number;
+  /** Lets students attach answer sheets to an ONLINE-mode exam. */
   allowAnswerUpload?: boolean;
+  settings?: { fileUploadsAllowed?: boolean } & Record<string, any>;
   totalMarks: number;
   attemptsAllowed?: number;
 }
@@ -177,6 +180,9 @@ export default function ExamClient() {
   const [behaviorScore, setBehaviorScore] = useState(100);
   const [violationCounts, setViolationCounts] = useState<ViolationCounts>(initializeViolationCounts());
   const behaviorScoreRef = useRef(100);
+  // Authoritative violation tally. State drives the UI; this drives the
+  // arithmetic, so warnings raised in the same tick accumulate correctly.
+  const violationCountsRef = useRef<ViolationCounts>(initializeViolationCounts());
   const warningsRef = useRef(0);
 
   // Teacher-triggered suspend/resume (Task 3). While locked the exam is
@@ -276,6 +282,10 @@ export default function ExamClient() {
   useEffect(() => {
     warningsRef.current = warnings;
   }, [warnings]);
+
+  useEffect(() => {
+    violationCountsRef.current = violationCounts;
+  }, [violationCounts]);
 
   useEffect(() => {
     examLockedRef.current = examLocked;
@@ -558,7 +568,12 @@ export default function ExamClient() {
         behaviorScoreRef.current = openAttempt.behaviorScore;
       }
       if (openAttempt.violationCounts) {
-        setViolationCounts(openAttempt.violationCounts);
+        // Resuming an interrupted attempt must restore the tally the ref works
+        // from as well, or the next violation would restart the count from
+        // zero and hand the student a clean behaviour score.
+        const resumed = { ...initializeViolationCounts(), ...openAttempt.violationCounts };
+        setViolationCounts(resumed);
+        violationCountsRef.current = resumed;
       }
 
       return remainingSeconds;
@@ -642,34 +657,49 @@ export default function ExamClient() {
     // visibility/blur/detection events; none of them should count).
     if (submittedRef.current || examLockedRef.current) return;
 
-    setWarnings((prev) => {
-      // Don't exceed max warnings
-      if (prev >= maxWarnings) return prev;
-      
-      const newCount = prev + 1;
-      
-      // Track the violation type and update counts
-      const violationType = getViolationType(reason);
-      const nextViolationCounts = violationType
-        ? { ...violationCounts, [violationType]: violationCounts[violationType] + 1 }
-        : violationCounts;
-      const nextBehaviorScore = calculateBehaviorScore(nextViolationCounts);
-      
-      if (violationType) {
-        setViolationCounts((prevCounts) => {
-          const newCounts = { ...prevCounts, [violationType]: prevCounts[violationType] + 1 };
-          // Calculate new behavior score
-          const newScore = calculateBehaviorScore(newCounts);
-          setBehaviorScore(newScore);
-          return newCounts;
-        });
-      }
-      
-      // Queue the toast notification to be shown in useEffect
-      pendingWarningsRef.current.push({ count: newCount, reason });
+    // The counter is advanced HERE, from a ref, rather than inside a
+    // `setWarnings` updater.
+    //
+    // Everything below — the Firestore writes, the proctoring event, the
+    // screenshot capture — is a side effect, and React state updaters must be
+    // pure: with `reactStrictMode` on, React invokes an updater twice, which
+    // fired every one of these twice and logged two warnings, two proctoring
+    // events and two screenshots for a single violation. The ref is the
+    // authoritative count (it is also what the submit payload reads), so
+    // deriving the new value from it and then pushing it into state keeps the
+    // effects on a single, predictable path.
+    if (warningsRef.current >= maxWarnings) return;
 
-      // Log warning to Firestore (this is async, won't cause render issues)
-      if (sessionId && user) {
+    const newCount = warningsRef.current + 1;
+    warningsRef.current = newCount;
+    setWarnings(newCount);
+
+    // Track the violation type and update counts.
+    //
+    // Read from the ref, not from the `violationCounts` closure: two
+    // violations can fire in the same tick (a tab switch that also blurs the
+    // window), and the second would otherwise be computed from pre-render
+    // state and overwrite the first.
+    const violationType = getViolationType(reason);
+    const currentCounts = violationCountsRef.current;
+    const nextViolationCounts = violationType
+      ? { ...currentCounts, [violationType]: currentCounts[violationType] + 1 }
+      : currentCounts;
+    const nextBehaviorScore = calculateBehaviorScore(nextViolationCounts);
+
+    if (violationType) {
+      violationCountsRef.current = nextViolationCounts;
+      behaviorScoreRef.current = nextBehaviorScore;
+      setViolationCounts(nextViolationCounts);
+      setBehaviorScore(nextBehaviorScore);
+    }
+
+    // Queue the toast notification to be shown in useEffect
+    pendingWarningsRef.current.push({ count: newCount, reason });
+
+    // Log warning to Firestore (this is async, won't cause render issues)
+    if (sessionId && user) {
+      {
         addDoc(collection(db, "examLogs"), {
           sessionId,
           studentId: user.id, // Required for Firestore rules
@@ -699,7 +729,7 @@ export default function ExamClient() {
           ...(exam?.id ? { examId: exam.id } : {}),
         }).catch((err) => console.error("Failed to log proctoring event:", err));
 
-const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
+        const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
         if (screenshot && exam?.id) {
           sendProctoringSnapshot({
             sessionId,
@@ -720,9 +750,10 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
           }).catch((err) => console.error("Failed to store warning snapshot:", err));
         }
 
-// Capture and store a permanent high-resolution warning screenshot
-        // Each warning gets its own unique screenshot (never overwritten)
-        const violationTypeStr = violationType || "other";
+        // Capture and store a permanent high-resolution warning screenshot.
+        // Each warning gets its own screenshot (never overwritten), and the
+        // upload falls back to an inline image if object storage is briefly
+        // unreachable, so a warning always leaves evidence behind.
         const warningType = mapViolationToEventType(violationType);
         if (exam) {
           captureAndUploadWarningScreenshot(
@@ -737,9 +768,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
           ).catch((err) => console.error("Failed to capture warning screenshot:", err));
         }
       }
-
-      return newCount;
-    });
+    }
   }, [sessionId, user, maxWarnings, violationCounts, exam]);
 
   // Effect to show toast notifications for warnings (avoids setState during render)
@@ -1317,7 +1346,9 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
                 sessionId,
                 ...(exam.examMode === "upload"
                   ? { answerFiles }
-                  : { answers }),
+                  // Online mode always sends the typed answers, plus any
+                  // attachments when the teacher allowed them.
+                  : { answers, ...(answerFiles.length > 0 ? { answerFiles } : {}) }),
                 behaviorScore,
                 warnings,
                 violationCounts,
@@ -1336,7 +1367,7 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
       // Kept client-initiated (the AI call is slow and the student should not
       // wait on it), but both the OCR endpoint and the similarity check are
       // server-side and authenticated.
-      if (answerId && exam.examMode === "upload" && answerFiles.length > 0) {
+      if (answerId && answerFiles.length > 0) {
         (async () => {
           try {
             const analysis = await analyzeSubmittedAnswer(answerFiles);
@@ -1844,6 +1875,10 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
   // Check for valid exam content
   const isOnlineMode = exam.examMode === "online" || !exam.examMode;
   const isUploadMode = exam.examMode === "upload";
+  // `settings.fileUploadsAllowed` is the older name for the same intent and is
+  // still what the edit screens write, so both are honoured.
+  const allowAnswerAttachments =
+    isOnlineMode && (exam.allowAnswerUpload === true || exam.settings?.fileUploadsAllowed === true);
 
   if (isOnlineMode && (!exam.questions || exam.questions.length === 0)) {
     return (
@@ -2266,6 +2301,43 @@ const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
               </p>
             </CardContent>
           </Card>
+
+          {/* Optional answer attachments.
+              Only rendered when the teacher enabled `allowAnswerUpload` on the
+              exam. Real written papers are rarely purely typed — a derivation,
+              a diagram or a worked proof is done on paper and photographed —
+              and without this an online-mode exam had no way to accept one.
+              The files sit ALONGSIDE the typed answers: auto-grading still
+              scores the typed answers from the answer key, and the attachments
+              go to the teacher (and the OCR pass) for manual evaluation. */}
+          {allowAnswerAttachments && (
+            <Card className="bg-gray-800 border-gray-700 mt-4">
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm text-white flex items-center gap-2">
+                  <Paperclip className="h-4 w-4" />
+                  Attach answer sheets
+                </CardTitle>
+                <CardDescription className="text-xs text-gray-400">
+                  Optional. Upload a PDF or photo of handwritten work — your typed answers are still submitted.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <FileUpload
+                  basePath={`answers/${exam.id}/${sessionId}`}
+                  onUploadComplete={(files) => setAnswerFiles(files)}
+                  maxFiles={10}
+                  allowedTypes={ANSWER_ALLOWED_TYPES}
+                  accept=".pdf,.jpg,.jpeg,.png,.webp"
+                  className="[&_*]:text-gray-300 [&_.border-dashed]:border-gray-600"
+                />
+                {answerFiles.length > 0 && (
+                  <p className="text-xs text-green-400 mt-2">
+                    {answerFiles.length} file{answerFiles.length === 1 ? "" : "s"} attached
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
         </div>
 
         {/* Question */}

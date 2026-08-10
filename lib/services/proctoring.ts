@@ -665,12 +665,43 @@ export interface WarningScreenshot {
 }
 
 /**
- * Capture a high-resolution screenshot from the video element,
- * upload it to Firebase Storage, and save metadata in Firestore.
+ * Waits (briefly) for the webcam element to have a frame worth capturing.
+ *
+ * A warning very often fires at the exact moment the camera is least ready —
+ * the student switched tabs, the window lost focus, the stream was
+ * re-attached — and `readyState` can be below HAVE_CURRENT_DATA for a few
+ * hundred milliseconds afterwards. The old code gave up immediately in that
+ * window, which is why warnings raised on tab-switch and focus-loss (the two
+ * most common violations by far) produced no screenshot at all.
+ */
+async function waitForVideoFrame(
+  videoElement: HTMLVideoElement,
+  timeoutMs = 1500
+): Promise<boolean> {
+  const isReady = () =>
+    videoElement.readyState >= 2 && videoElement.videoWidth > 0 && videoElement.videoHeight > 0;
+
+  if (isReady()) return true;
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (isReady()) return true;
+  }
+  return false;
+}
+
+/**
+ * Capture a high-resolution screenshot from the video element, upload it to
+ * object storage, and save the metadata in Firestore.
  * Returns the WarningScreenshot document data or null on failure.
- * 
- * Each warning gets its own unique screenshot (never overwritten)
- * because the filename uses a unique timestamp.
+ *
+ * Each warning gets its own unique screenshot (never overwritten) because the
+ * filename uses a unique timestamp plus a random suffix.
+ *
+ * The Firestore record is written even when the image could not be uploaded —
+ * it falls back to an inline base64 image. Proctoring evidence that a warning
+ * OCCURRED must not be lost because storage had a bad moment.
  */
 export async function captureAndUploadWarningScreenshot(
   videoElement: HTMLVideoElement | null,
@@ -683,8 +714,13 @@ export async function captureAndUploadWarningScreenshot(
   warningMessage: string
 ): Promise<WarningScreenshot | null> {
   try {
-    if (!videoElement || (videoElement.readyState < 1 && !videoElement.videoWidth)) {
-      console.warn("Video element not ready for screenshot capture");
+    if (!videoElement) {
+      console.warn("[Proctoring] No video element available for screenshot capture");
+      return null;
+    }
+
+    if (!(await waitForVideoFrame(videoElement))) {
+      console.warn("[Proctoring] Video had no decodable frame within the capture window");
       return null;
     }
 
@@ -711,14 +747,24 @@ export async function captureAndUploadWarningScreenshot(
       width = targetHeight * aspectRatio;
     }
     
-    canvas.width = width;
-    canvas.height = height;
-    
-    ctx.drawImage(videoElement, 0, 0, width, height);
-    
+    // Rounded: a fractional canvas dimension is silently truncated by the
+    // browser, which shifts the drawn frame by up to a pixel and makes the
+    // captured aspect ratio disagree with the source.
+    canvas.width = Math.round(width);
+    canvas.height = Math.round(height);
+
+    ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
     // Convert to JPEG with good quality
     const base64Data = canvas.toDataURL('image/jpeg', 0.8);
-    
+
+    // A blank capture is worse than none: it looks like evidence and shows
+    // nothing. `toDataURL` on an empty canvas returns a very short string.
+    if (!base64Data || base64Data.length < 1000) {
+      console.warn("[Proctoring] Captured frame was empty; skipping this screenshot");
+      return null;
+    }
+
     // Generate unique filename using timestamp and random suffix
     const timestamp = Date.now();
     const randomSuffix = Math.random().toString(36).substring(2, 8);

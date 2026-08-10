@@ -33,6 +33,7 @@ import { getSimilarityLevel, getSimilarityColor, performSimilarityCheck } from "
 import { analyzeSubmittedAnswer } from "@/lib/utils/ai-client";
 import { formatDate } from "@/lib/utils/helpers";
 import { getQuestionsByExam, getExamsByTeacher, getAnswersByTeacher } from "@/lib/firebase/exams";
+import ManualEvaluationPanel from "@/components/ManualEvaluationPanel";
 import { Exam } from "@/lib/types";
 
 interface Answer {
@@ -965,6 +966,49 @@ function AnswerReviewContent() {
                     </p>
                   </div>
                 </div>
+
+                {/* Manual evaluation.
+                    Placed above the tabs because for an upload-mode script it
+                    is the ONLY thing that produces a mark — auto-grading has
+                    no answer key to work from there, so without this the
+                    student stays at 0 forever. */}
+                <ManualEvaluationPanel
+                  answer={selectedAnswer as any}
+                  questionContext={
+                    exam
+                      ? `Exam: ${exam.title}. ${exam.description || ""} Total marks: ${
+                          selectedAnswer.grading?.totalMarks ?? selectedAnswer.totalMarks ?? exam.totalMarks ?? 100
+                        }.`
+                      : undefined
+                  }
+                  onEvaluated={(result) => {
+                    // Reflect the new mark immediately in both the open modal
+                    // and the list behind it, rather than making the teacher
+                    // reload to see the mark they just entered.
+                    const patch = {
+                      score: result.marks,
+                      totalMarks: result.totalMarks,
+                      accuracy: result.accuracy,
+                      teacherFeedback: result.feedback,
+                      grading: {
+                        ...(selectedAnswer.grading || ({} as any)),
+                        obtainedMarks: result.marks,
+                        totalMarks: result.totalMarks,
+                        accuracy: result.accuracy,
+                      },
+                      evaluation: {
+                        marks: result.marks,
+                        feedback: result.feedback,
+                        evaluatedByName: result.evaluatedByName,
+                        method: "manual",
+                      },
+                    };
+                    setSelectedAnswer((prev) => (prev ? ({ ...prev, ...patch } as any) : prev));
+                    setAnswers((prev) =>
+                      prev.map((item) => (item.id === selectedAnswer.id ? ({ ...item, ...patch } as any) : item))
+                    );
+                  }}
+                />
 
                 {/* Tabs for Overview, Answers, OCR Analysis, and Plagiarism Check */}
                 <Tabs defaultValue="ocr" className="w-full">

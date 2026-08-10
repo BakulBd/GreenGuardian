@@ -586,6 +586,23 @@ export default function CreateExamPage() {
                 onCheckedChange={(checked) => setExamData({ ...examData, showResults: checked })}
               />
             </div>
+            {/* Upload-mode exams are answered entirely by file, so the toggle
+                only means something for an online question paper. */}
+            {examMode === "online" && (
+              <div className="flex items-center justify-between py-2">
+                <div>
+                  <Label>Allow Answer File Uploads</Label>
+                  <p className="text-sm text-gray-500">
+                    Let students attach a PDF or photo of handwritten work alongside their typed
+                    answers — for derivations, diagrams and worked proofs.
+                  </p>
+                </div>
+                <Switch
+                  checked={examData.allowAnswerUpload}
+                  onCheckedChange={(checked) => setExamData({ ...examData, allowAnswerUpload: checked })}
+                />
+              </div>
+            )}
           </CardContent>
         </Card>
 

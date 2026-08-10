@@ -94,6 +94,11 @@ export default function AdminExamEditClient() {
         duration: examData.duration,
         totalMarks: examData.totalMarks,
         settings: examData.settings,
+        // Normalised from either the top-level field or the older
+        // `settings.fileUploadsAllowed`, so an exam created before the toggle
+        // existed still shows its real state here.
+        allowAnswerUpload:
+          examData.allowAnswerUpload === true || examData.settings?.fileUploadsAllowed === true,
         teacherId: examData.teacherId,
         courseId: examData.courseId,
         batchId: examData.batchId,
@@ -386,6 +391,24 @@ export default function AdminExamEditClient() {
             <div className="flex items-center justify-between">
               <div><Label>Show Results</Label></div>
               <Switch checked={editedExam.settings?.showResults || false} onCheckedChange={(c) => setEditedExam({ ...editedExam, settings: { ...defaultSettings, ...editedExam.settings, showResults: c } })} />
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <Label>Allow Answer File Uploads</Label>
+                <p className="text-sm text-gray-500">
+                  Students may attach a PDF or photo of handwritten work to an online exam.
+                </p>
+              </div>
+              <Switch
+                checked={editedExam.allowAnswerUpload === true}
+                onCheckedChange={(c) =>
+                  setEditedExam({
+                    ...editedExam,
+                    allowAnswerUpload: c,
+                    settings: { ...defaultSettings, ...editedExam.settings, fileUploadsAllowed: c },
+                  })
+                }
+              />
             </div>
           </CardContent>
         </Card>

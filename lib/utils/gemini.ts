@@ -5,6 +5,7 @@
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { readFileReference } from "@/lib/storage/read-object";
 
 const GEMINI_MODELS = [
   "gemini-2.5-flash",
@@ -71,35 +72,22 @@ export async function fileToBase64(file: File): Promise<string> {
 }
 
 /**
- * Convert a URL to base64 format
+ * Convert a stored file reference to base64 for the model.
+ *
+ * Delegates to `readFileReference`, which knows the three shapes an attachment
+ * URL can take in this project. A plain `fetch(url)` is NOT sufficient and was
+ * the thing that would have silently broken every OCR run after the move to
+ * Backblaze B2: attachment links are now app-relative
+ * (`/api/storage/download?key=…`) so that they work in `<img src>`, and Node's
+ * fetch rejects a relative URL outright. Reading the private bucket directly
+ * also removes a whole HTTP round trip per file, which matters when a
+ * submission carries ten pages.
+ *
+ * This module runs only inside `/api/ocr` (it holds the Gemini key), so
+ * importing the server-only storage reader here is safe.
  */
 export async function urlToBase64(url: string): Promise<{ base64: string; mimeType: string }> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch file from URL: ${response.statusText}`);
-  }
-
-  // NOTE: this runs inside the /api/ocr route handler, i.e. in Node — the
-  // previous FileReader implementation was browser-only and threw there.
-  const arrayBuffer = await response.arrayBuffer();
-  const bytes = new Uint8Array(arrayBuffer);
-
-  let base64: string;
-  if (typeof Buffer !== "undefined") {
-    base64 = Buffer.from(bytes).toString("base64");
-  } else {
-    let binary = "";
-    const chunkSize = 0x8000; // avoid "too many arguments" on large files
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-    }
-    base64 = btoa(binary);
-  }
-
-  const contentType = (response.headers.get("content-type") || "").split(";")[0].trim();
-  const mimeType =
-    contentType || (url.toLowerCase().includes(".pdf") ? "application/pdf" : "image/png");
-
+  const { base64, mimeType } = await readFileReference(url);
   return { base64, mimeType };
 }
 

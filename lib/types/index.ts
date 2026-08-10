@@ -142,6 +142,14 @@ export interface Exam {
   sectionId?: string;
   section?: string;
   examMode?: string;
+  /**
+   * Lets students attach answer files (PDF/photo) to an ONLINE-mode exam,
+   * alongside their typed answers — handwritten derivations, diagrams, worked
+   * proofs. Upload-mode exams are answered by file and set this implicitly.
+   * `settings.fileUploadsAllowed` is the older name for the same intent and is
+   * kept in sync by the edit screens.
+   */
+  allowAnswerUpload?: boolean;
   questions?: Question[];
   // How many times a student may submit this exam. Missing/undefined == 1.
   attemptsAllowed?: number;
