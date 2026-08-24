@@ -25,10 +25,16 @@
  * means the request passed the route's own auth check. The link signature is
  * not re-verified for case 1 — the server is reading its own bucket on behalf
  * of an already-authorised user, not honouring a capability URL.
+ *
+ * A route whose reference came from the BROWSER must therefore put it through
+ * `checkClientFileReference` first, which narrows the accepted shapes and does
+ * verify the signature. `readFileReference` on its own would happily resolve a
+ * bare object key a caller made up.
  */
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { getB2Client, getB2BucketName, isB2Configured } from "./b2";
 import { normalizeStorageKey } from "./policy";
+import { verifySignedStorageUrl } from "./signing";
 
 export interface ObjectBytes {
   base64: string;
@@ -49,12 +55,19 @@ function guessMimeFromKey(key: string): string {
   return "application/octet-stream";
 }
 
+interface StorageLinkParts {
+  key: string;
+  exp: string | null;
+  sig: string | null;
+}
+
 /**
- * Extracts the object key from an app storage link, or `null` when the URL is
- * not one. Accepts the relative form and an absolute form carrying the same
- * path, since a link may have been stored with an origin prefix.
+ * Splits an app storage link into its key and signature parameters, or `null`
+ * when the URL is not one. Accepts the relative form and an absolute form
+ * carrying the same path, since a link may have been stored with an origin
+ * prefix.
  */
-export function storageKeyFromUrl(url: string): string | null {
+function parseStorageLink(url: string): StorageLinkParts | null {
   if (!url) return null;
 
   const marker = "/api/storage/download";
@@ -64,11 +77,83 @@ export function storageKeyFromUrl(url: string): string | null {
   const queryStart = url.indexOf("?", index);
   if (queryStart === -1) return null;
 
-  const key = new URLSearchParams(url.slice(queryStart + 1)).get("key");
-  if (!key) return null;
+  const params = new URLSearchParams(url.slice(queryStart + 1));
+  const normalized = normalizeStorageKey(params.get("key"));
+  if (!normalized.ok) return null;
 
-  const normalized = normalizeStorageKey(key);
-  return normalized.ok ? normalized.key : null;
+  return { key: normalized.key, exp: params.get("exp"), sig: params.get("sig") };
+}
+
+/**
+ * Extracts the object key from an app storage link, or `null` when the URL is
+ * not one.
+ */
+export function storageKeyFromUrl(url: string): string | null {
+  return parseStorageLink(url)?.key ?? null;
+}
+
+export type ReferenceCheck = { ok: true } | { ok: false; error: string };
+
+/**
+ * Whether a file reference supplied by a BROWSER caller may be resolved.
+ *
+ * `readFileReference` accepts more shapes than a client should be allowed to
+ * name — in particular a bare object key, which exists so server-side callers
+ * can pass a stored `path` directly. Handing that to the browser would turn any
+ * route that resolves a reference into a way to read arbitrary bucket objects
+ * by guessing keys, so client input is narrowed here to the three shapes the
+ * upload layer actually persists:
+ *
+ *   - `data:` URLs, from the inline upload fallback (the bytes are already in
+ *     the caller's hand, so there is nothing to authorise);
+ *   - `/api/storage/download?key=…&exp=…&sig=…` links, whose HMAC is verified
+ *     exactly as `/api/storage/download` verifies it — holding a link grants
+ *     that one object and nothing else;
+ *   - absolute `https://…` URLs, i.e. legacy Firebase Storage links stored
+ *     before the migration.
+ *
+ * A relative app link is NOT an http(s) URL and must not be rejected for that:
+ * every attachment uploaded since the move to B2 is stored in exactly that
+ * form (see `createSignedStorageUrl`), and `readFileReference` reads it out of
+ * the bucket directly.
+ */
+export function checkClientFileReference(reference: unknown): ReferenceCheck {
+  if (typeof reference !== "string" || !reference.trim()) {
+    return { ok: false, error: "A file reference is required." };
+  }
+
+  const url = reference.trim();
+
+  if (url.startsWith("data:")) return { ok: true };
+
+  const link = parseStorageLink(url);
+  if (link) {
+    let signature;
+    try {
+      signature = verifySignedStorageUrl(link.key, link.exp, link.sig);
+    } catch (error: any) {
+      // Only reachable when the deployment has no signing secret at all, in
+      // which case no stored link works anywhere — say so rather than blaming
+      // the file.
+      return {
+        ok: false,
+        error: error?.message || "Storage links cannot be verified on this deployment.",
+      };
+    }
+
+    if (signature.valid) return { ok: true };
+    if (signature.reason === "expired") {
+      return { ok: false, error: "This file link has expired. Reload the page and try again." };
+    }
+    return { ok: false, error: "This file link is not valid." };
+  }
+
+  if (/^https?:\/\//i.test(url)) return { ok: true };
+
+  return {
+    ok: false,
+    error: "File references must be a stored attachment link, a data URL, or an http(s) URL.",
+  };
 }
 
 function decodeDataUrl(url: string): ObjectBytes {

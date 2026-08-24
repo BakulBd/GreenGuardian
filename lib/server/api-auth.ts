@@ -66,6 +66,23 @@ export function tokenVerificationErrorResponse(err: any): NextResponse {
   }
 
   console.error("[api-auth] Token verification failed for a reason other than the user's session:", err);
+
+  // A credential the Admin SDK cannot load is a permanent misconfiguration,
+  // not a blip: "try again shortly" is wrong advice and sends whoever is
+  // debugging it back round the same loop. Say what actually needs fixing.
+  const isCredentialProblem =
+    code === "app/invalid-credential" ||
+    code === "app/invalid-app-options" ||
+    /Firebase Admin SDK (could not use|has no usable)/.test(String(err?.message || ""));
+
+  if (isCredentialProblem) {
+    return jsonError(
+      "Server authentication is misconfigured: the Firebase service-account credential could not be loaded. " +
+        "Signing in again will not help — an administrator needs to check FIREBASE_SERVICE_ACCOUNT on this deployment.",
+      503
+    );
+  }
+
   return jsonError(
     "Server authentication is temporarily unavailable. This is not a problem with your session — please try again shortly.",
     503

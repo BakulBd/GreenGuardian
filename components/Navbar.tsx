@@ -59,7 +59,7 @@ function Navbar() {
     }
   };
 
-  /** True only where `#features` / `#how-it-works` actually exist (app/page.tsx). */
+  /** True only where `#features` / `#how-it-works` / `#developers` actually exist (app/page.tsx). */
   const onLandingPage = pathname === "/";
 
   /**
@@ -140,6 +140,7 @@ function Navbar() {
               <>
                 <NavLink href={anchorHref("features")} active={false} onClick={(e) => scrollToSection(e, "features")}>Features</NavLink>
                 <NavLink href={anchorHref("how-it-works")} active={false} onClick={(e) => scrollToSection(e, "how-it-works")}>How It Works</NavLink>
+                <NavLink href={anchorHref("developers")} active={false} onClick={(e) => scrollToSection(e, "developers")}>Developers</NavLink>
               </>
             )}
           </nav>
@@ -303,6 +304,9 @@ function Navbar() {
                     </MobileNavLink>
                     <MobileNavLink href={anchorHref("how-it-works")} onClick={(e) => scrollToSection(e, "how-it-works")}>
                       How It Works
+                    </MobileNavLink>
+                    <MobileNavLink href={anchorHref("developers")} onClick={(e) => scrollToSection(e, "developers")}>
+                      Developers
                     </MobileNavLink>
                   </>
                 )}

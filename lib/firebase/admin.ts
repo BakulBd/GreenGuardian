@@ -88,33 +88,104 @@ function missingCredentialSources(): string[] {
   return missing;
 }
 
+/**
+ * Explains why a service-account object was rejected, in terms of what is
+ * actually wrong with it.
+ *
+ * `cert()` reports an unusable key as "Failed to parse private key: Invalid PEM
+ * formatted message", which says nothing about WHICH credential source is at
+ * fault or what to do. The two failures that account for nearly all of these
+ * are a `private_key` still holding the placeholder from a template, and one
+ * whose newlines were flattened when it was pasted into an env file — both are
+ * recognisable from the value's shape, so name them.
+ */
+export function describeServiceAccountProblem(source: string, parsed: any, err: unknown): string {
+  const detail = (err as any)?.message || String(err);
+  const key = typeof parsed?.private_key === "string" ? parsed.private_key : "";
+
+  if (!key) {
+    return `${source} has no "private_key" field.`;
+  }
+  if (!key.includes("-----BEGIN")) {
+    return `${source} has a "private_key" that is not a PEM block (it must start with -----BEGIN PRIVATE KEY-----).`;
+  }
+
+  const body = key
+    .replace(/-----[^-]*-----/g, "")
+    .replace(/\s/g, "");
+
+  // A real RSA service-account key is ~1600 base64 characters. Anything this
+  // short is a placeholder, not a truncated key.
+  if (body.length < 100 || !/^[A-Za-z0-9+/=]*$/.test(body)) {
+    return (
+      `${source} has a placeholder "private_key", not a real one ` +
+      `(${body.length} characters between the PEM header and footer). ` +
+      `Download a key from Firebase Console > Project Settings > Service accounts > ` +
+      `Generate new private key, and paste the whole JSON as a single line.`
+    );
+  }
+  if (!key.includes("\n")) {
+    return (
+      `${source} has a "private_key" with no line breaks. When the JSON is stored in ` +
+      `an env file the newlines must survive as \\n escapes inside the JSON string.`
+    );
+  }
+
+  return `${source} holds a service account that could not be loaded: ${detail}`;
+}
+
 function resolveCredential(): { projectId?: string; credential: any } {
   const projectId = fallbackProjectId();
+
+  // Why each supplied source was unusable, so the final error can say so.
+  // Sources still fall through to the next one (a broken env var alongside a
+  // working key file should keep working), but the reason is no longer lost.
+  const problems: string[] = [];
 
   // 1. Inline JSON service account.
   const saJson = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (saJson) {
+    let parsed: any = null;
     try {
-      const parsed = JSON.parse(saJson);
-      return {
-        projectId: parsed.project_id || projectId,
-        credential: cert(parsed),
-      };
-    } catch (err) {
-      console.warn("[firebase-admin] Failed to parse FIREBASE_SERVICE_ACCOUNT as JSON:", err);
+      parsed = JSON.parse(saJson);
+    } catch (err: any) {
+      problems.push(`FIREBASE_SERVICE_ACCOUNT is not valid JSON: ${err?.message || err}`);
+    }
+
+    if (parsed) {
+      try {
+        return {
+          projectId: parsed.project_id || projectId,
+          credential: cert(parsed),
+        };
+      } catch (err) {
+        // Separated from the JSON parse above on purpose: the old code caught
+        // both here and blamed "Failed to parse ... as JSON", which sent people
+        // looking at the wrong thing entirely.
+        problems.push(describeServiceAccountProblem("FIREBASE_SERVICE_ACCOUNT", parsed, err));
+      }
     }
   }
 
   // 2. Local service account file.
   if (hasServiceAccountFile()) {
+    const filePath = serviceAccountFilePath();
+    let parsed: any = null;
     try {
-      const parsed = JSON.parse(fs.readFileSync(serviceAccountFilePath(), "utf8"));
-      return {
-        projectId: parsed.project_id || projectId,
-        credential: cert(parsed),
-      };
-    } catch (err) {
-      console.warn("[firebase-admin] Failed to read service account file:", err);
+      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    } catch (err: any) {
+      problems.push(`${filePath} could not be read as JSON: ${err?.message || err}`);
+    }
+
+    if (parsed) {
+      try {
+        return {
+          projectId: parsed.project_id || projectId,
+          credential: cert(parsed),
+        };
+      } catch (err) {
+        problems.push(describeServiceAccountProblem(filePath, parsed, err));
+      }
     }
   }
 
@@ -123,8 +194,17 @@ function resolveCredential(): { projectId?: string; credential: any } {
     return { projectId, credential: applicationDefault() };
   }
 
-  // At this point no usable source was found — caller is expected to have
-  // checked `missingCredentialSources()` first and thrown a clear error.
+  // A credential WAS supplied but none of them worked. Saying "no credentials
+  // configured" here would be false and is what makes this failure so slow to
+  // diagnose — report what was actually wrong with each one.
+  if (problems.length > 0) {
+    const msg =
+      "Firebase Admin SDK could not use any of the credentials it was given:\n" +
+      problems.map((p) => `  - ${p}`).join("\n");
+    console.error("[firebase-admin] " + msg);
+    throw new Error(msg);
+  }
+
   throw new Error(
     "Firebase Admin SDK has no usable credentials configured. Configure FIREBASE_SERVICE_ACCOUNT, serviceAccountKey.json, or GOOGLE_APPLICATION_CREDENTIALS, or run the emulator."
   );

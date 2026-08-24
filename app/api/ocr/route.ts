@@ -7,7 +7,8 @@ import {
   analyzeAnswerQuality,
   extractQuestionsFromPaper,
 } from "@/lib/utils/gemini";
-import { getAdminAuth, getAdminDb, isAdminSdkConfigured } from "@/lib/firebase/admin";
+import { requireAuthedUser } from "@/lib/server/api-auth";
+import { checkClientFileReference } from "@/lib/storage/read-object";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 /** Longest text we will forward to the model (protects quota and latency). */
@@ -18,79 +19,29 @@ const MAX_FILES = 10;
 const RATE_LIMIT_MAX = 20;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
-/**
- * Authenticate the caller with their Firebase ID token.
- *
- * Without this the endpoint is an open proxy to the project's paid Gemini
- * quota — anyone could POST to it and spend the owner's credits.
- */
-async function requireUser(
-  req: NextRequest
-): Promise<{ uid: string } | NextResponse> {
-  const header = req.headers.get("authorization") || "";
-  const token = header.toLowerCase().startsWith("bearer ")
-    ? header.slice(7).trim()
-    : "";
-
-  if (!token) {
-    return NextResponse.json(
-      { success: false, error: "Authentication required." },
-      { status: 401 }
-    );
-  }
-
-  if (!isAdminSdkConfigured()) {
-    // Fail closed: without the Admin SDK we cannot verify who is calling.
-    return NextResponse.json(
-      {
-        success: false,
-        error:
-          "Server auth is not configured. Set FIREBASE_SERVICE_ACCOUNT so AI requests can be verified.",
-      },
-      { status: 503 }
-    );
-  }
-
-  try {
-    const decoded = await getAdminAuth().verifyIdToken(token);
-
-    // Accounts an admin has put on hold or suspended may not call billable
-    // AI endpoints even with an otherwise-valid session token.
-    const userSnap = await getAdminDb().collection("users").doc(decoded.uid).get();
-    const status = userSnap.exists ? userSnap.data()?.status : undefined;
-    if (status === "hold" || status === "suspended") {
-      return NextResponse.json(
-        { success: false, error: "Your account access has been restricted. Please contact an administrator." },
-        { status: 403 }
-      );
-    }
-
-    return { uid: decoded.uid };
-  } catch {
-    return NextResponse.json(
-      { success: false, error: "Invalid or expired session. Please sign in again." },
-      { status: 401 }
-    );
-  }
-}
-
-function isHttpUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "https:" || parsed.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
 export async function POST(req: NextRequest) {
   try {
-    const authResult = await requireUser(req);
-    if (authResult instanceof NextResponse) return authResult;
+    // Authentication is delegated to the shared helper every other privileged
+    // route uses, rather than the hand-rolled copy that used to live here.
+    //
+    // That copy wrapped BOTH `verifyIdToken` and the `users/{uid}` lookup in a
+    // bare `catch {}` and answered every failure with
+    // "Invalid or expired session. Please sign in again." (401). So a server-side
+    // fault — an unusable FIREBASE_SERVICE_ACCOUNT, Firestore being unreachable —
+    // was reported as the caller's session being bad, with the real error
+    // swallowed and never logged. `requireAuthedUser` separates the two: a bad
+    // token is still 401, anything else is 503 with the cause logged
+    // server-side (see `tokenVerificationErrorResponse`).
+    //
+    // It also keeps the checks this endpoint needs: it is an open proxy to the
+    // project's paid Gemini quota without them, and accounts on hold/suspended
+    // are refused. No role filter — students trigger the OCR pass on their own
+    // submission at submit time, teachers from the answers dashboard.
+    const auth = await requireAuthedUser(req);
+    if (auth instanceof NextResponse) return auth;
 
     const rate = checkRateLimit(
-      `ocr:${authResult.uid}:${getClientIp(req)}`,
+      `ocr:${auth.uid}:${getClientIp(req)}`,
       RATE_LIMIT_MAX,
       RATE_LIMIT_WINDOW_MS
     );
@@ -114,18 +65,23 @@ export async function POST(req: NextRequest) {
       any
     >;
 
-    // Only fetch remote documents from real http(s) URLs — never file:// or
-    // arbitrary strings that could be coerced into a local read.
+    // Validate every reference against the shapes the upload layer actually
+    // persists. This must NOT be an "absolute http(s) only" test: since the
+    // move to Backblaze B2 an attachment is stored as the relative signed link
+    // `/api/storage/download?key=…&exp=…&sig=…` (see `createSignedStorageUrl`),
+    // which is what `readFileReference` — and therefore the whole OCR/Gemini
+    // path — is built to read. Rejecting it here was what turned every
+    // "Run OCR" and "Extract Questions" click into a 400.
     const requestedUrls: string[] = Array.isArray(fileUrls)
       ? fileUrls
       : fileUrl
       ? [fileUrl]
       : [];
-    if (requestedUrls.length > 0 && !requestedUrls.every(isHttpUrl)) {
-      return NextResponse.json(
-        { success: false, error: "File URLs must be valid http(s) URLs." },
-        { status: 400 }
-      );
+    for (const reference of requestedUrls) {
+      const check = checkClientFileReference(reference);
+      if (!check.ok) {
+        return NextResponse.json({ success: false, error: check.error }, { status: 400 });
+      }
     }
     if (requestedUrls.length > MAX_FILES) {
       return NextResponse.json(

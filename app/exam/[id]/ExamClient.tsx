@@ -58,6 +58,7 @@ import CameraPermission from "@/components/CameraPermission";
 import FileUpload from "@/components/FileUpload";
 import { UploadResult, ANSWER_ALLOWED_TYPES } from "@/lib/storage/constants";
 import { captureVideoFrame, sendProctoringSnapshot, captureAndUploadWarningScreenshot, analyzeFrameLightingAndCoverage } from "@/lib/services/proctoring";
+import { createSerialQueue } from "@/lib/utils/serial-queue";
 import { isOptionBasedQuestion } from "@/lib/utils/questionTypes";
 
 interface Question {
@@ -185,6 +186,19 @@ export default function ExamClient() {
   const violationCountsRef = useRef<ViolationCounts>(initializeViolationCounts());
   const warningsRef = useRef(0);
 
+  // Mirrors of the three values `addWarning` and the detection timers need.
+  //
+  // They exist because `startFaceDetection()` is called from `startExam()` in
+  // the SAME tick as `setSessionId(sessionRef.id)`, so the callbacks the
+  // detection interval closes over still see `sessionId === null` — React has
+  // not re-rendered yet. Every warning the detection loop raised therefore hit
+  // `if (sessionId && user)` and skipped its Firestore log, its proctoring
+  // event AND both snapshots, which is why far fewer screenshots existed than
+  // warnings. Refs are written synchronously, so they are correct immediately.
+  const sessionIdRef = useRef<string | null>(null);
+  const examRef = useRef<Exam | null>(null);
+  const modelLoadedRef = useRef(false);
+
   // Teacher-triggered suspend/resume (Task 3). While locked the exam is
   // frozen: timer stops, inputs are hidden, and violations are ignored so a
   // frozen tab cannot trigger an auto-submit.
@@ -282,6 +296,18 @@ export default function ExamClient() {
   useEffect(() => {
     warningsRef.current = warnings;
   }, [warnings]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    examRef.current = exam;
+  }, [exam]);
+
+  useEffect(() => {
+    modelLoadedRef.current = modelLoaded;
+  }, [modelLoaded]);
 
   useEffect(() => {
     violationCountsRef.current = violationCounts;
@@ -555,6 +581,7 @@ export default function ExamClient() {
 
       setResumeSessionId(openAttempt.id);
       setSessionId(openAttempt.id);
+      sessionIdRef.current = openAttempt.id;
       setNextAttemptNumber(openAttempt.attemptNumber || finishedCount + 1);
       if (openAttempt.savedAnswers && typeof openAttempt.savedAnswers === "object") {
         setAnswers(openAttempt.savedAnswers);
@@ -620,6 +647,7 @@ export default function ExamClient() {
       }
 
       setExam(examData);
+      examRef.current = examData;
 
       // Resume an interrupted attempt (refresh, crash, connection drop) with the
       // time that is actually left, instead of silently granting a fresh clock.
@@ -650,6 +678,31 @@ export default function ExamClient() {
   // Queue for pending warnings to avoid setState during render
   const pendingWarningsRef = useRef<{ count: number; reason: string }[]>([]);
   const submittedRef = useRef(false); // Track if exam already submitted
+
+  /**
+   * One capture job per warning, drained one at a time.
+   *
+   * `addWarning` enqueues exactly once per genuine warning and the worker runs
+   * the EXISTING `captureAndUploadWarningScreenshot` for each job, so the
+   * number of attempts always equals the number of warnings — five warnings
+   * raise five captures, however close together they land.
+   *
+   * Serial rather than parallel: two violations can fire in the same tick (a
+   * tab switch that also blurs the window) and each capture draws from the one
+   * shared `<video>` element and then uploads. Running them in lockstep keeps
+   * the frames distinct and stops a burst from opening several uploads at once.
+   *
+   * Failures are isolated per job, so a capture that finds no decodable frame,
+   * or an upload that fails, costs that one screenshot and never the ones
+   * queued behind it. Held in a ref because warnings arrive faster than React
+   * re-renders — nothing here may depend on a state update landing first.
+   * Semantics are pinned down in tests/serial-queue.test.ts.
+   */
+  const warningSnapshotQueueRef = useRef(
+    createSerialQueue((error) =>
+      console.error("Failed to capture warning screenshot:", error)
+    )
+  );
 
   const addWarning = useCallback((reason: string) => {
     // Don't add more warnings if exam was already submitted, or while a
@@ -697,98 +750,121 @@ export default function ExamClient() {
     // Queue the toast notification to be shown in useEffect
     pendingWarningsRef.current.push({ count: newCount, reason });
 
-    // Log warning to Firestore (this is async, won't cause render issues)
-    if (sessionId && user) {
-      {
-        addDoc(collection(db, "examLogs"), {
-          sessionId,
-          studentId: user.id, // Required for Firestore rules
-          examSessionId: sessionId,
-          type: "warning",
-          violationType: violationType || "other",
-          reason,
-          timestamp: serverTimestamp(),
-        }).catch(err => console.error("Failed to log warning:", err));
+    // Log warning to Firestore (this is async, won't cause render issues).
+    //
+    // Session and exam are read from refs, never from the render closure: the
+    // detection interval is created in the same tick as `setSessionId(...)`,
+    // so its closure still held `null` and this whole block — both snapshots
+    // included — was skipped for every detection-raised warning.
+    const activeSessionId = sessionIdRef.current;
+    const activeExam = examRef.current;
 
-        updateDoc(doc(db, "examSessions", sessionId), {
-          warnings: newCount,
-          behaviorScore: nextBehaviorScore,
-          violationCounts: nextViolationCounts,
-          "proctoring.suspiciousEvents": newCount,
-          updatedAt: serverTimestamp(),
-        }).catch((err) => console.error("Failed to update session warning counters:", err));
+    if (activeSessionId && user) {
+      addDoc(collection(db, "examLogs"), {
+        sessionId: activeSessionId,
+        studentId: user.id, // Required for Firestore rules
+        examSessionId: activeSessionId,
+        type: "warning",
+        violationType: violationType || "other",
+        reason,
+        timestamp: serverTimestamp(),
+      }).catch((err) => console.error("Failed to log warning:", err));
 
-        addDoc(collection(db, "proctoringEvents"), {
-          sessionId,
+      updateDoc(doc(db, "examSessions", activeSessionId), {
+        warnings: newCount,
+        behaviorScore: nextBehaviorScore,
+        violationCounts: nextViolationCounts,
+        "proctoring.suspiciousEvents": newCount,
+        updatedAt: serverTimestamp(),
+      }).catch((err) => console.error("Failed to update session warning counters:", err));
+
+      addDoc(collection(db, "proctoringEvents"), {
+        sessionId: activeSessionId,
+        studentId: user.id,
+        eventType: mapViolationToEventType(violationType),
+        severity: nextBehaviorScore < 40 ? "critical" : nextBehaviorScore < 65 ? "high" : "medium",
+        penalty: 1,
+        message: reason,
+        timestamp: serverTimestamp(),
+        ...(activeExam?.id ? { examId: activeExam.id } : {}),
+      }).catch((err) => console.error("Failed to log proctoring event:", err));
+
+      const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
+      if (screenshot && activeExam?.id) {
+        sendProctoringSnapshot({
+          sessionId: activeSessionId,
           studentId: user.id,
-          eventType: mapViolationToEventType(violationType),
-          severity: nextBehaviorScore < 40 ? "critical" : nextBehaviorScore < 65 ? "high" : "medium",
-          penalty: 1,
-          message: reason,
-          timestamp: serverTimestamp(),
-          ...(exam?.id ? { examId: exam.id } : {}),
-        }).catch((err) => console.error("Failed to log proctoring event:", err));
+          examId: activeExam.id,
+          faceDetected: true,
+          faceCount: 1,
+          isLookingAway: false,
+          mobilePhoneDetected: reason.toLowerCase().includes("mobile") || reason.toLowerCase().includes("phone"),
+          bookDetected: reason.toLowerCase().includes("book"),
+          additionalDeviceDetected: reason.toLowerCase().includes("device") || reason.toLowerCase().includes("laptop"),
+          secondPersonDetected: reason.toLowerCase().includes("person"),
+          snapshotUrl: screenshot,
+          behaviorScore: nextBehaviorScore,
+          warningCount: newCount,
+          isOnline: true,
+          lastActivityAt: serverTimestamp(),
+        }).catch((err) => console.error("Failed to store warning snapshot:", err));
+      }
 
-        const screenshot = captureVideoFrame(videoRef.current as HTMLVideoElement);
-        if (screenshot && exam?.id) {
-          sendProctoringSnapshot({
-            sessionId,
-            studentId: user.id,
-            examId: exam.id,
-            faceDetected: true,
-            faceCount: 1,
-            isLookingAway: false,
-            mobilePhoneDetected: reason.toLowerCase().includes("mobile") || reason.toLowerCase().includes("phone"),
-            bookDetected: reason.toLowerCase().includes("book"),
-            additionalDeviceDetected: reason.toLowerCase().includes("device") || reason.toLowerCase().includes("laptop"),
-            secondPersonDetected: reason.toLowerCase().includes("person"),
-            snapshotUrl: screenshot,
-            behaviorScore: nextBehaviorScore,
-            warningCount: newCount,
-            isOnline: true,
-            lastActivityAt: serverTimestamp(),
-          }).catch((err) => console.error("Failed to store warning snapshot:", err));
-        }
+      // Capture and store a permanent high-resolution warning screenshot.
+      // Each warning gets its own screenshot (never overwritten — the filename
+      // carries a timestamp and a random suffix), and the upload falls back to
+      // an inline image if object storage is briefly unreachable, so a warning
+      // always leaves evidence behind.
+      //
+      // Queued rather than fired directly, so a burst of warnings produces one
+      // capture each, in order, instead of several overlapping captures
+      // competing for the same video element.
+      const warningType = mapViolationToEventType(violationType);
+      if (activeExam) {
+        const studentId = user.id;
+        const studentName = user.name || user.email || "Unknown";
+        const examId = activeExam.id;
+        const examTitle = activeExam.title;
 
-        // Capture and store a permanent high-resolution warning screenshot.
-        // Each warning gets its own screenshot (never overwritten), and the
-        // upload falls back to an inline image if object storage is briefly
-        // unreachable, so a warning always leaves evidence behind.
-        const warningType = mapViolationToEventType(violationType);
-        if (exam) {
+        warningSnapshotQueueRef.current.push(() =>
           captureAndUploadWarningScreenshot(
             videoRef.current,
-            sessionId,
-            user.id,
-            user.name || user.email || "Unknown",
-            exam.id,
-            exam.title,
+            activeSessionId,
+            studentId,
+            studentName,
+            examId,
+            examTitle,
             warningType,
             reason
-          ).catch((err) => console.error("Failed to capture warning screenshot:", err));
-        }
+          )
+        );
       }
     }
-  }, [sessionId, user, maxWarnings, violationCounts, exam]);
+  }, [user, maxWarnings]);
 
-  // Effect to show toast notifications for warnings (avoids setState during render)
+  // Effect to show toast notifications for warnings (avoids setState during render).
+  //
+  // Drains the whole queue rather than one entry: two violations raised in the
+  // same tick produce a single re-render, so shifting once left the second
+  // warning's toast sitting in the queue until some later warning happened to
+  // flush it — the student saw fewer notices than warnings recorded.
   useEffect(() => {
-    if (pendingWarningsRef.current.length > 0) {
+    while (pendingWarningsRef.current.length > 0) {
       const pending = pendingWarningsRef.current.shift();
-      if (pending) {
+      if (!pending) continue;
+
+      toast({
+        title: `Warning (${pending.count}/${maxWarnings})`,
+        description: pending.reason,
+        variant: "destructive",
+      });
+
+      if (pending.count >= maxWarnings) {
         toast({
-          title: `Warning (${pending.count}/${maxWarnings})`,
-          description: pending.reason,
+          title: `Proctoring Alert (${pending.count}/${maxWarnings})`,
+          description: "Maximum warning threshold reached. Your exam attempt has been flagged for teacher review.",
           variant: "destructive",
         });
-
-        if (pending.count >= maxWarnings) {
-          toast({
-            title: `Proctoring Alert (${pending.count}/${maxWarnings})`,
-            description: "Maximum warning threshold reached. Your exam attempt has been flagged for teacher review.",
-            variant: "destructive",
-          });
-        }
       }
     }
   }, [warnings, toast, maxWarnings]);
@@ -1086,9 +1162,18 @@ export default function ExamClient() {
           });
         }
         
-        // Detection interval - runs every 6 seconds
+        // Detection interval - runs every 6 seconds.
+        //
+        // Everything this timer needs comes from a ref. `startFaceDetection()`
+        // is invoked from `startExam()` in the same tick as `setSessionId(...)`,
+        // so the values captured in this closure are the PREVIOUS render's —
+        // `sessionId` in particular is still null. Going through
+        // `addWarningRef` (the same indirection the visibility and fullscreen
+        // handlers already use) means a detection warning takes the identical
+        // path as every other warning, and therefore gets its Firestore log,
+        // its proctoring event and its screenshot.
         detectionIntervalRef.current = setInterval(async () => {
-          if (videoRef.current && modelLoaded) {
+          if (videoRef.current && modelLoadedRef.current) {
             try {
               // Face detection
               const result = await detectFaces(videoRef.current);
@@ -1098,18 +1183,18 @@ export default function ExamClient() {
               // Real-time lighting & sunglasses / face covering analysis
               const lightingCheck = analyzeFrameLightingAndCoverage(videoRef.current);
               if (lightingCheck?.lowLight) {
-                addWarning("Low room lighting detected. Please illuminate your face.");
+                addWarningRef.current("Low room lighting detected. Please illuminate your face.");
               } else if (lightingCheck?.sunglassesDetected) {
-                addWarning("Sunglasses or face covering detected. Please remove sunglasses.");
+                addWarningRef.current("Sunglasses or face covering detected. Please remove sunglasses.");
               }
 
               // Use smart detection with cooldowns to reduce false positives
               if (shouldTriggerWarning(result, videoWidth, videoHeight, "no_face")) {
-                addWarning("No face detected");
+                addWarningRef.current("No face detected");
               } else if (shouldTriggerWarning(result, videoWidth, videoHeight, "multiple_faces")) {
-                addWarning("Multiple faces detected");
+                addWarningRef.current("Multiple faces detected");
               } else if (shouldTriggerWarning(result, videoWidth, videoHeight, "looking_away")) {
-                addWarning("Looking away from screen");
+                addWarningRef.current("Looking away from screen");
               }
               
               // Object detection (mobile phone, books, etc.) - only if available
@@ -1117,14 +1202,16 @@ export default function ExamClient() {
                 try {
                   const objectWarning = await objectModule.checkForProhibitedObjects(videoRef.current);
                   if (objectWarning) {
-                    addWarning(objectWarning.message);
+                    addWarningRef.current(objectWarning.message);
                     
                     // Log proctoring event for object detection
-                    if (proctoringAvailable && sessionId && user && exam) {
+                    const activeSessionId = sessionIdRef.current;
+                    const activeExam = examRef.current;
+                    if (proctoringAvailable && activeSessionId && user && activeExam) {
                       proctoringModule.logProctoringEvent({
-                        sessionId,
+                        sessionId: activeSessionId,
                         studentId: user.id,
-                        examId: exam.id,
+                        examId: activeExam.id,
                         eventType: objectWarning.warningType as any,
                         message: objectWarning.message,
                       }).catch(console.error);
@@ -1144,15 +1231,17 @@ export default function ExamClient() {
         // Snapshot interval - send live snapshot to Firebase every 5 seconds for Spark free plan efficiency
         if (proctoringAvailable) {
           snapshotIntervalRef.current = setInterval(async () => {
-            if (videoRef.current && sessionId && user && exam) {
+            const activeSessionId = sessionIdRef.current;
+            const activeExam = examRef.current;
+            if (videoRef.current && activeSessionId && user && activeExam) {
               try {
                 const thumbnail = proctoringModule.captureVideoFrame(videoRef.current, 240, 180, 0.5);
                 
                 if (thumbnail) {
                   await proctoringModule.sendProctoringSnapshot({
-                    sessionId,
+                    sessionId: activeSessionId,
                     studentId: user.id,
-                    examId: exam.id,
+                    examId: activeExam.id,
                     faceDetected: true,
                     faceCount: 1,
                     isLookingAway: false,
@@ -1179,7 +1268,11 @@ export default function ExamClient() {
     };
     
     loadModules();
-  }, [modelLoaded, addWarning, sessionId, user, exam]);
+    // `user` only: everything else the timers read now comes from a ref, so the
+    // callback identity no longer churns on every warning (it used to change
+    // with `violationCounts`, leaving a running interval holding an older
+    // closure than the one the component itself was using).
+  }, [user]);
 
   const proceedToCamera = () => {
     setExamStep("camera");
@@ -1199,6 +1292,7 @@ export default function ExamClient() {
           updatedAt: serverTimestamp(),
         });
         setSessionId(resumeSessionId);
+        sessionIdRef.current = resumeSessionId;
 
         await setupCamera();
         startFaceDetection();
@@ -1261,7 +1355,11 @@ export default function ExamClient() {
         });
       });
 
+      // Written to the ref too, and BEFORE `startFaceDetection()` below:
+      // the detection callbacks are created synchronously here, long before
+      // React re-renders with the new state.
       setSessionId(sessionRef.id);
+      sessionIdRef.current = sessionRef.id;
 
       // Setup camera (attach existing stream)
       await setupCamera();

@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
+import DevelopersSection from "@/components/home/DevelopersSection";
 import { useAuth } from "@/contexts/AuthContext";
 
 export default function HomePage() {
@@ -50,6 +51,26 @@ export default function HomePage() {
       }
     }
   }, [user, loading, initialized, router]);
+
+  // Arriving from another route as `/#developers` (or `/#features`, …).
+  //
+  // The browser resolves a hash the moment the document is ready, which here is
+  // while this page is still showing its auth spinner — the target section does
+  // not exist yet, so the scroll silently does nothing. Re-running it once the
+  // real content has rendered is what makes the navbar's anchors work from
+  // /login, /register and anywhere else off the landing page.
+  const sectionsRendered = initialized && !loading && !user;
+  useEffect(() => {
+    if (!sectionsRendered || typeof window === "undefined") return;
+
+    const id = window.location.hash.slice(1);
+    if (!id) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [sectionsRendered]);
 
   if (!initialized || loading) {
     return (
@@ -356,6 +377,9 @@ export default function HomePage() {
           </div>
         </div>
       </section>
+
+      {/* Developers */}
+      <DevelopersSection />
 
       {/* CTA Section */}
       <section className="py-12 sm:py-16 md:py-24 bg-gradient-to-r from-green-600 via-emerald-600 to-teal-600 relative overflow-hidden">
