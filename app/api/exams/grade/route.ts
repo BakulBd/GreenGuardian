@@ -24,7 +24,7 @@ import { getAdminDb } from "@/lib/firebase/admin";
 import { requireAuthedUser, jsonError } from "@/lib/server/api-auth";
 import {
   gradeSubmission,
-  sanitizeAnswerFiles,
+  validateAnswerFiles,
   type GradableQuestion,
 } from "@/lib/server/grading";
 import { loadExamQuestions } from "@/lib/server/exam-questions";
@@ -125,7 +125,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const answerFiles = sanitizeAnswerFiles(rawAnswerFiles);
+    // Validated, not merely sanitized: type, extension and size are re-checked
+    // here because the browser's own checks are a convenience for the student,
+    // and this route takes a JSON body a crafted client can write freely.
+    const fileCheck = validateAnswerFiles(rawAnswerFiles);
+    if (!fileCheck.ok) return jsonError(fileCheck.error!, 400);
+    const answerFiles = fileCheck.files;
 
     const db = getAdminDb();
     const sessionRef = db.collection("examSessions").doc(sessionId);
@@ -165,6 +170,21 @@ export async function POST(req: NextRequest) {
     }
 
     const isUploadMode = exam.examMode === "upload";
+
+    // "File Submission Allowed" is enforced HERE, not by hiding the uploader.
+    // An upload-mode exam is answered by file so the toggle is implicit; an
+    // online-mode exam only takes attachments when the teacher turned them on.
+    // `settings.fileUploadsAllowed` is the older name for the same intent and
+    // is still what the edit screens write, so both are honoured.
+    const fileSubmissionAllowed =
+      isUploadMode ||
+      exam.allowAnswerUpload === true ||
+      exam.settings?.fileUploadsAllowed === true;
+
+    if (answerFiles.length > 0 && !fileSubmissionAllowed) {
+      return jsonError("This exam does not accept file submissions.", 403);
+    }
+
     const questions = isUploadMode
       ? []
       : ((await loadExamQuestions(db, examId, exam)) as GradableQuestion[]);

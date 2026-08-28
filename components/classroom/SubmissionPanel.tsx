@@ -21,6 +21,8 @@ import {
   Award,
   MessageSquare,
   Paperclip,
+  AlertTriangle,
+  Hourglass,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -34,6 +36,7 @@ import {
 } from "@/lib/firebase/submissions";
 import { CLASSROOM_MATERIAL_ALLOWED_TYPES, CLASSROOM_MAX_FILE_SIZE, UploadResult } from "@/lib/storage/constants";
 import type { ClassroomAttachment, ClassworkItem, ClassworkSubmission, User } from "@/lib/types";
+import { getSubmissionWindow } from "@/lib/utils/submission-window";
 
 function formatDateTime(value: any): string {
   if (!value) return "";
@@ -71,6 +74,12 @@ export default function SubmissionPanel({
   }, [classwork.id, student.id]);
 
   const returned = submission?.status === "returned";
+
+  // The same rule the server enforces, evaluated here so the button state and
+  // the explanation match what would actually happen on submit. Recomputed on
+  // every render rather than memoised: it is a comparison against the current
+  // time, and a stale "open" would leave a dead button enabled.
+  const submissionWindow = getSubmissionWindow(classwork);
 
   const startEditing = () => {
     setText(submission?.text || "");
@@ -171,6 +180,12 @@ export default function SubmissionPanel({
             </Badge>
           )}
           <span className="text-xs text-gray-500">{formatDateTime(submission.submittedAt)}</span>
+          {/* Stated explicitly. An absent mark and a mark of zero look
+              identical if the panel simply shows nothing. */}
+          <Badge variant="outline" className="bg-gray-100 text-gray-600 border-gray-300">
+            <Hourglass className="h-3 w-3 mr-1" />
+            Not graded yet
+          </Badge>
         </div>
 
         {submission.text && (
@@ -196,15 +211,62 @@ export default function SubmissionPanel({
           </ul>
         )}
 
-        <div className="flex gap-2 pt-1">
-          <Button size="sm" variant="outline" onClick={startEditing} disabled={busy}>
-            <RotateCcw className="h-3.5 w-3.5 mr-1" />
-            Edit submission
-          </Button>
-          <Button size="sm" variant="ghost" className="text-red-600" onClick={handleUnsubmit} disabled={busy}>
-            Withdraw
-          </Button>
+        {submissionWindow.state === "closed" ? (
+          // Editing a submission is a re-submission, so a closed window closes
+          // that too — otherwise "no late submission" would be trivially
+          // sidestepped by handing in early and rewriting it afterwards.
+          <p className="text-xs text-gray-500 pt-1">
+            The deadline has passed and this assignment does not accept late submissions, so your
+            work can no longer be changed.
+          </p>
+        ) : (
+          <div className="flex gap-2 pt-1">
+            <Button size="sm" variant="outline" onClick={startEditing} disabled={busy}>
+              <RotateCcw className="h-3.5 w-3.5 mr-1" />
+              Edit submission
+            </Button>
+            <Button size="sm" variant="ghost" className="text-red-600" onClick={handleUnsubmit} disabled={busy}>
+              Withdraw
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // --- Deadline passed and late work is refused: nothing to submit into. ---
+  if (submissionWindow.state === "closed") {
+    return (
+      <div className="mt-3 border-t pt-3 space-y-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200">
+            <AlertTriangle className="h-3 w-3 mr-1" />
+            Deadline Passed
+          </Badge>
+          {submissionWindow.dueAt && (
+            <span className="text-xs text-gray-500">
+              Due {formatDateTime(submissionWindow.dueAt)}
+            </span>
+          )}
         </div>
+        <p className="text-sm text-gray-700">{submissionWindow.message}</p>
+        {/* Kept visible but inert, so the state reads as "closed" rather than
+            as a page that failed to render the button. */}
+        <Button
+          size="sm"
+          disabled
+          title={submissionWindow.message}
+          onClick={() =>
+            toast({
+              title: "Deadline passed",
+              description: submissionWindow.message,
+              variant: "destructive",
+            })
+          }
+        >
+          <Upload className="h-3.5 w-3.5 mr-1" />
+          Submit
+        </Button>
       </div>
     );
   }
@@ -212,6 +274,17 @@ export default function SubmissionPanel({
   // --- Not submitted, or editing an existing submission. ---
   return (
     <div className="mt-3 border-t pt-3 space-y-3">
+      {submissionWindow.state === "open_late" && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5">
+          <Clock className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
+          <p className="text-xs text-amber-900">
+            {submissionWindow.message}
+            {submissionWindow.dueAt && (
+              <> Deadline was {formatDateTime(submissionWindow.dueAt)}.</>
+            )}
+          </p>
+        </div>
+      )}
       {!editing ? (
         <Button size="sm" onClick={startEditing}>
           <Upload className="h-3.5 w-3.5 mr-1" />

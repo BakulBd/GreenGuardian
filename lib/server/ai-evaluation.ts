@@ -306,6 +306,15 @@ export function buildEvaluationPrompt(
   context: {
     examTitle?: string;
     courseName?: string;
+    /**
+     * The teacher's own instructions for the paper, when they set any.
+     *
+     * Included so marking follows the rubric that was actually issued —
+     * "show all working", "answer any three", "credit is for method not the
+     * final number" — rather than a generic idea of what each question
+     * deserves. Bounded because it is free text on the exam document.
+     */
+    instructions?: string;
     hasAttachedScript: boolean;
     hasTypedAnswers: boolean;
   }
@@ -336,6 +345,8 @@ export function buildEvaluationPrompt(
   }
   if (context.hasTypedAnswers) sources.push("the typed answers quoted under each question");
 
+  const rubric = String(context.instructions || "").trim().slice(0, 4000);
+
   return [
     "You are an experienced university examiner marking one student's answer script.",
     "",
@@ -343,6 +354,17 @@ export function buildEvaluationPrompt(
     "",
     `You are given the QUESTION PAPER below and the STUDENT'S ANSWER SCRIPT from ${sources.join(" and ")}.`,
     "",
+    ...(rubric
+      ? [
+          "=== THE TEACHER'S INSTRUCTIONS FOR THIS PAPER ===",
+          rubric,
+          "Follow these where they bear on how an answer should be marked. They do",
+          "not override the per-question maximum marks below, and they never",
+          "change the authorship estimate.",
+          "=== END TEACHER'S INSTRUCTIONS ===",
+          "",
+        ]
+      : []),
     "=== QUESTION PAPER ===",
     questionBlock,
     "=== END QUESTION PAPER ===",

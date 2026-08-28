@@ -677,6 +677,8 @@ export interface CreateClassworkInput {
   externalLink?: string;
   dueDate?: Date | null;
   totalMarks?: number;
+  /** Accept work handed in after `dueDate`. See ClassworkItem for the default. */
+  lateSubmissionAllowed?: boolean;
   status: "draft" | "published";
   scheduledAt?: Date | null;
 }
@@ -694,6 +696,9 @@ export async function createClasswork(input: CreateClassworkInput): Promise<stri
     externalLink: input.externalLink?.trim() || undefined,
     dueDate: input.dueDate || undefined,
     totalMarks: input.totalMarks,
+    // Written explicitly (not left undefined) so `firestore.rules` can read a
+    // real value rather than fall back to the permissive default.
+    lateSubmissionAllowed: input.lateSubmissionAllowed !== false,
     status: input.status,
     scheduledAt: input.scheduledAt || undefined,
     createdAt: serverTimestamp(),

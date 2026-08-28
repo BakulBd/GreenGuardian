@@ -791,6 +791,16 @@ export interface ClassworkItem {
   externalLink?: string;
   dueDate?: FirestoreDate;
   totalMarks?: number;
+  /**
+   * Whether work handed in after `dueDate` is accepted.
+   *
+   * Undefined means "not set", which is treated as ALLOWED everywhere (see
+   * `lib/utils/submission-window.ts`). Every assignment created before this
+   * field existed accepted late work; flipping those to reject it would lock
+   * students out mid-term on a rule they were never shown. The create form
+   * always writes an explicit value for new classwork.
+   */
+  lateSubmissionAllowed?: boolean;
   status: ClassworkStatus;
   /** Future-dated publish; a draft with this set is meant to auto-publish later. */
   scheduledAt?: FirestoreDate;
@@ -835,6 +845,14 @@ export interface ClassworkSubmission {
   status: SubmissionStatus;
   /** Resolved against the classwork's due date at submit time. */
   late?: boolean;
+  /**
+   * The deadline as it stood when this was handed in.
+   *
+   * Denormalized so the teacher's review can show "submitted 10:35pm against a
+   * 9:00pm deadline" from one document, and so that comparison keeps telling
+   * the truth if the teacher moves the due date afterwards.
+   */
+  dueAtSubmission?: FirestoreDate | null;
   submittedAt: FirestoreDate;
   updatedAt?: FirestoreDate;
 

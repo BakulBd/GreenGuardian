@@ -22,6 +22,10 @@ import {
   RotateCcw,
   Users,
   FileText,
+  Download,
+  Pencil,
+  CheckCircle2,
+  ImageIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,17 +44,104 @@ function formatDateTime(value: any): string {
   if (!value) return "";
   const d = value?.toDate ? value.toDate() : new Date(value);
   if (Number.isNaN(d?.getTime?.())) return "";
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
+
+function isImage(attachment: { type?: string; name?: string; url?: string }): boolean {
+  if (attachment.type?.startsWith("image/")) return true;
+  // Older attachments were stored without a MIME type; fall back to the name.
+  const name = (attachment.name || attachment.url || "").toLowerCase();
+  return IMAGE_EXTENSIONS.some((extension) => name.includes(extension));
+}
+
+function isPdf(attachment: { type?: string; name?: string; url?: string }): boolean {
+  if (attachment.type === "application/pdf") return true;
+  return (attachment.name || attachment.url || "").toLowerCase().includes(".pdf");
+}
+
+/**
+ * One submitted file, rendered as something the teacher can actually assess.
+ *
+ * A bare filename link was the whole of this before, which meant marking a
+ * photographed answer sheet required downloading every file first. Images are
+ * shown inline; a PDF gets an embedded viewer that can be opened full-screen;
+ * anything else keeps the download link it always had.
+ */
+function AttachmentCard({ attachment }: { attachment: { name?: string; url?: string; type?: string; size?: number } }) {
+  const url = attachment.url || "";
+  const name = attachment.name || "Attachment";
+
+  if (!url) {
+    return <p className="text-xs text-gray-500">{name} (no file reference stored)</p>;
+  }
+
+  return (
+    <div className="rounded-lg border bg-white overflow-hidden">
+      <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 border-b bg-gray-50">
+        <span className="flex items-center gap-1.5 text-xs font-medium text-gray-700 truncate">
+          {isImage(attachment) ? (
+            <ImageIcon className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+          ) : (
+            <Paperclip className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+          )}
+          <span className="truncate">{name}</span>
+        </span>
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-xs text-blue-700 hover:underline shrink-0"
+        >
+          <Download className="h-3.5 w-3.5" />
+          Open
+        </a>
+      </div>
+
+      {isImage(attachment) && (
+        // eslint-disable-next-line @next/next/no-img-element -- signed storage
+        // URL, not a static asset; next/image cannot optimise it.
+        <img
+          src={url}
+          alt={name}
+          className="w-full max-h-80 object-contain bg-gray-100"
+          loading="lazy"
+        />
+      )}
+
+      {isPdf(attachment) && (
+        <object data={url} type="application/pdf" className="w-full h-80 bg-gray-100">
+          {/* Browsers without an inline PDF viewer land here. */}
+          <div className="p-4 text-xs text-gray-600">
+            This browser cannot display the PDF inline.{" "}
+            <a href={url} target="_blank" rel="noopener noreferrer" className="text-blue-700 underline">
+              Open it in a new tab
+            </a>
+            .
+          </div>
+        </object>
+      )}
+    </div>
+  );
 }
 
 function SubmissionRow({
   submission,
   totalMarks,
   teacher,
+  classworkDueDate,
 }: {
   submission: ClassworkSubmission;
   totalMarks: number;
   teacher: User;
+  classworkDueDate?: unknown;
 }) {
   const { toast } = useToast();
   const [marks, setMarks] = useState<string>(
@@ -59,13 +150,34 @@ function SubmissionRow({
   const [feedback, setFeedback] = useState(submission.feedback || "");
   const [saving, setSaving] = useState(false);
   const [expanded, setExpanded] = useState(submission.status !== "returned");
+  /** Re-marking work that has already been returned. */
+  const [editingMarks, setEditingMarks] = useState(false);
 
   const returned = submission.status === "returned";
+
+  // The deadline recorded at hand-in wins over the classwork's current one:
+  // if the teacher moved the due date afterwards, the stored value is what the
+  // student was actually working to.
+  const deadline = submission.dueAtSubmission ?? classworkDueDate;
 
   const handleSave = async () => {
     const value = Number(marks);
     if (marks.trim() === "" || !Number.isFinite(value)) {
       toast({ title: "Enter a mark", description: "A numeric mark is required.", variant: "destructive" });
+      return;
+    }
+    // Checked here as well as in `gradeSubmission` so the teacher is corrected
+    // before the round trip rather than after it.
+    if (value < 0) {
+      toast({ title: "Invalid mark", description: "Enter a mark of zero or more.", variant: "destructive" });
+      return;
+    }
+    if (totalMarks > 0 && value > totalMarks) {
+      toast({
+        title: "Mark too high",
+        description: `The mark cannot exceed the total of ${totalMarks}.`,
+        variant: "destructive",
+      });
       return;
     }
     setSaving(true);
@@ -77,7 +189,11 @@ function SubmissionRow({
         feedback,
         grader: teacher,
       });
-      toast({ title: "Marks returned", description: `${submission.studentName} can now see the result.` });
+      toast({
+        title: returned ? "Marks updated" : "Marks returned",
+        description: `${submission.studentName} can now see ${returned ? "the updated result" : "the result"}.`,
+      });
+      setEditingMarks(false);
     } catch (error: any) {
       toast({ title: "Could not save", description: error.message, variant: "destructive" });
     } finally {
@@ -112,13 +228,20 @@ function SubmissionRow({
               <span className="text-xs text-gray-400 font-normal ml-2">{submission.studentCode}</span>
             )}
           </p>
-          <p className="text-xs text-gray-500">{formatDateTime(submission.submittedAt)}</p>
+          <p className="text-xs text-gray-500">
+            Submitted: {formatDateTime(submission.submittedAt) || "—"}
+          </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {submission.late && (
-            <Badge variant="outline" className="bg-amber-100 text-amber-800 border-amber-300">
+          {submission.late ? (
+            <Badge variant="outline" className="bg-amber-100 text-amber-800 border-amber-300 font-semibold">
               <Clock className="h-3 w-3 mr-1" />
-              Late
+              LATE
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="bg-gray-50 text-gray-600 border-gray-200">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              On Time
             </Badge>
           )}
           {returned ? (
@@ -137,35 +260,65 @@ function SubmissionRow({
 
       {expanded && (
         <div className="border-t p-3 space-y-3">
-          {submission.text && (
+          {/* Submission facts first: who, when, and against which deadline.
+              A "LATE" badge with no deadline beside it is an accusation the
+              teacher cannot check. */}
+          <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2 rounded-lg bg-gray-50 border p-2.5 text-xs">
             <div>
-              <p className="text-xs font-medium text-gray-500 mb-1">Answer</p>
+              <span className="text-gray-500">Submitted:</span>{" "}
+              <span className="font-medium text-gray-900">
+                {formatDateTime(submission.submittedAt) || "—"}
+              </span>
+            </div>
+            <div>
+              <span className="text-gray-500">Deadline:</span>{" "}
+              <span className="font-medium text-gray-900">
+                {formatDateTime(deadline) || "No deadline set"}
+              </span>
+            </div>
+            <div>
+              <span className="text-gray-500">Status:</span>{" "}
+              <span className={submission.late ? "font-semibold text-amber-700" : "font-medium text-gray-900"}>
+                {submission.late ? "LATE SUBMISSION" : "On Time"}
+              </span>
+            </div>
+            {submission.updatedAt && (
+              <div>
+                <span className="text-gray-500">Last edited:</span>{" "}
+                <span className="font-medium text-gray-900">{formatDateTime(submission.updatedAt)}</span>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <p className="text-xs font-medium text-gray-500 mb-1">Answer</p>
+            {submission.text ? (
               <p className="text-sm text-gray-800 whitespace-pre-wrap bg-gray-50 border rounded-lg p-2.5">
                 {submission.text}
               </p>
-            </div>
-          )}
+            ) : (
+              // Said out loud rather than rendering nothing: "no written
+              // answer" and "the answer failed to load" must not look alike.
+              <p className="text-sm text-gray-500 italic bg-gray-50 border rounded-lg p-2.5">
+                No written answer — {submission.attachments?.length ? "this student answered by file." : "nothing was submitted as text."}
+              </p>
+            )}
+          </div>
 
-          {submission.attachments && submission.attachments.length > 0 && (
-            <div>
-              <p className="text-xs font-medium text-gray-500 mb-1">Attachments</p>
-              <ul className="space-y-1">
+          <div>
+            <p className="text-xs font-medium text-gray-500 mb-1">
+              Attachments ({submission.attachments?.length ?? 0})
+            </p>
+            {submission.attachments && submission.attachments.length > 0 ? (
+              <div className="space-y-2">
                 {submission.attachments.map((a, i) => (
-                  <li key={i}>
-                    <a
-                      href={a.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 text-sm text-blue-700 hover:underline"
-                    >
-                      <Paperclip className="h-3.5 w-3.5" />
-                      {a.name}
-                    </a>
-                  </li>
+                  <AttachmentCard key={i} attachment={a} />
                 ))}
-              </ul>
-            </div>
-          )}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500 italic">No files attached.</p>
+            )}
+          </div>
 
           {/* Machine-assisted pre-pass — advice, not a grade. */}
           {(submission.aiSuggestedMarks !== undefined || submission.ocrText) && (
@@ -203,17 +356,25 @@ function SubmissionRow({
             </div>
           )}
 
-          {returned ? (
+          {returned && !editingMarks ? (
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="text-sm text-gray-600">
-                Marked {submission.marks}
+                Marked <strong className="text-gray-900">{submission.marks}</strong>
                 {totalMarks ? ` / ${totalMarks}` : ""} by {submission.gradedByName || "a teacher"}
                 {submission.feedback && <> · &ldquo;{submission.feedback}&rdquo;</>}
               </div>
-              <Button size="sm" variant="outline" onClick={handleReopen} disabled={saving}>
-                <RotateCcw className="h-3.5 w-3.5 mr-1" />
-                Reopen for revision
-              </Button>
+              <div className="flex gap-2">
+                {/* Correcting a mark should not require reopening the work —
+                    that invites a resubmission nobody asked for. */}
+                <Button size="sm" variant="outline" onClick={() => setEditingMarks(true)} disabled={saving}>
+                  <Pencil className="h-3.5 w-3.5 mr-1" />
+                  Edit marks
+                </Button>
+                <Button size="sm" variant="ghost" onClick={handleReopen} disabled={saving}>
+                  <RotateCcw className="h-3.5 w-3.5 mr-1" />
+                  Reopen for revision
+                </Button>
+              </div>
             </div>
           ) : (
             <div className="space-y-2">
@@ -238,14 +399,28 @@ function SubmissionRow({
                 onChange={(e) => setFeedback(e.target.value)}
                 rows={2}
               />
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-2">
+                {editingMarks && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setMarks(submission.marks !== undefined ? String(submission.marks) : "");
+                      setFeedback(submission.feedback || "");
+                      setEditingMarks(false);
+                    }}
+                    disabled={saving}
+                  >
+                    Cancel
+                  </Button>
+                )}
                 <Button size="sm" onClick={handleSave} disabled={saving}>
                   {saving ? (
                     <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
                   ) : (
                     <Check className="h-3.5 w-3.5 mr-1" />
                   )}
-                  Return marks
+                  {editingMarks ? "Save marks" : "Return marks"}
                 </Button>
               </div>
             </div>
@@ -284,10 +459,18 @@ export default function SubmissionReview({
             : "Submissions could not be loaded."
         );
         setLoading(false);
-      }
+      },
+      // Constraining the query to this teacher is what makes it legal, not
+      // merely narrower: Firestore refuses a list query it cannot statically
+      // prove returns only readable documents, and the teacher's read grant is
+      // per-document (`resource.data.teacherId == request.auth.uid`). Without
+      // this the whole query was denied and every teacher saw an empty list.
+      // Admins read under `isAdmin()`, which is unconditional, so they must
+      // NOT be filtered by their own uid.
+      teacher.role === "teacher" ? { teacherId: teacher.id } : undefined
     );
     return () => unsub();
-  }, [open, classwork.id]);
+  }, [open, classwork.id, teacher.id, teacher.role]);
 
   const progress = useMemo(() => submissionProgress(submissions), [submissions]);
   const totalMarks = classwork.totalMarks ?? 0;
@@ -341,7 +524,13 @@ export default function SubmissionReview({
               </div>
               <ul className="space-y-2">
                 {submissions.map((s) => (
-                  <SubmissionRow key={s.id} submission={s} totalMarks={totalMarks} teacher={teacher} />
+                  <SubmissionRow
+                    key={s.id}
+                    submission={s}
+                    totalMarks={totalMarks}
+                    teacher={teacher}
+                    classworkDueDate={classwork.dueDate}
+                  />
                 ))}
               </ul>
             </>

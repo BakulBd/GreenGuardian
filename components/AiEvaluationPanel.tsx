@@ -16,6 +16,20 @@
  *     extraction and authorship are separate signals and are shown separately.
  *   - that the authorship estimate had anything to do with the marks. It is
  *     rendered in its own panel, below the marks, with that stated.
+ *
+ * On the visual encoding, since this screen is mostly numbers:
+ *
+ *   - A mark is a MAGNITUDE against a limit, so it is drawn as a meter — one
+ *     hue, light track / dark fill — not as a donut or a two-slice pie, and
+ *     not colour-graded by score. Painting 45% amber and 30% red would be the
+ *     component inventing a pass mark the teacher never set.
+ *   - Judgement lives on the verdict badge instead, which carries an icon and
+ *     a word as well as a colour, so it never depends on hue alone.
+ *   - Human vs AI authorship is an IDENTITY pair (emerald / violet — violet is
+ *     already this app's colour for automated work), not good vs bad. Using
+ *     red for the AI share would read as an accusation, which is precisely
+ *     what this estimate must not be. The pair is checked for colour-vision
+ *     separation rather than eyeballed.
  */
 
 import { useMemo, useState } from "react";
@@ -33,6 +47,7 @@ import {
   RefreshCcw,
   ShieldQuestion,
   Sparkles,
+  User as UserIcon,
   XCircle,
 } from "lucide-react";
 import { authorshipLabel } from "@/lib/server/ai-evaluation";
@@ -64,29 +79,33 @@ export interface AiEvaluationPanelProps {
   savingQuestionMarks?: boolean;
 }
 
+/**
+ * Status colours ship with an icon and a word, never colour alone — these
+ * badges are the only place a value judgement about an answer is expressed.
+ */
 const VERDICT_STYLE: Record<AnswerVerdict, { label: string; className: string }> = {
-  correct: { label: "Correct", className: "bg-emerald-100 text-emerald-800 border-emerald-200" },
+  correct: { label: "Correct", className: "bg-emerald-100 text-emerald-900 border-emerald-300" },
   partially_correct: {
-    label: "Partially correct",
-    className: "bg-amber-100 text-amber-800 border-amber-200",
+    label: "Partial",
+    className: "bg-amber-100 text-amber-900 border-amber-300",
   },
-  incorrect: { label: "Incorrect", className: "bg-red-100 text-red-700 border-red-200" },
-  unrelated: { label: "Unrelated", className: "bg-red-100 text-red-700 border-red-200" },
-  unanswered: { label: "Not answered", className: "bg-gray-100 text-gray-600 border-gray-200" },
-  unreadable: { label: "Could not read", className: "bg-purple-100 text-purple-800 border-purple-200" },
+  incorrect: { label: "Incorrect", className: "bg-red-100 text-red-900 border-red-300" },
+  unrelated: { label: "Unrelated", className: "bg-red-100 text-red-900 border-red-300" },
+  unanswered: { label: "Not answered", className: "bg-gray-100 text-gray-700 border-gray-300" },
+  unreadable: {
+    label: "Could not read",
+    className: "bg-violet-100 text-violet-900 border-violet-300",
+  },
 };
 
 const STATUS_STYLE: Record<string, { label: string; className: string }> = {
-  queued: { label: "AI Evaluation Queued", className: "bg-blue-50 text-blue-700 border-blue-200" },
+  queued: { label: "Queued", className: "bg-blue-50 text-blue-700 border-blue-200" },
   processing: {
     label: "AI Evaluation Processing...",
     className: "bg-blue-50 text-blue-700 border-blue-200",
   },
   completed: { label: "AI Evaluated", className: "bg-emerald-50 text-emerald-700 border-emerald-200" },
-  needs_review: {
-    label: "Needs Review",
-    className: "bg-amber-50 text-amber-800 border-amber-200",
-  },
+  needs_review: { label: "Needs Review", className: "bg-amber-50 text-amber-800 border-amber-300" },
   failed: { label: "Evaluation Failed", className: "bg-red-50 text-red-700 border-red-200" },
 };
 
@@ -97,19 +116,76 @@ function StatusBadge({ status }: { status?: string | null }) {
   };
   const spinning = status === "queued" || status === "processing";
   return (
-    <Badge variant="outline" className={`${style.className} gap-1.5`}>
+    <Badge variant="outline" className={`${style.className} gap-1.5 font-medium`}>
       {spinning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Bot className="h-3 w-3" />}
       {style.label}
     </Badge>
   );
 }
 
-function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+/**
+ * A ratio against a limit.
+ *
+ * Single hue: the track is a light step of the same ramp as the fill, so the
+ * bar reads as "this much of that" across its whole length. Rounded ends and a
+ * minimum visible width mean a non-zero mark never renders as an empty track.
+ */
+function Meter({
+  value,
+  max,
+  className = "",
+  height = "h-2",
+}: {
+  value: number;
+  max: number;
+  className?: string;
+  height?: string;
+}) {
+  const ratio = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0;
+  const width = ratio === 0 ? 0 : Math.max(3, ratio * 100);
   return (
-    <div className="rounded-lg border bg-white p-3">
+    <div
+      className={`${height} w-full overflow-hidden rounded-full bg-emerald-100 ${className}`}
+      role="img"
+      aria-label={`${value} out of ${max}`}
+    >
+      <div
+        className="h-full rounded-full bg-emerald-600 transition-[width] duration-500 ease-out"
+        style={{ width: `${width}%` }}
+      />
+    </div>
+  );
+}
+
+/** Compact label/value pair. Not a stat tile — no delta, no trend. */
+function Figure({
+  label,
+  value,
+  hint,
+  emphasis = false,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  emphasis?: boolean;
+}) {
+  return (
+    <div>
       <p className="text-[11px] uppercase tracking-wide text-gray-500">{label}</p>
-      <p className="text-lg font-bold text-gray-900">{value}</p>
+      <p className={`font-semibold text-gray-900 ${emphasis ? "text-xl" : "text-base"}`}>{value}</p>
       {hint && <p className="text-[11px] text-gray-500">{hint}</p>}
+    </div>
+  );
+}
+
+function SubScore({ label, value }: { label: string; value: number }) {
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between gap-2">
+        <span className="text-[11px] text-gray-500">{label}</span>
+        <span className="text-[11px] font-semibold tabular-nums text-gray-700">{value}%</span>
+      </div>
+      <Meter value={value} max={100} height="h-1.5" />
     </div>
   );
 }
@@ -129,43 +205,57 @@ function QuestionCard({
   const verdict = VERDICT_STYLE[question.verdict] ?? VERDICT_STYLE.incorrect;
 
   return (
-    <div className="rounded-lg border bg-white">
+    <div className="overflow-hidden rounded-xl border bg-white transition-shadow hover:shadow-sm">
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="flex w-full items-start justify-between gap-3 p-3 text-left"
+        aria-expanded={open}
+        className="flex w-full items-start gap-3 p-3 text-left"
       >
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-semibold text-gray-700">Q{question.questionNumber}</span>
+        <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gray-100 text-[11px] font-bold text-gray-600">
+          {question.questionNumber}
+        </span>
+
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2 flex-wrap">
             <Badge variant="outline" className={`text-[10px] ${verdict.className}`}>
               {verdict.label}
             </Badge>
             {question.gradedFromAnswerKey && (
-              <Badge variant="outline" className="text-[10px] bg-gray-50 text-gray-600">
+              <Badge variant="outline" className="bg-gray-50 text-[10px] text-gray-600">
                 From answer key
               </Badge>
             )}
-          </div>
-          <p className="mt-1 line-clamp-2 text-xs text-gray-600">{question.questionText}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="whitespace-nowrap text-sm font-bold text-emerald-700">
-            {question.awardedMarks}
-            <span className="text-xs font-normal text-gray-400"> / {question.maxMarks}</span>
+          </span>
+          <span className="mt-1 line-clamp-2 block text-xs text-gray-600">
+            {question.questionText}
+          </span>
+          <span className="mt-2 block">
+            <Meter value={question.awardedMarks} max={question.maxMarks} height="h-1.5" />
+          </span>
+        </span>
+
+        <span className="flex shrink-0 items-center gap-2">
+          <span className="text-right">
+            <span className="block text-sm font-bold tabular-nums text-emerald-700">
+              {question.awardedMarks}
+            </span>
+            <span className="block text-[11px] tabular-nums text-gray-400">
+              / {question.maxMarks}
+            </span>
           </span>
           {open ? (
             <ChevronDown className="h-4 w-4 text-gray-400" />
           ) : (
             <ChevronRight className="h-4 w-4 text-gray-400" />
           )}
-        </div>
+        </span>
       </button>
 
       {open && (
-        <div className="space-y-3 border-t bg-gray-50/60 p-3 text-xs">
+        <div className="space-y-3 border-t bg-gray-50/70 p-3 text-xs">
           {variant === "teacher" && onOverrideChange && (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-emerald-200 bg-white p-2">
               <label className="font-medium text-gray-700">Override mark:</label>
               <Input
                 type="number"
@@ -174,37 +264,38 @@ function QuestionCard({
                 step="0.5"
                 value={overrideValue ?? ""}
                 onChange={(event) => onOverrideChange(event.target.value)}
-                className="h-8 w-24 bg-white"
+                className="h-8 w-24"
               />
               <span className="text-gray-500">/ {question.maxMarks}</span>
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <Stat label="Relevance" value={`${question.relevance}%`} />
-            <Stat label="Correctness" value={`${question.correctness}%`} />
-            <Stat label="Completeness" value={`${question.completeness}%`} />
-            <Stat label="Reasoning" value={`${question.reasoningQuality}%`} />
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+            <SubScore label="Relevance" value={question.relevance} />
+            <SubScore label="Correctness" value={question.correctness} />
+            <SubScore label="Completeness" value={question.completeness} />
+            <SubScore label="Reasoning" value={question.reasoningQuality} />
           </div>
 
           <div>
             <p className="mb-1 font-semibold text-gray-700">Question</p>
-            <p className="whitespace-pre-wrap rounded border bg-white p-2 text-gray-800">
+            <p className="whitespace-pre-wrap rounded-lg border bg-white p-2 text-gray-800">
               {question.questionText}
             </p>
           </div>
 
           <div>
             <p className="mb-1 font-semibold text-gray-700">Student answer (as read)</p>
-            <p className="whitespace-pre-wrap rounded border bg-white p-2 text-gray-800">
-              {question.studentAnswer?.trim() || "Nothing was found in the script for this question."}
+            <p className="whitespace-pre-wrap rounded-lg border bg-white p-2 text-gray-800">
+              {question.studentAnswer?.trim() ||
+                "Nothing was found in the script for this question."}
             </p>
           </div>
 
           {question.feedback && (
             <div>
               <p className="mb-1 font-semibold text-gray-700">AI feedback</p>
-              <p className="whitespace-pre-wrap rounded border border-blue-100 bg-blue-50/60 p-2 text-gray-800">
+              <p className="whitespace-pre-wrap rounded-lg border border-blue-200 bg-blue-50/70 p-2 text-gray-800">
                 {question.feedback}
               </p>
             </div>
@@ -216,14 +307,18 @@ function QuestionCard({
                 <Badge
                   key={`c-${index}`}
                   variant="outline"
-                  className="bg-emerald-50 text-[10px] text-emerald-800"
+                  className="border-emerald-200 bg-emerald-50 text-[10px] text-emerald-900"
                 >
                   <Check className="mr-1 h-3 w-3" />
                   {concept}
                 </Badge>
               ))}
               {question.keyConceptsMissing.map((concept, index) => (
-                <Badge key={`m-${index}`} variant="outline" className="bg-red-50 text-[10px] text-red-700">
+                <Badge
+                  key={`m-${index}`}
+                  variant="outline"
+                  className="border-red-200 bg-red-50 text-[10px] text-red-900"
+                >
                   <XCircle className="mr-1 h-3 w-3" />
                   {concept}
                 </Badge>
@@ -279,41 +374,49 @@ export default function AiEvaluationPanel({
 
   // While an evaluation is running there is nothing to show but the state.
   if (!evaluation || status === "queued" || status === "processing") {
+    const running = status === "queued" || status === "processing";
     return (
-      <Card className="border-blue-200 bg-blue-50/30">
+      <Card className={running ? "border-blue-200 bg-blue-50/40" : "bg-gray-50/60"}>
         <CardHeader className="pb-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <Sparkles className="h-4 w-4 text-blue-600" />
+              <Sparkles className={`h-4 w-4 ${running ? "text-blue-600" : "text-gray-400"}`} />
               AI Evaluation
             </CardTitle>
             <StatusBadge status={status} />
           </div>
           <CardDescription className="text-xs">
-            {status === "queued" || status === "processing"
-              ? "The question paper and the answer script are being read and marked. This page updates when it finishes."
+            {running
+              ? "Reading the question paper and the answer script, then marking each question. This updates on its own when it finishes."
               : "This submission has not been evaluated by AI."}
           </CardDescription>
         </CardHeader>
-        {variant === "teacher" && onRerun && (
-          <CardContent>
+        <CardContent className="space-y-3">
+          {running && (
+            // An indeterminate track: progress is unknown, so nothing here
+            // pretends to measure it.
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-blue-100">
+              <div className="h-full w-1/3 animate-pulse rounded-full bg-blue-500" />
+            </div>
+          )}
+          {variant === "teacher" && onRerun && !running && (
             <Button size="sm" variant="outline" onClick={() => onRerun()} disabled={rerunning}>
               {rerunning ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (
-                <Bot className="mr-2 h-4 w-4 text-purple-600" />
+                <Bot className="mr-2 h-4 w-4 text-emerald-600" />
               )}
               Run AI evaluation
             </Button>
-          </CardContent>
-        )}
+          )}
+        </CardContent>
       </Card>
     );
   }
 
   if (status === "failed") {
     return (
-      <Card className="border-red-200 bg-red-50/30">
+      <Card className="border-red-200 bg-red-50/40">
         <CardHeader className="pb-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="flex items-center gap-2 text-sm">
@@ -328,7 +431,7 @@ export default function AiEvaluationPanel({
         </CardHeader>
         <CardContent className="space-y-3">
           {evaluation.error && (
-            <p className="rounded border border-red-200 bg-white p-2 text-xs text-red-700">
+            <p className="rounded-lg border border-red-200 bg-white p-2.5 text-xs text-red-800">
               {evaluation.error}
             </p>
           )}
@@ -355,10 +458,23 @@ export default function AiEvaluationPanel({
     finalPercentage ??
     (shownFinalTotal > 0 ? Math.round((shownFinal / shownFinalTotal) * 1000) / 10 : 0);
 
+  const sourceLabel =
+    finalMarksSource === "teacher"
+      ? "Teacher override"
+      : finalMarksSource === "ai"
+      ? "From AI evaluation"
+      : finalMarksSource === "auto"
+      ? "From answer key"
+      : "";
+
   return (
     <div className="space-y-4">
-      <Card className={status === "needs_review" ? "border-amber-200" : "border-emerald-200"}>
-        <CardHeader className="pb-3">
+      <Card
+        className={`overflow-hidden ${
+          status === "needs_review" ? "border-amber-300" : "border-emerald-200"
+        }`}
+      >
+        <CardHeader className="border-b bg-gray-50/70 pb-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <CardTitle className="flex items-center gap-2 text-sm">
@@ -366,7 +482,9 @@ export default function AiEvaluationPanel({
                 AI Evaluation
               </CardTitle>
               <CardDescription className="text-xs">
-                {evaluation.model ? `Marked by ${evaluation.model}` : "Marked by the configured AI model"}
+                {evaluation.model
+                  ? `Marked by ${evaluation.model}`
+                  : "Marked by the configured AI model"}
                 {evaluation.questionSource === "paper_document" &&
                   " · questions read from the uploaded question paper"}
               </CardDescription>
@@ -387,44 +505,50 @@ export default function AiEvaluationPanel({
           </div>
         </CardHeader>
 
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {variant === "teacher" && (
-              <Stat
-                label="AI mark"
-                value={`${aiTotal} / ${maxMarks}`}
-                hint={teacherOverride ? "kept on record" : undefined}
-              />
-            )}
-            <Stat
-              label="Final mark"
-              value={`${shownFinal} / ${shownFinalTotal}`}
-              hint={
-                finalMarksSource === "teacher"
-                  ? "teacher override"
-                  : finalMarksSource === "ai"
-                  ? "from AI evaluation"
-                  : finalMarksSource === "auto"
-                  ? "from answer key"
-                  : undefined
-              }
-            />
-            <Stat label="Maximum" value={String(shownFinalTotal)} />
-            <Stat label="Percentage" value={`${shownPercentage}%`} />
+        <CardContent className="space-y-5 pt-5">
+          {/* The headline. One hero figure, one meter — the mark and how much
+              of the paper it represents. Everything else is context beside it. */}
+          <div className="grid gap-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <div>
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Final mark</p>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-5xl font-bold leading-none text-gray-900">{shownFinal}</span>
+                <span className="text-xl font-medium text-gray-400">/ {shownFinalTotal}</span>
+              </div>
+              <div className="mt-3 max-w-sm">
+                <Meter value={shownFinal} max={shownFinalTotal} height="h-2.5" />
+              </div>
+              {sourceLabel && <p className="mt-1.5 text-[11px] text-gray-500">{sourceLabel}</p>}
+            </div>
+
+            <div className="grid grid-cols-3 gap-5 sm:gap-6">
+              <Figure label="Percentage" value={`${shownPercentage}%`} emphasis />
+              {variant === "teacher" && (
+                <Figure
+                  label="AI mark"
+                  value={`${aiTotal} / ${maxMarks}`}
+                  hint={teacherOverride ? "kept on record" : undefined}
+                />
+              )}
+              <Figure label="Questions" value={String(questions.length)} />
+            </div>
           </div>
 
           {teacherOverride && variant === "teacher" && (
-            <p className="rounded border border-emerald-200 bg-emerald-50/60 p-2 text-xs text-emerald-900">
-              Overridden by {teacherOverride.overriddenByName || "a teacher"}: AI {aiTotal} →{" "}
-              <strong>{teacherOverride.marks}</strong> / {teacherOverride.totalMarks}. The AI
-              evaluation above is unchanged.
+            <p className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-2.5 text-xs text-emerald-900">
+              Overridden by {teacherOverride.overriddenByName || "a teacher"}: AI{" "}
+              <strong>{aiTotal}</strong> → <strong>{teacherOverride.marks}</strong> /{" "}
+              {teacherOverride.totalMarks}. The AI evaluation below is unchanged.
             </p>
           )}
 
           {status === "needs_review" && (evaluation.needsReviewReasons?.length ?? 0) > 0 && (
-            <div className="rounded border border-amber-200 bg-amber-50/60 p-2 text-xs text-amber-900">
-              <p className="mb-1 font-semibold">This evaluation needs a human look:</p>
-              <ul className="list-disc space-y-0.5 pl-4">
+            <div className="rounded-lg border border-amber-300 bg-amber-50/70 p-2.5 text-xs text-amber-900">
+              <p className="mb-1 flex items-center gap-1.5 font-semibold">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                This evaluation needs a human look
+              </p>
+              <ul className="list-disc space-y-0.5 pl-5">
                 {evaluation.needsReviewReasons!.map((reason, index) => (
                   <li key={index}>{reason}</li>
                 ))}
@@ -435,7 +559,7 @@ export default function AiEvaluationPanel({
           {evaluation.summary && (
             <div>
               <p className="mb-1 text-xs font-semibold text-gray-700">Overall feedback</p>
-              <p className="whitespace-pre-wrap rounded border bg-white p-2 text-xs text-gray-800">
+              <p className="whitespace-pre-wrap rounded-lg border bg-gray-50/70 p-2.5 text-xs leading-relaxed text-gray-800">
                 {evaluation.summary}
               </p>
             </div>
@@ -443,9 +567,12 @@ export default function AiEvaluationPanel({
 
           {questions.length > 0 && (
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold text-gray-700">
-                  Question-wise marks ({questions.length})
+                  Question-wise marks
+                  <span className="ml-1.5 font-normal text-gray-400">
+                    tap a question for the reasoning
+                  </span>
                 </p>
                 {variant === "teacher" && onSaveQuestionMarks && dirtyOverrides.length > 0 && (
                   <Button
@@ -453,10 +580,8 @@ export default function AiEvaluationPanel({
                     onClick={() => onSaveQuestionMarks(dirtyOverrides)}
                     disabled={savingQuestionMarks || outOfRange}
                   >
-                    {savingQuestionMarks ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : null}
-                    Save {dirtyOverrides.length} question override
+                    {savingQuestionMarks ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Save {dirtyOverrides.length} override
                     {dirtyOverrides.length !== 1 ? "s" : ""}
                   </Button>
                 )}
@@ -466,22 +591,22 @@ export default function AiEvaluationPanel({
                   One of the overrides is outside its question&apos;s mark range.
                 </p>
               )}
-              {questions.map((question) => (
-                <QuestionCard
-                  key={`${question.questionId}-${question.questionNumber}`}
-                  question={question}
-                  variant={variant}
-                  overrideValue={
-                    overrides[question.questionId] ?? String(question.awardedMarks)
-                  }
-                  onOverrideChange={
-                    variant === "teacher" && onSaveQuestionMarks
-                      ? (value) =>
-                          setOverrides((prev) => ({ ...prev, [question.questionId]: value }))
-                      : undefined
-                  }
-                />
-              ))}
+              <div className="space-y-2">
+                {questions.map((question) => (
+                  <QuestionCard
+                    key={`${question.questionId}-${question.questionNumber}`}
+                    question={question}
+                    variant={variant}
+                    overrideValue={overrides[question.questionId] ?? String(question.awardedMarks)}
+                    onOverrideChange={
+                      variant === "teacher" && onSaveQuestionMarks
+                        ? (value) =>
+                            setOverrides((prev) => ({ ...prev, [question.questionId]: value }))
+                        : undefined
+                    }
+                  />
+                ))}
+              </div>
             </div>
           )}
         </CardContent>
@@ -490,21 +615,21 @@ export default function AiEvaluationPanel({
       {/* Authorship is staff-only and deliberately in its own card, below the
           marks, so it never reads as part of the grade. */}
       {variant === "teacher" && authorship && (
-        <Card className="border-purple-200 bg-purple-50/20">
+        <Card className="border-violet-200">
           <CardHeader className="pb-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle className="flex items-center gap-2 text-sm">
-                <ShieldQuestion className="h-4 w-4 text-purple-600" />
+                <ShieldQuestion className="h-4 w-4 text-violet-600" />
                 Human vs AI authorship estimate
               </CardTitle>
               <Badge
                 variant="outline"
                 className={
                   authorship.status === "likely_ai"
-                    ? "border-red-200 bg-red-50 text-red-700"
+                    ? "border-violet-300 bg-violet-100 text-violet-900"
                     : authorship.status === "likely_human"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                    : "border-amber-200 bg-amber-50 text-amber-800"
+                    ? "border-emerald-300 bg-emerald-100 text-emerald-900"
+                    : "border-gray-300 bg-gray-100 text-gray-700"
                 }
               >
                 {authorshipLabel(authorship.status)}
@@ -516,21 +641,40 @@ export default function AiEvaluationPanel({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="grid grid-cols-3 gap-3">
-              <Stat label="Human written" value={`${authorship.humanPercent}%`} />
-              <Stat label="AI generated" value={`${authorship.aiPercent}%`} />
-              <Stat label="Confidence" value={`${authorship.confidence}%`} />
-            </div>
-
-            <div className="h-2 w-full overflow-hidden rounded-full bg-red-200">
+            {/* Two identity colours, both directly labelled, with a surface gap
+                between the segments so the split is legible without relying on
+                the hue boundary. */}
+            <div className="flex h-3 w-full gap-0.5 overflow-hidden rounded-full">
               <div
-                className="h-full bg-emerald-500"
+                className="h-full rounded-l-full bg-emerald-600 transition-[width] duration-500"
                 style={{ width: `${authorship.humanPercent}%` }}
+              />
+              <div
+                className="h-full rounded-r-full bg-violet-600 transition-[width] duration-500"
+                style={{ width: `${authorship.aiPercent}%` }}
               />
             </div>
 
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+              <span className="flex items-center gap-1.5 font-medium text-gray-800">
+                <span className="h-2.5 w-2.5 rounded-full bg-emerald-600" />
+                <UserIcon className="h-3.5 w-3.5 text-gray-400" />
+                Human written{" "}
+                <strong className="tabular-nums text-gray-900">{authorship.humanPercent}%</strong>
+              </span>
+              <span className="flex items-center gap-1.5 font-medium text-gray-800">
+                <span className="h-2.5 w-2.5 rounded-full bg-violet-600" />
+                <Bot className="h-3.5 w-3.5 text-gray-400" />
+                AI generated{" "}
+                <strong className="tabular-nums text-gray-900">{authorship.aiPercent}%</strong>
+              </span>
+              <span className="text-gray-500">
+                Confidence <strong className="tabular-nums">{authorship.confidence}%</strong>
+              </span>
+            </div>
+
             {authorship.rationale && (
-              <p className="rounded border bg-white p-2 text-xs text-gray-700">
+              <p className="rounded-lg border bg-gray-50/70 p-2.5 text-xs leading-relaxed text-gray-700">
                 {authorship.rationale}
               </p>
             )}
@@ -545,7 +689,7 @@ export default function AiEvaluationPanel({
               </div>
             )}
 
-            <p className="text-[11px] text-gray-500">
+            <p className="text-[11px] leading-relaxed text-gray-500">
               Handwriting is not evidence of human authorship, and typed text is not evidence of AI
               authorship. A suspected AI answer still receives the marks it earns.
             </p>

@@ -607,6 +607,43 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/classroomMembers/$(classroomId + '_' + request.auth.uid));
     }
 
+    // Whether a piece of classwork is open for hand-in right now, and whether
+    // the submission names its real owner.
+    //
+    // All three conditions read the SAME classwork document, so they live in
+    // one function with a single `get()`. Rules charge a document-access unit
+    // per `get()` and cap a request at ten; the create rule below previously
+    // spent two on this document alone.
+    //
+    // The deadline half is the backend enforcement of "Late Submission
+    // Allowed". `lib/utils/submission-window.ts` computes the same answer for
+    // the UI, but only this one is out of the caller's reach — a student who
+    // replays the write with devtools open is refused here. `request.time` is
+    // the server's clock, not the client's, which is the point.
+    //
+    // `lateSubmissionAllowed` missing means allowed: every assignment created
+    // before the field existed accepted late work, and silently closing those
+    // would lock students out on a rule they were never shown.
+    function classworkAcceptsHandIn(classworkId, claimedTeacherId) {
+      let cw = get(/databases/$(database)/documents/classroomClasswork/$(classworkId)).data;
+      return cw.status == 'published' &&
+        cw.teacherId == claimedTeacherId &&
+        (cw.get('lateSubmissionAllowed', true) == true ||
+         cw.get('dueDate', null) == null ||
+         request.time <= cw.dueDate);
+    }
+
+    // The deadline half on its own, for revising work already handed in.
+    // Editing a submission IS a resubmission, so a closed window closes that
+    // too — otherwise "no late submission" is sidestepped by handing in early
+    // and rewriting the answer afterwards.
+    function classworkStillOpen(classworkId) {
+      let cw = get(/databases/$(database)/documents/classroomClasswork/$(classworkId)).data;
+      return cw.get('lateSubmissionAllowed', true) == true ||
+        cw.get('dueDate', null) == null ||
+        request.time <= cw.dueDate;
+    }
+
     // A membership document id is always `${classroomId}_${studentId}`, so the
     // id alone identifies whose membership it is — no document read required.
     //
@@ -759,9 +796,12 @@ service cloud.firestore {
         submissionId == request.resource.data.classworkId + '_' + request.auth.uid &&
         isClassroomMember(request.resource.data.get('classroomId', '')) &&
         request.resource.data.status == 'submitted' &&
-        request.resource.data.teacherId ==
-          get(/databases/$(database)/documents/classroomClasswork/$(request.resource.data.classworkId)).data.teacherId &&
-        get(/databases/$(database)/documents/classroomClasswork/$(request.resource.data.classworkId)).data.status == 'published' &&
+        // Published, owned by the teacher the submission names, and inside the
+        // submission window. One document read covers all three.
+        classworkAcceptsHandIn(
+          request.resource.data.classworkId,
+          request.resource.data.teacherId
+        ) &&
         // Grading fields are the teacher's alone. Without this a student could
         // submit their own work pre-marked.
         !request.resource.data.keys().hasAny([
@@ -775,14 +815,21 @@ service cloud.firestore {
       allow update: if isStudent() && isActiveUser() &&
         resource.data.studentId == request.auth.uid &&
         resource.data.status != 'returned' &&
+        classworkStillOpen(resource.data.classworkId) &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'text', 'attachments', 'updatedAt', 'submittedAt'
         ]);
 
       // Withdrawing work that has not been marked yet.
+      //
+      // Also barred once the window has closed, and that is a protection for
+      // the student rather than a restriction on them: withdrawing after a
+      // no-late-submission deadline would delete work they can no longer
+      // hand in again. Before the deadline, withdrawal is unaffected.
       allow delete: if isAdmin() ||
         (isStudent() && resource.data.studentId == request.auth.uid &&
-         resource.data.status != 'returned');
+         resource.data.status != 'returned' &&
+         classworkStillOpen(resource.data.classworkId));
 
       // Evaluation — marks, feedback, returning, and the machine-assisted
       // pre-pass. Scoped to the classwork's own teacher, not any teacher.

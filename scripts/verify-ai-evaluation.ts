@@ -35,6 +35,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { jsPDF } from "jspdf";
+import { textToPngDataUrl } from "./text-png";
 
 import { runAiEvaluation } from "@/lib/server/ai-evaluation-runner";
 import { computeAnswerFinalMarks } from "@/lib/server/final-marks";
@@ -612,5 +613,141 @@ describe("failure handling", () => {
     } finally {
       process.env.GEMINI_API_KEY = saved;
     }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Scenario 4: an answer script uploaded as an IMAGE, not a PDF
+ * ------------------------------------------------------------------ */
+
+describe("live AI evaluation of an image answer script", () => {
+  const IMG_EXAM = "verify-image-exam";
+  const IMG_ANSWER = "verify-image-answer";
+
+  /**
+   * A photographed answer sheet is the most common upload a student makes, and
+   * it takes a different branch to a PDF only in the MIME type handed to the
+   * model — but that branch has to actually be exercised to be believed. The
+   * PNG is generated pixel by pixel (see `scripts/text-png.ts`) so this is a
+   * genuine image the model reads with vision, not a PDF renamed.
+   */
+  const ANSWER_IMAGE = textToPngDataUrl([
+    "ANSWER SCRIPT - PHYSICS",
+    "",
+    "1. SPEED = DISTANCE / TIME",
+    "   = 150 / 3",
+    "   = 50 M/S",
+    "",
+    "2. NEWTONS FIRST LAW SAYS AN",
+    "   OBJECT STAYS AT REST OR IN",
+    "   UNIFORM MOTION UNLESS ACTED",
+    "   ON BY A NET EXTERNAL FORCE.",
+  ]);
+
+  const questions = [
+    {
+      id: "iq1",
+      examId: IMG_EXAM,
+      order: 1,
+      type: "long",
+      text: "A car travels 150 metres in 3 seconds. Calculate its average speed, showing your working.",
+      marks: 10,
+    },
+    {
+      id: "iq2",
+      examId: IMG_EXAM,
+      order: 2,
+      type: "long",
+      text: "State Newton's first law of motion.",
+      marks: 10,
+    },
+  ];
+
+  let imageDb: ReturnType<typeof createFakeFirestore>;
+  let imageAnswer: Record<string, any>;
+
+  beforeAll(async () => {
+    imageDb = createFakeFirestore(
+      {
+        exams: {
+          [IMG_EXAM]: {
+            title: "Physics Class Test",
+            courseName: "Physics",
+            examMode: "online",
+            totalMarks: 20,
+            teacherId: "teacher-1",
+            allowAnswerUpload: true,
+          },
+        },
+        answers: {
+          [IMG_ANSWER]: {
+            examId: IMG_EXAM,
+            sessionId: "verify-image-session",
+            studentId: "student-3",
+            totalMarks: 20,
+            aiEvaluation: { status: "queued" },
+            answerFiles: [
+              {
+                name: "answer-photo.png",
+                path: "inline:img",
+                url: ANSWER_IMAGE,
+                type: "image/png",
+              },
+            ],
+          },
+        },
+        examSessions: {
+          "verify-image-session": { examId: IMG_EXAM, studentId: "student-3", submitted: true },
+        },
+      },
+      questions
+    );
+
+    await runAiEvaluation({ db: imageDb as any, answerId: IMG_ANSWER, triggeredBy: "verify" });
+    imageAnswer = imageDb.read("answers", IMG_ANSWER)!;
+
+    console.log("\n=== IMAGE ANSWER SCRIPT EVALUATION ===");
+    console.log(
+      "status:",
+      imageAnswer.aiEvaluation?.status,
+      "| AI marks:",
+      imageAnswer.aiEvaluation?.totalMarks,
+      "/",
+      imageAnswer.aiEvaluation?.maxMarks
+    );
+    for (const q of imageAnswer.aiEvaluation?.questions ?? []) {
+      console.log(
+        `  ${q.questionId}: ${q.awardedMarks}/${q.maxMarks} [${q.verdict}] read: ` +
+          `"${String(q.studentAnswer).replace(/\s+/g, " ").slice(0, 70)}"`
+      );
+    }
+    console.log("======================================\n");
+  });
+
+  it("evaluates a PNG answer script through the same pipeline as a PDF", () => {
+    expect(["completed", "needs_review"]).toContain(imageAnswer.aiEvaluation?.status);
+    expect(imageAnswer.aiEvaluation?.answerSource).toBe("files");
+    expect(imageAnswer.aiEvaluation?.filesAnalyzed).toContain("answer-photo.png");
+  });
+
+  it("actually read the handwriting off the image", () => {
+    // The model can only produce these if the pixels were genuinely OCR'd.
+    const transcribed = (imageAnswer.aiEvaluation?.questions ?? [])
+      .map((q: any) => String(q.studentAnswer))
+      .join(" ")
+      .toUpperCase();
+    expect(transcribed).toMatch(/50/);
+    expect(transcribed).toMatch(/NEWTON|FORCE|REST/);
+  });
+
+  it("marks both questions from what it read, within their maxima", () => {
+    const marks = imageAnswer.aiEvaluation.questions;
+    expect(marks).toHaveLength(2);
+    for (const q of marks) {
+      expect(q.awardedMarks).toBeLessThanOrEqual(q.maxMarks);
+      expect(q.awardedMarks).toBeGreaterThan(0);
+    }
+    expect(imageAnswer.finalMarks).toBe(imageAnswer.aiEvaluation.totalMarks);
+    expect(imageAnswer.finalMarksSource).toBe("ai");
   });
 });

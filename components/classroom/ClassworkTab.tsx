@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   Plus,
   FileText,
@@ -74,6 +75,7 @@ export default function ClassworkTab({ classroom, isTeacher, currentUser }: Clas
     instructions: "",
     dueDate: "",
     totalMarks: "",
+    lateSubmissionAllowed: true,
     externalLink: "",
   });
   const [attachments, setAttachments] = useState<UploadResult[]>([]);
@@ -94,7 +96,15 @@ export default function ClassworkTab({ classroom, isTeacher, currentUser }: Clas
   }, [classroom.id, isTeacher]);
 
   const resetForm = () => {
-    setForm({ type: "assignment", title: "", instructions: "", dueDate: "", totalMarks: "", externalLink: "" });
+    setForm({
+      type: "assignment",
+      title: "",
+      instructions: "",
+      dueDate: "",
+      totalMarks: "",
+      lateSubmissionAllowed: true,
+      externalLink: "",
+    });
     setAttachments([]);
     setEditingId(null);
     setShowForm(false);
@@ -108,6 +118,10 @@ export default function ClassworkTab({ classroom, isTeacher, currentUser }: Clas
       instructions: item.instructions || "",
       dueDate: item.dueDate ? new Date((item.dueDate as any).toDate ? (item.dueDate as any).toDate() : item.dueDate).toISOString().slice(0, 16) : "",
       totalMarks: item.totalMarks !== undefined ? String(item.totalMarks) : "",
+      // Undefined on classwork created before the toggle existed, which is
+      // treated as allowed everywhere else — mirror that here so editing an
+      // old assignment does not silently tighten it.
+      lateSubmissionAllowed: item.lateSubmissionAllowed !== false,
       externalLink: item.externalLink || "",
     });
     setAttachments([]);
@@ -133,6 +147,7 @@ export default function ClassworkTab({ classroom, isTeacher, currentUser }: Clas
         externalLink: form.externalLink.trim() || undefined,
         dueDate: form.dueDate ? new Date(form.dueDate) : null,
         totalMarks: form.totalMarks ? Number(form.totalMarks) : undefined,
+        lateSubmissionAllowed: form.lateSubmissionAllowed,
         status,
       };
 
@@ -220,6 +235,29 @@ export default function ClassworkTab({ classroom, isTeacher, currentUser }: Clas
                 <Input type="number" min="0" value={form.totalMarks} onChange={(e) => setForm({ ...form, totalMarks: e.target.value })} />
               </div>
             </div>
+            {/* Late submission only means something for work that can be
+                handed in and has a deadline to be late against. */}
+            {(form.type === "assignment" || form.type === "quiz") && (
+              <div className="flex items-start justify-between gap-3 rounded-lg border bg-gray-50 p-3">
+                <div>
+                  <Label>Late Submission Allowed</Label>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {form.lateSubmissionAllowed
+                      ? "Students can hand in after the due date. Late work is accepted and clearly flagged as LATE for you."
+                      : "Hand-in closes at the due date. Students cannot submit after it, and the server rejects late attempts."}
+                  </p>
+                  {!form.dueDate && form.lateSubmissionAllowed === false && (
+                    <p className="text-xs text-amber-700 mt-1">
+                      Set a due date — without one there is no deadline to close.
+                    </p>
+                  )}
+                </div>
+                <Switch
+                  checked={form.lateSubmissionAllowed}
+                  onCheckedChange={(checked) => setForm({ ...form, lateSubmissionAllowed: checked })}
+                />
+              </div>
+            )}
             {form.type === "link" && (
               <div className="space-y-2">
                 <Label>External Link</Label>
@@ -308,8 +346,22 @@ export default function ClassworkTab({ classroom, isTeacher, currentUser }: Clas
                 <h3 className="font-semibold text-gray-900">{item.title}</h3>
                 {item.instructions && <p className="text-sm text-gray-700 whitespace-pre-wrap">{item.instructions}</p>}
                 {item.dueDate && (
-                  <p className="text-xs text-gray-500 flex items-center gap-1">
+                  <p className="text-xs text-gray-500 flex items-center gap-1 flex-wrap">
                     <Clock className="h-3 w-3" /> Due {formatDate(item.dueDate)}
+                    {isSubmittable(item) && (
+                      <span
+                        className={
+                          item.lateSubmissionAllowed === false
+                            ? "text-red-600 font-medium"
+                            : "text-gray-400"
+                        }
+                      >
+                        ·{" "}
+                        {item.lateSubmissionAllowed === false
+                          ? "No late submission"
+                          : "Late submission allowed"}
+                      </span>
+                    )}
                   </p>
                 )}
                 {item.externalLink && (

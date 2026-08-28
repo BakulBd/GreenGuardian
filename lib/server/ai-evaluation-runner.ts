@@ -76,44 +76,71 @@ interface StoredFile {
  * is a *signed* link with an expiry — an evaluation re-run weeks after
  * submission would fail on a link that has since lapsed, even though the object
  * is still sitting in the bucket. The key never expires.
+ *
+ * The objects are fetched CONCURRENTLY. Each read is a round trip to Backblaze,
+ * and a ten-page scanned script did ten of them end to end for no reason — the
+ * reads are independent, and the model cannot start until the last one lands
+ * either way. The size budget is still applied strictly in page order
+ * afterwards, so which pages get dropped when a submission is too large does
+ * not depend on which request happened to finish first.
  */
 async function readFilesAsParts(
   files: StoredFile[],
   limit: number
 ): Promise<{ parts: ModelPart[]; names: string[]; errors: string[] }> {
+  const considered = files.slice(0, limit);
+
+  const results = await Promise.all(
+    considered.map(async (file) => {
+      // `inline:` paths are the base64 upload fallback — bytes live in `url`.
+      const reference =
+        file.path && !file.path.startsWith("inline:")
+          ? file.path
+          : file.url || file.downloadURL || "";
+
+      const label = file.name || "A file";
+      if (!reference) {
+        return { ok: false as const, error: `${label} has no readable storage reference.` };
+      }
+
+      try {
+        const bytes = await readFileReference(reference);
+        return {
+          ok: true as const,
+          label,
+          name: file.name || reference.split("/").pop() || "file",
+          bytes,
+        };
+      } catch (error: any) {
+        return {
+          ok: false as const,
+          error: `${label} could not be read: ${error?.message || error}`,
+        };
+      }
+    })
+  );
+
   const parts: ModelPart[] = [];
   const names: string[] = [];
   const errors: string[] = [];
   let totalBytes = 0;
 
-  for (const file of files.slice(0, limit)) {
-    // `inline:` paths are the base64 upload fallback — the bytes live in `url`.
-    const reference =
-      file.path && !file.path.startsWith("inline:")
-        ? file.path
-        : file.url || file.downloadURL || "";
-
-    if (!reference) {
-      errors.push(`${file.name || "A file"} has no readable storage reference.`);
+  for (const result of results) {
+    if (!result.ok) {
+      errors.push(result.error);
       continue;
     }
-
-    try {
-      const { base64, mimeType, byteLength } = await readFileReference(reference);
-      if (totalBytes + byteLength > MAX_TOTAL_BYTES) {
-        errors.push(
-          `${file.name || "A file"} was skipped — the submission exceeds the ${
-            MAX_TOTAL_BYTES / (1024 * 1024)
-          }MB analysis limit.`
-        );
-        continue;
-      }
-      totalBytes += byteLength;
-      parts.push({ inlineData: { mimeType, data: base64 } });
-      names.push(file.name || reference.split("/").pop() || "file");
-    } catch (error: any) {
-      errors.push(`${file.name || "A file"} could not be read: ${error?.message || error}`);
+    if (totalBytes + result.bytes.byteLength > MAX_TOTAL_BYTES) {
+      errors.push(
+        `${result.label} was skipped — the submission exceeds the ${
+          MAX_TOTAL_BYTES / (1024 * 1024)
+        }MB analysis limit.`
+      );
+      continue;
     }
+    totalBytes += result.bytes.byteLength;
+    parts.push({ inlineData: { mimeType: result.bytes.mimeType, data: result.bytes.base64 } });
+    names.push(result.name);
   }
 
   if (files.length > limit) {
@@ -296,11 +323,17 @@ export async function resolveQuestions(
 async function markWithModel(
   questions: EvaluableQuestion[],
   scriptParts: ModelPart[],
-  context: { examTitle?: string; courseName?: string; hasTypedAnswers: boolean }
+  context: {
+    examTitle?: string;
+    courseName?: string;
+    instructions?: string;
+    hasTypedAnswers: boolean;
+  }
 ): Promise<{ result: AiEvaluationResult; modelUsed: string; attempts: number }> {
   const prompt = buildEvaluationPrompt(questions, {
     examTitle: context.examTitle,
     courseName: context.courseName,
+    instructions: context.instructions,
     hasAttachedScript: scriptParts.length > 0,
     hasTypedAnswers: context.hasTypedAnswers,
   });
@@ -500,9 +533,18 @@ export async function runAiEvaluation({
       );
     }
 
-    const resolved = await resolveQuestions(db, examId, exam, submittedAnswers);
+    // The question paper and the answer script are independent inputs, and
+    // resolving the paper can itself be a model call (an upload-mode exam whose
+    // questions have to be read off a scan). Running them end to end meant a
+    // student waited for a paper parse and then a bucket fetch, when neither
+    // needs the other's result. `Promise.all` rather than `allSettled`: if
+    // either input cannot be obtained there is nothing to mark, and the first
+    // rejection carries the reason the caller records.
+    const [resolved, script] = await Promise.all([
+      resolveQuestions(db, examId, exam, submittedAnswers),
+      readFilesAsParts(answerFiles, MAX_SCRIPT_FILES),
+    ]);
 
-    const script = await readFilesAsParts(answerFiles, MAX_SCRIPT_FILES);
     if (answerFiles.length > 0 && script.parts.length === 0) {
       throw new EvaluationError(
         `The answer script could not be read. ${script.errors.join(" ")}`.trim(),
@@ -513,6 +555,10 @@ export async function runAiEvaluation({
     const marked = await markWithModel(resolved.questions, script.parts, {
       examTitle: String(exam.title || answer.examTitle || ""),
       courseName: String(exam.courseName || answer.courseName || ""),
+      // The teacher's own instructions for the paper, so marking follows the
+      // rubric they actually set ("show all working", "answer any three")
+      // rather than a generic idea of what the questions deserve.
+      instructions: String(exam.instructions || ""),
       hasTypedAnswers,
     });
 

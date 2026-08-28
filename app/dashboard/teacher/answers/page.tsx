@@ -768,15 +768,38 @@ function AnswerReviewContent() {
    * page has no local signal when one lands. Polling only while something is
    * actually running keeps it to the moments it is useful.
    */
-  const runningEvaluations = answers.filter(
-    (a) => a.aiEvaluation?.status === "processing" || a.aiEvaluation?.status === "queued"
-  ).length;
+  const runningEvaluationIds = useMemo(
+    () =>
+      answers
+        .filter(
+          (a) => a.aiEvaluation?.status === "processing" || a.aiEvaluation?.status === "queued"
+        )
+        .map((a) => a.id),
+    [answers]
+  );
 
   useEffect(() => {
-    if (runningEvaluations === 0 || batchProgress || evalBatchProgress) return;
-    const timer = setInterval(() => loadSubmissionsData(), 20_000);
+    if (runningEvaluationIds.length === 0 || batchProgress || evalBatchProgress) return;
+
+    // Poll ONLY the submissions actually being evaluated.
+    //
+    // This used to call `loadSubmissionsData()`, which re-reads every exam the
+    // teacher owns, every submission, and one user document per student — a
+    // few hundred reads every 20 seconds, on a class where the answer was
+    // "has one field on one document changed yet?". Refreshing just the
+    // running rows keeps the cost proportional to what is actually in flight,
+    // and `refreshAnswer` patches them in place so the table does not flicker.
+    const timer = setInterval(() => {
+      runningEvaluationIds.forEach((id) => {
+        refreshAnswer(id).catch(() => {
+          // A transient read failure just means we look again next tick.
+        });
+      });
+    }, 20_000);
     return () => clearInterval(timer);
-  }, [runningEvaluations, batchProgress, evalBatchProgress]);
+    // Joined rather than passed as an array: a new array identity every render
+    // would tear down and restart the interval on each poll.
+  }, [runningEvaluationIds.join(","), batchProgress, evalBatchProgress]);
 
   if (loading) {
     return (

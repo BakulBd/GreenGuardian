@@ -33,6 +33,11 @@ import type {
   ClassworkSubmission,
   User,
 } from "../types";
+import {
+  getSubmissionWindow,
+  resolveLateFlag,
+  LATE_SUBMISSION_BLOCKED_MESSAGE,
+} from "../utils/submission-window";
 
 const SUBMISSIONS = "classroomSubmissions";
 
@@ -82,6 +87,18 @@ export async function submitClasswork(input: SubmitInput): Promise<string> {
   }
   if (classwork.status !== "published") {
     throw new Error("This classwork is not open for submissions yet.");
+  }
+
+  // Deadline policy. Checked here so the student gets a sentence they can act
+  // on rather than a bare "permission denied" — but the authority is
+  // `firestore.rules`, which re-evaluates the same condition against the
+  // classwork document and the server's own clock. A student who edits the
+  // page, replays the write, or lies about the due date is refused there.
+  // Not named `window` — that shadows the global in a module that also runs in
+  // the browser.
+  const submissionWindow = getSubmissionWindow(classwork);
+  if (!submissionWindow.canSubmit) {
+    throw new Error(LATE_SUBMISSION_BLOCKED_MESSAGE);
   }
 
   const text = input.text?.trim() || "";
@@ -185,7 +202,12 @@ async function createSubmission(
       // Lateness is resolved once, at hand-in. Recomputing it on read would
       // let a teacher extending the deadline retroactively un-flag work that
       // genuinely arrived late — and vice versa.
-      late: due ? Date.now() > due.getTime() : false,
+      late: resolveLateFlag(classwork),
+      // The deadline AS IT STOOD at hand-in, denormalized so the teacher's
+      // review can show "submitted 10:35pm / deadline 9:00pm" without a second
+      // read, and so the comparison still reads correctly if the teacher moves
+      // the due date afterwards.
+      dueAtSubmission: due || null,
       submittedAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     })
@@ -243,13 +265,36 @@ function sortSubmissions(items: ClassworkSubmission[]): ClassworkSubmission[] {
   });
 }
 
+export interface SubmissionQueryOptions {
+  /**
+   * The signed-in teacher's uid. REQUIRED for a teacher; omitted for an admin.
+   *
+   * This is not a convenience filter — it is what makes the query legal.
+   * Firestore evaluates a list query against the rules STATICALLY: it will only
+   * run one it can prove returns nothing unreadable. The teacher's read grant
+   * is `resource.data.teacherId == request.auth.uid`, so a query filtered on
+   * `classworkId` alone is not provably safe and is refused outright with
+   * `permission-denied` — which is exactly why "Review submissions" came back
+   * empty for every teacher, on classwork they owned, with students' work
+   * sitting in the collection. Constraining `teacherId` in the query itself is
+   * what lets the rule engine discharge the condition.
+   *
+   * Admins read under `isAdmin()`, which has no per-document condition, so
+   * they must NOT pass this — filtering on their own uid would return nothing.
+   */
+  teacherId?: string;
+}
+
 /** Every submission for one piece of classwork (teacher/admin view). */
 export function subscribeToClassworkSubmissions(
   classworkId: string,
   callback: (submissions: ClassworkSubmission[]) => void,
-  onError?: (error: any) => void
+  onError?: (error: any) => void,
+  options?: SubmissionQueryOptions
 ): () => void {
-  const q = query(collection(db, SUBMISSIONS), where("classworkId", "==", classworkId));
+  const constraints = [where("classworkId", "==", classworkId)];
+  if (options?.teacherId) constraints.push(where("teacherId", "==", options.teacherId));
+  const q = query(collection(db, SUBMISSIONS), ...constraints);
   return onSnapshot(
     q,
     (snap) => {
@@ -265,10 +310,14 @@ export function subscribeToClassworkSubmissions(
   );
 }
 
-export async function getClassworkSubmissions(classworkId: string): Promise<ClassworkSubmission[]> {
-  const snap = await getDocs(
-    query(collection(db, SUBMISSIONS), where("classworkId", "==", classworkId))
-  );
+export async function getClassworkSubmissions(
+  classworkId: string,
+  options?: SubmissionQueryOptions
+): Promise<ClassworkSubmission[]> {
+  const constraints = [where("classworkId", "==", classworkId)];
+  // Same rule-satisfaction requirement as the subscription above.
+  if (options?.teacherId) constraints.push(where("teacherId", "==", options.teacherId));
+  const snap = await getDocs(query(collection(db, SUBMISSIONS), ...constraints));
   return sortSubmissions(snap.docs.map((d) => ({ ...d.data(), id: d.id } as ClassworkSubmission)));
 }
 
@@ -286,6 +335,11 @@ export interface GradeInput {
  * The mark is validated here as well as in the UI: a grade above the item's
  * total, or a negative one, is a data error that would silently corrupt every
  * average computed from it downstream.
+ *
+ * Safe to call again on an already-returned submission — correcting a mark is
+ * an ordinary thing for a teacher to do, and making them reopen the work
+ * (which invites the student to resubmit) just to fix a typo was worse. The
+ * update is idempotent and the student simply sees the new number.
  */
 export async function gradeSubmission(input: GradeInput): Promise<void> {
   const { marks, totalMarks } = input;

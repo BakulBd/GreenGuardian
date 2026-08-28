@@ -591,7 +591,7 @@ export default function CreateExamPage() {
             {examMode === "online" && (
               <div className="flex items-center justify-between py-2">
                 <div>
-                  <Label>Allow Answer File Uploads</Label>
+                  <Label>File Submission Allowed</Label>
                   <p className="text-sm text-gray-500">
                     Let students attach a PDF or photo of handwritten work alongside their typed
                     answers — for derivations, diagrams and worked proofs.

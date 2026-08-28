@@ -504,7 +504,7 @@ export default function TeacherExamEditClient() {
 
               <div className="sm:col-span-2 flex items-center justify-between rounded-lg border p-3">
                 <div>
-                  <Label>Allow Answer File Uploads</Label>
+                  <Label>File Submission Allowed</Label>
                   <p className="text-sm text-gray-500">
                     Students can attach a PDF or photo of handwritten work alongside their typed
                     answers. Upload-mode exams always accept files.
