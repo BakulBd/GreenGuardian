@@ -35,6 +35,7 @@ import {
   getWarningStyle,
 } from "@/lib/firebase/results";
 import { Result, StudentWarning, WarningType } from "@/lib/types";
+import { isEvaluationInProgress } from "@/lib/server/ai-evaluation";
 
 export default function ResultDetailPage() {
   const params = useParams();
@@ -172,6 +173,7 @@ export default function ResultDetailPage() {
   }
 
   const isPassed = result.passFailStatus === "Pass";
+  const evaluationPending = isEvaluationInProgress(result.evaluationStatus);
 
   return (
     <DashboardLayout role="student">
@@ -203,23 +205,35 @@ export default function ResultDetailPage() {
                   <p className="text-slate-300 text-sm mt-1">{result.courseCode}</p>
                 )}
               </div>
-              <div className="flex items-center gap-3">
-                <div className="text-right">
-                  <p className="text-3xl font-bold">{result.percentage.toFixed(1)}%</p>
-                  <p className="text-slate-300 text-sm">
-                    {result.obtainedMarks} / {result.totalMarks} Marks
-                  </p>
+              {/* While the AI evaluation is still running the stored 0 is an
+                  absence, not a score — showing "0% FAILED" here would be a
+                  lie that corrects itself a few minutes later. */}
+              {evaluationPending ? (
+                <div className="flex items-center gap-2 rounded-lg bg-white/10 px-4 py-3">
+                  <Loader2 className="h-5 w-5 animate-spin text-blue-200" />
+                  <span className="text-sm font-medium text-blue-100">
+                    AI Evaluation Processing...
+                  </span>
                 </div>
-                <Badge
-                  className={
-                    isPassed
-                      ? "bg-emerald-500 text-white text-sm px-3 py-1"
-                      : "bg-red-500 text-white text-sm px-3 py-1"
-                  }
-                >
-                  {isPassed ? "PASSED" : "FAILED"}
-                </Badge>
-              </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <div className="text-right">
+                    <p className="text-3xl font-bold">{result.percentage.toFixed(1)}%</p>
+                    <p className="text-slate-300 text-sm">
+                      {result.obtainedMarks} / {result.totalMarks} Marks
+                    </p>
+                  </div>
+                  <Badge
+                    className={
+                      isPassed
+                        ? "bg-emerald-500 text-white text-sm px-3 py-1"
+                        : "bg-red-500 text-white text-sm px-3 py-1"
+                    }
+                  >
+                    {isPassed ? "PASSED" : "FAILED"}
+                  </Badge>
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>

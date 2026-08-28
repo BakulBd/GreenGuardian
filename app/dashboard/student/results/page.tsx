@@ -41,6 +41,8 @@ import {
   getWarningStyle,
 } from "@/lib/firebase/results";
 import { Result, StudentWarning, WarningType, ResultFilters } from "@/lib/types";
+// Pure helper (no model client, no Firestore) — safe in a client component.
+import { isEvaluationInProgress } from "@/lib/server/ai-evaluation";
 
 export default function StudentResultsPage() {
   const { user } = useAuth();
@@ -187,6 +189,34 @@ export default function StudentResultsPage() {
 
   const filteredResults = applyFilters();
   const hasActiveFilters = Object.keys(filters).length > 0 || searchQuery.length > 0;
+
+  /**
+   * Results whose marks are real. A submission still being evaluated stores a
+   * placeholder 0, and letting that into the averages would drag every summary
+   * figure down until the evaluation finishes.
+   */
+  const scoredResults = results.filter((r) => !isEvaluationInProgress(r.evaluationStatus));
+
+  const pendingEvaluations = results.filter((r) =>
+    isEvaluationInProgress(r.evaluationStatus)
+  ).length;
+
+  /**
+   * Poll while an evaluation is running.
+   *
+   * `subscribeToResults` only watches the `results` collection, which nothing
+   * writes; these results are synthesised from exam sessions, so there is no
+   * listener to fire when the evaluation lands. A slow poll is enough — the
+   * whole point is that the student can leave the page open and watch
+   * "Processing…" turn into a mark.
+   */
+  useEffect(() => {
+    if (pendingEvaluations === 0) return;
+    const timer = setInterval(() => {
+      loadResults();
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [pendingEvaluations, user]);
 
   const formatDate = (date: any) => {
     if (!date) return "N/A";
@@ -475,6 +505,63 @@ export default function StudentResultsPage() {
                       const gradeColor = getGradeColor(result.grade);
                       const gpaColor = result.gpa !== undefined ? getGpaColor(result.gpa) : "bg-gray-100";
 
+                      // While the AI evaluation is still running there is no
+                      // mark yet — the stored 0 is an absence, not a score.
+                      // Showing it as "0 / 100, Fail" would be a lie that
+                      // corrects itself minutes later, so the derived columns
+                      // are suppressed until the evaluation lands.
+                      const evaluationPending = isEvaluationInProgress(result.evaluationStatus);
+                      const evaluationFailed = result.evaluationStatus === "failed";
+
+                      if (evaluationPending || evaluationFailed) {
+                        return (
+                          <tr
+                            key={result.id}
+                            className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
+                          >
+                            <td className="py-3 px-4">
+                              <div className="font-medium text-gray-900">{result.examName}</div>
+                              <div className="text-xs text-gray-500 mt-0.5">{result.academicYear}</div>
+                            </td>
+                            <td className="py-3 px-4 text-gray-700">{result.courseName}</td>
+                            <td className="py-3 px-4 text-gray-700">
+                              {result.batchName} / {result.sectionName}
+                            </td>
+                            <td className="py-3 px-4 text-center font-medium">{result.totalMarks}</td>
+                            <td className="py-3 px-4 text-center" colSpan={5}>
+                              {evaluationPending ? (
+                                <span className="inline-flex items-center gap-2 text-sm font-medium text-blue-700">
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                  AI Evaluation Processing...
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-2 text-sm font-medium text-amber-700">
+                                  <AlertTriangle className="h-4 w-4" />
+                                  Evaluation could not be completed — your teacher will mark this
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-center text-xs text-gray-500">
+                              <div className="flex items-center gap-1 justify-center">
+                                <Calendar className="h-3 w-3" />
+                                {formatDate(result.resultPublishedDate)}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-blue-600 hover:text-blue-700 hover:bg-blue-50"
+                                onClick={() => router.push(`/dashboard/student/results/${result.id}`)}
+                              >
+                                <Eye className="h-4 w-4 mr-1" />
+                                View Details
+                              </Button>
+                            </td>
+                          </tr>
+                        );
+                      }
+
                       return (
                         <tr
                           key={result.id}
@@ -573,7 +660,7 @@ export default function StudentResultsPage() {
                   <CheckCircle2 className="h-8 w-8 text-green-600" />
                   <div>
                     <p className="text-2xl font-bold">
-                      {results.filter((r) => r.passFailStatus === "Pass").length}
+                      {scoredResults.filter((r) => r.passFailStatus === "Pass").length}
                     </p>
                     <p className="text-sm text-gray-500">Passed</p>
                   </div>
@@ -586,8 +673,11 @@ export default function StudentResultsPage() {
                   <TrendingUp className="h-8 w-8 text-purple-600" />
                   <div>
                     <p className="text-2xl font-bold">
-                      {results.length > 0
-                        ? (results.reduce((sum, r) => sum + r.percentage, 0) / results.length).toFixed(1)
+                      {scoredResults.length > 0
+                        ? (
+                            scoredResults.reduce((sum, r) => sum + r.percentage, 0) /
+                            scoredResults.length
+                          ).toFixed(1)
                         : 0}%
                     </p>
                     <p className="text-sm text-gray-500">Avg Percentage</p>
@@ -601,7 +691,7 @@ export default function StudentResultsPage() {
                   <Award className="h-8 w-8 text-yellow-600" />
                   <div>
                     <p className="text-2xl font-bold">
-                      {results.filter((r) => r.gpa !== undefined && r.gpa >= 3.5).length}
+                      {scoredResults.filter((r) => r.gpa !== undefined && r.gpa >= 3.5).length}
                     </p>
                     <p className="text-sm text-gray-500">Honors (GPA ≥ 3.5)</p>
                   </div>

@@ -23,18 +23,22 @@ import {
   RefreshCcw,
   Clock,
   Filter,
-  Search
+  Search,
+  Sparkles
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { doc, getDoc, collection, query, where, getDocs, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { getSimilarityLevel, getSimilarityColor, performSimilarityCheck } from "@/lib/utils/similarity";
-import { analyzeSubmittedAnswer } from "@/lib/utils/ai-client";
+import { analyzeSubmittedAnswer, requestAiEvaluation } from "@/lib/utils/ai-client";
+import { authedFetch } from "@/lib/utils/api-client";
+import AiEvaluationPanel from "@/components/AiEvaluationPanel";
+import { authorshipLabel } from "@/lib/server/ai-evaluation";
 import { formatDate } from "@/lib/utils/helpers";
 import { getQuestionsByExam, getExamsByTeacher, getAnswersByTeacher } from "@/lib/firebase/exams";
 import ManualEvaluationPanel from "@/components/ManualEvaluationPanel";
-import { Exam } from "@/lib/types";
+import type { AiEvaluation, AuthorshipEstimate, Exam, TeacherOverride } from "@/lib/types";
 
 interface Answer {
   id: string;
@@ -86,6 +90,20 @@ interface Answer {
     analyzedAt?: string;
   };
   ocrText?: string;
+  ocrStatus?: string;
+  /** The AI's own marking. Never modified by a teacher override. */
+  aiEvaluation?: AiEvaluation;
+  aiEvaluationStatus?: string;
+  /**
+   * Human/AI authorship estimate. Kept entirely separate from `ocrAnalysis` —
+   * a successful text extraction says nothing about who wrote the text.
+   */
+  authorship?: AuthorshipEstimate & { analyzedAt?: string };
+  teacherOverride?: TeacherOverride;
+  finalMarks?: number;
+  finalTotalMarks?: number;
+  finalPercentage?: number;
+  finalMarksSource?: "teacher" | "ai" | "auto";
   answers?: Record<string, string>;
   similarityScore?: number;
   similarityMatches?: Array<{
@@ -105,6 +123,15 @@ interface StudentInfo {
   section?: string;
 }
 
+/** A submission the AI has not successfully marked yet. */
+function needsAiEvaluation(answer: Answer): boolean {
+  const hasScript = Boolean(answer.answerFiles && answer.answerFiles.length > 0);
+  const hasTypedAnswers = Boolean(answer.answers && Object.keys(answer.answers).length > 0);
+  if (!hasScript && !hasTypedAnswers) return false;
+  const status = answer.aiEvaluation?.status ?? answer.aiEvaluationStatus;
+  return status !== "completed" && status !== "needs_review" && status !== "processing";
+}
+
 function AnswerReviewContent() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -119,6 +146,11 @@ function AnswerReviewContent() {
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
   const [selectedAnswer, setSelectedAnswer] = useState<Answer | null>(null);
+  const [evaluating, setEvaluating] = useState<string | null>(null);
+  const [evalBatchProgress, setEvalBatchProgress] = useState<{ done: number; total: number } | null>(
+    null
+  );
+  const [savingQuestionMarks, setSavingQuestionMarks] = useState(false);
 
   /**
    * Open an answer's detail panel, pulling its similarity match list from
@@ -432,31 +464,227 @@ function AnswerReviewContent() {
     });
   };
 
+  /** Merge a patch into both the list and the open detail modal. */
+  const patchAnswer = (answerId: string, patch: Partial<Answer>) => {
+    setAnswers((prev) =>
+      prev.map((item) => (item.id === answerId ? ({ ...item, ...patch } as Answer) : item))
+    );
+    setSelectedAnswer((prev) =>
+      prev && prev.id === answerId ? ({ ...prev, ...patch } as Answer) : prev
+    );
+  };
+
+  /**
+   * Re-read the submission after the server has written an evaluation.
+   *
+   * The evaluation is written by the Admin SDK, so nothing in this page's state
+   * knows about it. Reading the document back is simpler — and less likely to
+   * drift from what is stored — than trying to reconstruct the write locally.
+   */
+  const refreshAnswer = async (answerId: string) => {
+    try {
+      const snap = await getDoc(doc(db, "answers", answerId));
+      if (!snap.exists()) return;
+      patchAnswer(answerId, { id: snap.id, ...snap.data() } as Answer);
+    } catch (error) {
+      console.warn("Could not refresh the submission after evaluation:", error);
+    }
+  };
+
+  /**
+   * Run (or re-run) the AI evaluation for one submission.
+   *
+   * Evaluation normally starts automatically at submit time; this covers the
+   * failed/needs-review retry and any submission that predates the feature.
+   */
+  const runAiEvaluationFor = async (
+    answer: Answer,
+    options: { silent?: boolean; force?: boolean } = {}
+  ): Promise<boolean> => {
+    setEvaluating(answer.id);
+    try {
+      const result = await requestAiEvaluation(answer.id, { force: options.force ?? true });
+      await refreshAnswer(answer.id);
+
+      if (!options.silent) {
+        if (result.status === "completed") {
+          toast({ title: "AI evaluation complete", description: "Marks and feedback are ready." });
+        } else if (result.status === "needs_review") {
+          toast({
+            title: "Needs review",
+            description: result.reason || "The evaluation finished but flagged something for you.",
+          });
+        } else if (result.status === "skipped") {
+          toast({ title: "Nothing to do", description: result.reason || "Already evaluated." });
+        } else {
+          toast({
+            title: "Evaluation failed",
+            description: result.reason || "No marks were recorded.",
+            variant: "destructive",
+          });
+        }
+      }
+      return result.status === "completed" || result.status === "needs_review";
+    } catch (error: any) {
+      if (!options.silent) {
+        toast({
+          title: "Evaluation failed",
+          description: error?.message || "The AI evaluation could not be run.",
+          variant: "destructive",
+        });
+      }
+      return false;
+    } finally {
+      setEvaluating(null);
+    }
+  };
+
+  const runBatchAiEvaluation = async () => {
+    if (evalBatchProgress || evaluating) return;
+
+    const pending = filteredAnswers.filter((a) => needsAiEvaluation(a));
+    if (pending.length === 0) {
+      toast({
+        title: "Nothing to evaluate",
+        description: "Every submission in view has already been evaluated.",
+      });
+      return;
+    }
+
+    setEvalBatchProgress({ done: 0, total: pending.length });
+    let succeeded = 0;
+    for (let i = 0; i < pending.length; i++) {
+      // Sequential on purpose: each evaluation is a multi-page vision call, and
+      // firing a class of them at once would trip the per-user rate limit.
+      const ok = await runAiEvaluationFor(pending[i], { silent: true, force: true });
+      if (ok) succeeded++;
+      setEvalBatchProgress({ done: i + 1, total: pending.length });
+    }
+    setEvalBatchProgress(null);
+
+    toast({
+      title: succeeded === pending.length ? "Batch evaluation complete" : "Batch finished with errors",
+      description: `Evaluated ${succeeded} of ${pending.length}. Failed ones keep a Failed status — nothing was marked by guesswork.`,
+      variant: succeeded === pending.length ? undefined : "destructive",
+    });
+  };
+
+  /** Teacher override of individual question marks, saved as one override. */
+  const saveQuestionMarks = async (
+    answer: Answer,
+    marks: Array<{ questionId: string; marks: number }>
+  ) => {
+    setSavingQuestionMarks(true);
+    try {
+      await authedFetch("/api/exams/evaluate", {
+        method: "POST",
+        body: { answerId: answer.id, questionMarks: marks },
+        fallbackError: "Could not save the question marks.",
+      });
+      await refreshAnswer(answer.id);
+      toast({
+        title: "Question marks saved",
+        description: "The student's final mark has been updated. The AI evaluation is unchanged.",
+      });
+    } catch (error: any) {
+      toast({
+        title: "Could not save",
+        description: error?.message || "The question marks were not saved.",
+        variant: "destructive",
+      });
+    } finally {
+      setSavingQuestionMarks(false);
+    }
+  };
+
+  /**
+   * Text-extraction status ONLY.
+   *
+   * This badge used to read "Human Verified" whenever OCR succeeded and the
+   * detector did not raise a flag, which conflated three unrelated things: that
+   * the file could be read, that the text was checked, and that a person wrote
+   * it. A successful OCR pass is evidence of none of those beyond the first.
+   * Authorship now has its own badge, from its own analysis.
+   */
   const getOCRBadge = (answer: Answer) => {
     if (!answer.answerFiles || answer.answerFiles.length === 0) {
       return <Badge variant="outline" className="bg-gray-50 text-gray-600">Online Mode</Badge>;
     }
-    if (answer.ocrAnalysis?.error) {
-      return <Badge variant="destructive">OCR Error</Badge>;
+    if (answer.ocrAnalysis?.error || answer.ocrStatus === "failed") {
+      return <Badge variant="destructive">Text Extraction Failed</Badge>;
     }
-    if (answer.ocrAnalysis?.aiDetection) {
-      const isAI = answer.ocrAnalysis.aiDetection.isAIGenerated;
-      return isAI ? (
-        <Badge variant="destructive" className="flex items-center gap-1">
-          <Bot className="h-3 w-3" />
-          AI Content ({answer.ocrAnalysis.aiDetection.confidence}%)
-        </Badge>
-      ) : (
-        <Badge variant="default" className="bg-emerald-600 hover:bg-emerald-700 flex items-center gap-1">
-          <CheckCircle className="h-3 w-3" />
-          Human Verified
+    if (answer.ocrAnalysis?.extractedText) {
+      return (
+        <Badge variant="secondary" className="bg-blue-50 text-blue-700">
+          Text Extracted ({answer.ocrAnalysis.wordCount ?? 0} words)
         </Badge>
       );
     }
-    if (answer.ocrAnalysis?.extractedText) {
-      return <Badge variant="secondary" className="bg-blue-50 text-blue-700">OCR Extracted</Badge>;
+    return (
+      <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-300">
+        Text Not Extracted
+      </Badge>
+    );
+  };
+
+  /** AI marking status — independent of OCR and of authorship. */
+  const getEvaluationBadge = (answer: Answer) => {
+    const status = answer.aiEvaluation?.status ?? answer.aiEvaluationStatus;
+    switch (status) {
+      case "queued":
+      case "processing":
+        return (
+          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            AI Evaluating
+          </Badge>
+        );
+      case "completed":
+        return (
+          <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 gap-1">
+            <CheckCircle className="h-3 w-3" />
+            AI Evaluated
+          </Badge>
+        );
+      case "needs_review":
+        return (
+          <Badge variant="outline" className="bg-amber-50 text-amber-800 border-amber-300 gap-1">
+            <AlertTriangle className="h-3 w-3" />
+            Needs Review
+          </Badge>
+        );
+      case "failed":
+        return (
+          <Badge variant="destructive" className="gap-1">
+            <AlertCircle className="h-3 w-3" />
+            Evaluation Failed
+          </Badge>
+        );
+      default:
+        return null;
     }
-    return <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-300">Pending OCR</Badge>;
+  };
+
+  /**
+   * Authorship estimate — a probabilistic signal about who wrote the script,
+   * shown next to the marks but never part of them.
+   */
+  const getAuthorshipBadge = (answer: Answer) => {
+    const authorship = answer.authorship;
+    if (!authorship) return null;
+    const className =
+      authorship.status === "likely_ai"
+        ? "bg-red-50 text-red-700 border-red-200"
+        : authorship.status === "likely_human"
+        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+        : "bg-amber-50 text-amber-800 border-amber-200";
+    return (
+      <Badge variant="outline" className={`${className} gap-1`}>
+        <Bot className="h-3 w-3" />
+        {authorshipLabel(authorship.status)} · {authorship.humanPercent}% human /{" "}
+        {authorship.aiPercent}% AI
+      </Badge>
+    );
   };
 
   // Filter options are derived from the submissions themselves. They used to
@@ -531,6 +759,25 @@ function AnswerReviewContent() {
     (a) => a.answerFiles && a.answerFiles.length > 0 && !a.ocrAnalysis?.extractedText
   ).length;
 
+  const pendingEvalCount = filteredAnswers.filter((a) => needsAiEvaluation(a)).length;
+
+  /**
+   * Refresh while an evaluation is in flight.
+   *
+   * Evaluations start server-side at submit time, so a teacher watching this
+   * page has no local signal when one lands. Polling only while something is
+   * actually running keeps it to the moments it is useful.
+   */
+  const runningEvaluations = answers.filter(
+    (a) => a.aiEvaluation?.status === "processing" || a.aiEvaluation?.status === "queued"
+  ).length;
+
+  useEffect(() => {
+    if (runningEvaluations === 0 || batchProgress || evalBatchProgress) return;
+    const timer = setInterval(() => loadSubmissionsData(), 20_000);
+    return () => clearInterval(timer);
+  }, [runningEvaluations, batchProgress, evalBatchProgress]);
+
   if (loading) {
     return (
       <DashboardLayout role="teacher">
@@ -580,6 +827,24 @@ function AnswerReviewContent() {
                 <>
                   <Bot className="h-4 w-4 text-purple-600" />
                   Run OCR on {pendingOcrCount} Pending
+                </>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={runBatchAiEvaluation}
+              disabled={!!evalBatchProgress || !!evaluating || pendingEvalCount === 0}
+              className="gap-2 border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+            >
+              {evalBatchProgress ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Evaluating {evalBatchProgress.done}/{evalBatchProgress.total}
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-4 w-4 text-emerald-600" />
+                  AI Evaluate {pendingEvalCount} Pending
                 </>
               )}
             </Button>
@@ -642,12 +907,18 @@ function AnswerReviewContent() {
           <Card>
             <CardContent className="pt-6">
               <div className="flex items-center gap-3">
-                <Bot className="h-8 w-8 text-purple-600" />
+                <Sparkles className="h-8 w-8 text-purple-600" />
                 <div>
                   <p className="text-2xl font-bold">
-                    {filteredAnswers.filter((a) => a.ocrAnalysis?.extractedText).length}
+                    {
+                      filteredAnswers.filter(
+                        (a) =>
+                          a.aiEvaluation?.status === "completed" ||
+                          a.aiEvaluation?.status === "needs_review"
+                      ).length
+                    }
                   </p>
-                  <p className="text-sm text-gray-500">OCR Analyzed</p>
+                  <p className="text-sm text-gray-500">AI Evaluated</p>
                 </div>
               </div>
             </CardContent>
@@ -658,7 +929,15 @@ function AnswerReviewContent() {
                 <AlertTriangle className="h-8 w-8 text-amber-600" />
                 <div>
                   <p className="text-2xl font-bold">
-                    {filteredAnswers.filter((a) => a.flagged || a.ocrAnalysis?.aiDetection?.isAIGenerated).length}
+                    {
+                      filteredAnswers.filter(
+                        (a) =>
+                          a.flagged ||
+                          a.authorship?.status === "likely_ai" ||
+                          a.aiEvaluation?.status === "failed" ||
+                          a.aiEvaluation?.status === "needs_review"
+                      ).length
+                    }
                   </p>
                   <p className="text-sm text-gray-500">Flagged Items</p>
                 </div>
@@ -810,9 +1089,17 @@ function AnswerReviewContent() {
         ) : (
           <div className="grid gap-4">
             {filteredAnswers.map((answer) => {
-              const obtainedMarks = answer.grading?.obtainedMarks ?? answer.score ?? 0;
-              const totalMarks = answer.grading?.totalMarks ?? answer.totalMarks ?? 100;
-              const accuracy = answer.grading?.accuracy ?? answer.accuracy ?? 0;
+              // The FINAL mark (teacher override -> AI -> answer key), not the
+              // auto-grader's raw figure — that would show 0 for every
+              // upload-mode script no matter what the AI or the teacher decided.
+              const obtainedMarks =
+                answer.finalMarks ?? answer.score ?? answer.grading?.obtainedMarks ?? 0;
+              const totalMarks =
+                answer.finalTotalMarks ?? answer.totalMarks ?? answer.grading?.totalMarks ?? 100;
+              const accuracy = answer.finalPercentage ?? answer.accuracy ?? answer.grading?.accuracy ?? 0;
+              const evaluationPending =
+                answer.aiEvaluation?.status === "queued" ||
+                answer.aiEvaluation?.status === "processing";
 
               return (
                 <Card key={answer.id} className="hover:shadow-md transition-shadow">
@@ -828,6 +1115,8 @@ function AnswerReviewContent() {
                             ID: {answer.studentCode}
                           </span>
                           {getOCRBadge(answer)}
+                          {getEvaluationBadge(answer)}
+                          {getAuthorshipBadge(answer)}
                         </div>
 
                         <div className="flex items-center gap-2 flex-wrap text-xs">
@@ -866,15 +1155,57 @@ function AnswerReviewContent() {
                       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 bg-gray-50/80 p-3 rounded-lg border border-gray-100">
                         {/* Marks & Accuracy Block */}
                         <div className="text-left sm:text-right min-w-[120px]">
-                          <p className="text-xs text-gray-500 font-medium">Exam Marks</p>
-                          <p className="text-xl font-bold text-emerald-700">
-                            {obtainedMarks} <span className="text-xs text-gray-400 font-normal">/ {totalMarks}</span>
-                          </p>
-                          <p className="text-xs text-gray-500">{accuracy}% Accuracy</p>
+                          <p className="text-xs text-gray-500 font-medium">Final Marks</p>
+                          {evaluationPending ? (
+                            <p className="text-sm font-semibold text-blue-700 flex items-center gap-1.5 sm:justify-end">
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              Evaluating…
+                            </p>
+                          ) : (
+                            <>
+                              <p className="text-xl font-bold text-emerald-700">
+                                {obtainedMarks} <span className="text-xs text-gray-400 font-normal">/ {totalMarks}</span>
+                              </p>
+                              <p className="text-xs text-gray-500">
+                                {accuracy}%
+                                {answer.finalMarksSource === "teacher"
+                                  ? " · teacher override"
+                                  : answer.finalMarksSource === "ai"
+                                  ? " · AI evaluated"
+                                  : ""}
+                              </p>
+                            </>
+                          )}
+                          {answer.aiEvaluation?.status === "completed" ||
+                          answer.aiEvaluation?.status === "needs_review" ? (
+                            <p className="text-[11px] text-gray-400">
+                              AI: {answer.aiEvaluation.totalMarks} / {answer.aiEvaluation.maxMarks}
+                            </p>
+                          ) : null}
                         </div>
 
                         {/* OCR / Answer Actions */}
                         <div className="flex gap-2 w-full sm:w-auto">
+                          {(answer.answerFiles?.length || answer.answers) && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => runAiEvaluationFor(answer)}
+                              disabled={!!evaluating || !!evalBatchProgress}
+                              className="text-xs border-emerald-300 text-emerald-700"
+                            >
+                              {evaluating === answer.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                              ) : (
+                                <Sparkles className="h-3.5 w-3.5 mr-1 text-emerald-600" />
+                              )}
+                              {answer.aiEvaluation?.status === "completed" ||
+                              answer.aiEvaluation?.status === "needs_review"
+                                ? "Re-Evaluate"
+                                : "AI Evaluate"}
+                            </Button>
+                          )}
+
                           {answer.answerFiles && answer.answerFiles.length > 0 && (
                             <Button
                               size="sm"
@@ -953,10 +1284,10 @@ function AnswerReviewContent() {
                     </p>
                   </div>
                   <div>
-                    <span className="text-gray-500">Score Obtained:</span>
+                    <span className="text-gray-500">Final Marks:</span>
                     <p className="font-bold text-emerald-700 text-sm">
-                      {selectedAnswer.grading?.obtainedMarks ?? selectedAnswer.score ?? 0} /{" "}
-                      {selectedAnswer.grading?.totalMarks ?? selectedAnswer.totalMarks ?? 100}
+                      {selectedAnswer.finalMarks ?? selectedAnswer.score ?? 0} /{" "}
+                      {selectedAnswer.finalTotalMarks ?? selectedAnswer.totalMarks ?? 100}
                     </p>
                   </div>
                   <div>
@@ -967,6 +1298,26 @@ function AnswerReviewContent() {
                   </div>
                 </div>
 
+                {/* AI evaluation: marks, question-wise reasoning, authorship.
+                    Placed first because it is what produced the mark; the
+                    manual panel below is the override on top of it. */}
+                <AiEvaluationPanel
+                  variant="teacher"
+                  evaluation={selectedAnswer.aiEvaluation}
+                  authorship={selectedAnswer.authorship}
+                  teacherOverride={selectedAnswer.teacherOverride}
+                  finalMarks={selectedAnswer.finalMarks ?? selectedAnswer.score ?? null}
+                  finalTotalMarks={selectedAnswer.finalTotalMarks ?? selectedAnswer.totalMarks ?? null}
+                  finalPercentage={selectedAnswer.finalPercentage ?? selectedAnswer.accuracy ?? null}
+                  finalMarksSource={selectedAnswer.finalMarksSource ?? null}
+                  rerunning={evaluating === selectedAnswer.id}
+                  onRerun={async () => {
+                    await runAiEvaluationFor(selectedAnswer, { force: true });
+                  }}
+                  savingQuestionMarks={savingQuestionMarks}
+                  onSaveQuestionMarks={(marks) => saveQuestionMarks(selectedAnswer, marks)}
+                />
+
                 {/* Manual evaluation.
                     Placed above the tabs because for an upload-mode script it
                     is the ONLY thing that produces a mark — auto-grading has
@@ -974,6 +1325,9 @@ function AnswerReviewContent() {
                     student stays at 0 forever. */}
                 <ManualEvaluationPanel
                   answer={selectedAnswer as any}
+                  key={`${selectedAnswer.id}-${selectedAnswer.finalMarks ?? ""}-${
+                    selectedAnswer.aiEvaluation?.totalMarks ?? ""
+                  }`}
                   questionContext={
                     exam
                       ? `Exam: ${exam.title}. ${exam.description || ""} Total marks: ${
@@ -1045,33 +1399,19 @@ function AnswerReviewContent() {
                         {/* OCR Analysis Details */}
                         {selectedAnswer.ocrAnalysis ? (
                           <div className="space-y-4 pt-2">
-                            {/* AI Detection Summary */}
-                            {selectedAnswer.ocrAnalysis.aiDetection && (
-                              <Card className={selectedAnswer.ocrAnalysis.aiDetection.isAIGenerated ? "border-red-200 bg-red-50/30" : "border-emerald-200 bg-emerald-50/30"}>
-                                <CardContent className="pt-4">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <span className="font-semibold text-xs text-gray-800 flex items-center gap-1.5">
-                                      <Bot className="h-4 w-4 text-purple-600" /> AI Content Analysis
-                                    </span>
-                                    <Badge variant={selectedAnswer.ocrAnalysis.aiDetection.isAIGenerated ? "destructive" : "default"}>
-                                      {selectedAnswer.ocrAnalysis.aiDetection.isAIGenerated ? "AI Generated Flagged" : "Human Written"}
-                                    </Badge>
-                                  </div>
-                                  <p className="text-xs text-gray-600">
-                                    Confidence Level: <strong>{selectedAnswer.ocrAnalysis.aiDetection.confidence}%</strong>
-                                  </p>
-                                  {selectedAnswer.ocrAnalysis.aiDetection.indicators && selectedAnswer.ocrAnalysis.aiDetection.indicators.length > 0 && (
-                                    <div className="mt-2 flex flex-wrap gap-1">
-                                      {selectedAnswer.ocrAnalysis.aiDetection.indicators.map((ind, i) => (
-                                        <Badge key={i} variant="outline" className="text-[10px] bg-white text-gray-700">
-                                          {ind}
-                                        </Badge>
-                                      ))}
-                                    </div>
-                                  )}
-                                </CardContent>
-                              </Card>
-                            )}
+                            {/*
+                              The old "AI Content Analysis / Human Written"
+                              card lived here, drawing a verdict on authorship
+                              out of the OCR pass. The two are now separate:
+                              this tab reports what was READ from the files,
+                              and the authorship estimate has its own panel
+                              above, produced by its own analysis.
+                            */}
+                            <div className="rounded-lg border bg-gray-50 p-3 text-xs text-gray-600">
+                              Text extraction only. Whether a person or an AI wrote this script is
+                              estimated separately in the AI Evaluation panel above — a successful
+                              extraction is not evidence either way.
+                            </div>
 
                             {/* Extracted Text */}
                             <div>

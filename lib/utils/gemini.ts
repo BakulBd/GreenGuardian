@@ -7,12 +7,39 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { readFileReference } from "@/lib/storage/read-object";
 
-const GEMINI_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
+/**
+ * Models tried, in order, until one answers.
+ *
+ * Google retires Gemini model ids, and a retired id is a hard 404 rather than
+ * a redirect — so a cascade that has gone stale does not degrade, it stops
+ * working entirely. That is what had happened here: every id in the previous
+ * list (`gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-1.5-flash`,
+ * `gemini-1.5-pro`) now returns 404 for this project's key, which meant every
+ * OCR run, question-paper import and AI evaluation failed before reaching the
+ * model. The API's own error names `gemini-3.6-flash` as the replacement.
+ *
+ * `-latest` aliases are deliberately NOT used as the primary: they are shared
+ * endpoints and were returning 503 "high demand" when this list was checked,
+ * so they earn a place further down the cascade rather than at the top.
+ *
+ * `GEMINI_MODELS` / `GEMINI_MODEL` override this from the environment, so the
+ * next retirement can be handled by a config change rather than a deploy.
+ */
+const DEFAULT_GEMINI_MODELS = [
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-flash-latest",
 ];
+
+const GEMINI_MODELS = (() => {
+  const configured = process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || "";
+  const parsed = configured
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return parsed.length > 0 ? parsed : DEFAULT_GEMINI_MODELS;
+})();
 
 /**
  * Initialize the Gemini client.
@@ -31,10 +58,13 @@ export const getGeminiClient = () => {
   return new GoogleGenerativeAI(apiKey);
 };
 
+/** Model parts accepted by `generateContentWithFallback` / `generateModelText`. */
+export type ModelPart = string | { inlineData: { mimeType: string; data: string } };
+
 /**
  * Execute Gemini content generation with fallback through model versions
  */
-async function generateContentWithFallback(contents: any) {
+export async function generateContentWithFallback(contents: any) {
   const genAI = getGeminiClient();
   if (!genAI) {
     throw new Error("Gemini API key not configured. Set GEMINI_API_KEY on the server.");

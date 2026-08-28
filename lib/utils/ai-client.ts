@@ -10,6 +10,7 @@
  */
 
 import { auth } from "@/lib/firebase/config";
+import { authedFetch } from "@/lib/utils/api-client";
 // Type-only import: erased at compile time, so the Gemini SDK is never bundled
 // into the client.
 import type { ComprehensiveAnalysis } from "@/lib/utils/gemini";
@@ -77,6 +78,37 @@ export async function detectAIContent(text: string): Promise<AIDetectionResult> 
 /** Extract questions from an uploaded question paper. */
 export async function extractQuestionsFromPaper(fileUrl: string): Promise<any> {
   return callAiApi<any>({ action: "extract_questions", fileUrl });
+}
+
+export interface AiEvaluationRunResult {
+  success: boolean;
+  answerId: string;
+  status: "completed" | "needs_review" | "failed" | "skipped";
+  reason?: string;
+  aiEvaluation?: any;
+}
+
+/**
+ * Ask the server to evaluate one submission.
+ *
+ * Evaluation normally starts by itself when the submission is recorded (see
+ * `/api/exams/grade`), so this is a re-run / recovery path rather than the
+ * usual route to a mark. `force` is honoured for staff only — the server
+ * ignores it for students, so a student cannot re-roll their own marking.
+ *
+ * The request is long-running by nature: it reads the question paper and the
+ * script with vision before it answers. Callers should show a spinner rather
+ * than a timeout.
+ */
+export async function requestAiEvaluation(
+  answerId: string,
+  options: { force?: boolean } = {}
+): Promise<AiEvaluationRunResult> {
+  return authedFetch<AiEvaluationRunResult>("/api/exams/ai-evaluate", {
+    method: "POST",
+    body: { answerId, ...(options.force ? { force: true } : {}) },
+    fallbackError: "The AI evaluation could not be started.",
+  });
 }
 
 export interface AnswerQualitySuggestion {

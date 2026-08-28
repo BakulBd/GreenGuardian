@@ -18,7 +18,7 @@
  * retry after a dropped response updates the same document instead of
  * creating a duplicate submission.
  */
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase/admin";
 import { requireAuthedUser, jsonError } from "@/lib/server/api-auth";
@@ -29,8 +29,16 @@ import {
 } from "@/lib/server/grading";
 import { loadExamQuestions } from "@/lib/server/exam-questions";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { runAiEvaluation } from "@/lib/server/ai-evaluation-runner";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+/**
+ * The AI evaluation is started here via `after()` and runs on the same
+ * invocation, so this route's budget has to cover it. It does not delay the
+ * student's response — `after()` work begins once the response is sent.
+ */
+export const maxDuration = 300;
 
 const RATE_LIMIT_MAX = 30;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -198,9 +206,31 @@ export async function POST(req: NextRequest) {
       ...(reason && typeof reason === "string" ? { reason: reason.slice(0, 500) } : {}),
     };
 
+    // Which submissions the AI marks.
+    //
+    // Anything with an attached script (the whole of upload mode, plus online
+    // answers with working-out attached) and any online exam carrying written
+    // questions the answer key cannot decide. A pure MCQ paper is already
+    // fully and exactly graded by `gradeSubmission`, so putting it through a
+    // model would only add cost and a way to be wrong.
+    const needsAiEvaluation =
+      answerFiles.length > 0 || (grading?.pendingManualReview ?? 0) > 0;
+
+    if (needsAiEvaluation) {
+      answerData.aiEvaluation = {
+        status: "queued",
+        queuedAt: new Date().toISOString(),
+      };
+      answerData.aiEvaluationStatus = "queued";
+    }
+
     if (isUploadMode) {
       answerData.answerFiles = answerFiles;
       answerData.ocrStatus = "pending_background";
+      // The exam's own total, recorded up front so the submission reads as
+      // "0 / 100, evaluation pending" rather than "0 / undefined" in the
+      // moments before the AI evaluation writes the real mark.
+      answerData.totalMarks = Number(exam.totalMarks) || 100;
     } else {
       answerData.answers = answers;
       // Online-mode exams may ALSO carry attachments when the teacher enabled
@@ -254,6 +284,15 @@ export async function POST(req: NextRequest) {
         score: grading.obtainedMarks,
         totalMarks: grading.totalMarks,
       });
+    } else {
+      sessionUpdate.totalMarks = Number(exam.totalMarks) || 100;
+    }
+
+    if (needsAiEvaluation) {
+      // The student's results screen reads the session, so the "processing"
+      // state has to live there too — otherwise an upload-mode script reads as
+      // a genuine 0 for as long as the evaluation takes.
+      sessionUpdate.aiEvaluationStatus = "queued";
     }
 
     // One batch so a submission can never be half-recorded: either the answer
@@ -264,10 +303,32 @@ export async function POST(req: NextRequest) {
     batch.update(sessionRef, sessionUpdate);
     await batch.commit();
 
+    // Evaluation starts on its own, without the student's browser having to
+    // stay open. `after()` runs the work once the response has been flushed,
+    // so submitting stays as fast as it was. `runAiEvaluation` claims the
+    // submission transactionally, so a student's client also calling
+    // /api/exams/ai-evaluate cannot start a second, duplicate pass.
+    if (needsAiEvaluation) {
+      after(async () => {
+        try {
+          await runAiEvaluation({
+            db,
+            answerId: answerRef.id,
+            triggeredBy: `submission:${auth.uid}`,
+          });
+        } catch (error) {
+          // runAiEvaluation records its own failures on the submission; this
+          // only catches something going wrong outside it.
+          console.error("[grade] Automatic AI evaluation could not start:", error);
+        }
+      });
+    }
+
     return NextResponse.json({
       success: true,
       answerId: answerRef.id,
       grading,
+      aiEvaluationQueued: needsAiEvaluation,
     });
   } catch (error: any) {
     console.error("API /api/exams/grade error:", error);

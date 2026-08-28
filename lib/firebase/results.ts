@@ -94,6 +94,11 @@ export async function getStudentResults(
         resultPublishedDate: sData.completedAt || sData.createdAt || new Date(),
         academicYear: new Date().getFullYear().toString(),
         examId: sData.examId,
+        // Carried through so the results screen can distinguish "scored zero"
+        // from "not evaluated yet". /api/exams/grade writes `queued` onto the
+        // session at submit time and the evaluation run moves it on from there.
+        evaluationStatus: sData.aiEvaluationStatus,
+        marksSource: sData.marksSource,
       } as Result);
     }
   } catch (error) {
@@ -209,6 +214,8 @@ export async function getResultDetails(resultId: string): Promise<Result | null>
         resultPublishedDate: sData.completedAt || sData.createdAt || new Date(),
         academicYear: new Date().getFullYear().toString(),
         examId: sData.examId,
+        evaluationStatus: sData.aiEvaluationStatus,
+        marksSource: sData.marksSource,
       } as Result;
     }
 

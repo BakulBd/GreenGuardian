@@ -17,6 +17,8 @@ import {
   Percent,
   MessageSquare,
 } from "lucide-react";
+import AiEvaluationPanel from "@/components/AiEvaluationPanel";
+import { isEvaluationInProgress } from "@/lib/server/ai-evaluation";
 import { isOptionBasedQuestion } from "@/lib/utils/questionTypes";
 import { calculateGrade, getGradeColor } from "@/lib/firebase/results";
 
@@ -62,6 +64,11 @@ interface ExamAnswerReviewProps {
   exam: ReviewExam;
   session?: any | null;
   answerData: any;
+  /**
+   * Who is looking. Only staff see the authorship estimate — it is a signal
+   * about the student, in the same category as the plagiarism report.
+   */
+  viewerRole?: "student" | "teacher";
 }
 
 /**
@@ -71,7 +78,12 @@ interface ExamAnswerReviewProps {
  * (app/exam/[id]/review) and the teacher's per-student review (Task 7) so
  * both audiences see exactly the same rendering of the same data.
  */
-export default function ExamAnswerReview({ exam, session, answerData }: ExamAnswerReviewProps) {
+export default function ExamAnswerReview({
+  exam,
+  session,
+  answerData,
+  viewerRole = "student",
+}: ExamAnswerReviewProps) {
   const normalize = (value: unknown) => String(value ?? "").trim().toLowerCase();
   const isUploadSubmission = Boolean(
     (exam.examMode === "upload" || answerData.answerFiles?.length) && !answerData.answers
@@ -82,9 +94,14 @@ export default function ExamAnswerReview({ exam, session, answerData }: ExamAnsw
   const pausedMs = typeof session?.totalPausedMs === "number" ? session.totalPausedMs : 0;
   const timeTakenMs = startedAt && completedAt ? Math.max(0, completedAt - startedAt - pausedMs) : 0;
 
-  const totalMarks = answerData.totalMarks ?? 0;
-  const obtainedMarks = answerData.score ?? 0;
-  const percentage = totalMarks > 0 ? Math.round((obtainedMarks / totalMarks) * 1000) / 10 : 0;
+  const aiEvaluation = answerData.aiEvaluation ?? null;
+  const evaluationPending = isEvaluationInProgress(aiEvaluation?.status);
+
+  const totalMarks = answerData.finalTotalMarks ?? answerData.totalMarks ?? 0;
+  const obtainedMarks = answerData.finalMarks ?? answerData.score ?? 0;
+  const percentage =
+    answerData.finalPercentage ??
+    (totalMarks > 0 ? Math.round((obtainedMarks / totalMarks) * 1000) / 10 : 0);
   const { grade } = calculateGrade(percentage);
   const submittedDate = answerData.submittedAt?.toDate?.();
 
@@ -108,7 +125,9 @@ export default function ExamAnswerReview({ exam, session, answerData }: ExamAnsw
                 Grade: {grade}
               </Badge>
               <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-200 border-blue-200 px-3 py-1">
-                Score: {obtainedMarks} / {totalMarks || 100}
+                {evaluationPending
+                  ? "AI Evaluation Processing..."
+                  : `Score: ${obtainedMarks} / ${totalMarks || 100}`}
               </Badge>
             </div>
           </div>
@@ -123,13 +142,17 @@ export default function ExamAnswerReview({ exam, session, answerData }: ExamAnsw
               <p className="text-sm text-blue-600 mb-1 flex items-center justify-center gap-1">
                 <Award className="w-4 h-4" /> Obtained Marks
               </p>
-              <p className="text-2xl font-bold text-blue-700">{obtainedMarks}</p>
+              <p className="text-2xl font-bold text-blue-700">
+                {evaluationPending ? "…" : obtainedMarks}
+              </p>
             </div>
             <div className="p-4 bg-purple-50 rounded-lg border border-purple-100">
               <p className="text-sm text-purple-600 mb-1 flex items-center justify-center gap-1">
                 <Percent className="w-4 h-4" /> Percentage
               </p>
-              <p className="text-2xl font-bold text-purple-700">{percentage}%</p>
+              <p className="text-2xl font-bold text-purple-700">
+                {evaluationPending ? "…" : `${percentage}%`}
+              </p>
             </div>
             <div className="p-4 bg-gray-50 rounded-lg border">
               <p className="text-sm text-gray-500 mb-1">Accuracy</p>
@@ -172,6 +195,23 @@ export default function ExamAnswerReview({ exam, session, answerData }: ExamAnsw
           </div>
         </CardContent>
       </Card>
+
+      {/* AI evaluation: question-wise marks and the reasoning behind them.
+          Shown to the student as well as the teacher — a mark the student
+          cannot see the reasoning for is not much of a mark. Authorship is
+          withheld from the student by the panel itself. */}
+      {(aiEvaluation || evaluationPending) && (
+        <AiEvaluationPanel
+          variant={viewerRole === "teacher" ? "teacher" : "student"}
+          evaluation={aiEvaluation}
+          authorship={viewerRole === "teacher" ? answerData.authorship ?? null : null}
+          teacherOverride={answerData.teacherOverride ?? null}
+          finalMarks={answerData.finalMarks ?? answerData.score ?? null}
+          finalTotalMarks={answerData.finalTotalMarks ?? answerData.totalMarks ?? null}
+          finalPercentage={answerData.finalPercentage ?? answerData.accuracy ?? null}
+          finalMarksSource={answerData.finalMarksSource ?? null}
+        />
+      )}
 
       {/* Teacher Feedback (if available) */}
       {answerData.teacherFeedback && (

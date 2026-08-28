@@ -23,6 +23,7 @@
     "seed:all": "node scripts/seed-all.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "verify:ai": "vitest run --config scripts/verify-ai-evaluation.config.ts",
     "test:watch": "vitest"
   },
   "dependencies": {

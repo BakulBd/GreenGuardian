@@ -661,7 +661,12 @@ function ResultsContent() {
               <ClipboardList className="h-5 w-5" />
               Submission Review
             </h2>
-            <ExamAnswerReview exam={reviewExam} session={rawSession} answerData={reviewAnswer} />
+            <ExamAnswerReview
+              exam={reviewExam}
+              session={rawSession}
+              answerData={reviewAnswer}
+              viewerRole="teacher"
+            />
 
             {/* Teacher Feedback editor (Feature 4) */}
             <Card className="mt-4">

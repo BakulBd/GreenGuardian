@@ -256,6 +256,71 @@ export interface OCRAnalysis {
   error?: string;
 }
 
+/**
+ * AI evaluation records stored on an answer document.
+ *
+ * The shapes are defined once, in `lib/server/ai-evaluation.ts`, and re-exported
+ * here so UI code can type against them without importing anything that would
+ * pull the model client into a client bundle (these are type-only imports and
+ * are erased at compile time).
+ */
+export type {
+  AiEvaluationStatus,
+  AuthorshipStatus,
+  AnswerVerdict,
+  QuestionEvaluation,
+  AuthorshipEstimate,
+  FinalMarksSource,
+} from "@/lib/server/ai-evaluation";
+
+import type {
+  AiEvaluationStatus as AiEvaluationStatusType,
+  AuthorshipEstimate as AuthorshipEstimateType,
+  FinalMarksSource as FinalMarksSourceType,
+  QuestionEvaluation as QuestionEvaluationType,
+} from "@/lib/server/ai-evaluation";
+
+/** The AI's own marking of one submission. Never modified by a teacher. */
+export interface AiEvaluation {
+  status: AiEvaluationStatusType;
+  model?: string;
+  attempts?: number;
+  queuedAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  /** Marks the AI awarded, out of `maxMarks`. */
+  totalMarks?: number;
+  maxMarks?: number;
+  percentage?: number;
+  summary?: string;
+  questions?: QuestionEvaluationType[];
+  /** Where the question set came from: the teacher's list or a scanned paper. */
+  questionSource?: "structured" | "paper_document" | "unavailable";
+  answerSource?: "files" | "typed" | "mixed";
+  filesAnalyzed?: string[];
+  needsReviewReasons?: string[];
+  triggeredBy?: string;
+  /** Why the evaluation failed, when it did. Never a substitute for a mark. */
+  error?: string;
+}
+
+/**
+ * A teacher's override of the AI mark. Stored beside `aiEvaluation`, never
+ * on top of it — see `lib/server/final-marks.ts`.
+ */
+export interface TeacherOverride {
+  marks: number;
+  totalMarks: number;
+  feedback?: string;
+  questionMarks?: Array<{ questionId: string; marks: number; feedback?: string }>;
+  scope?: "overall" | "question";
+  overriddenBy?: string;
+  overriddenByName?: string;
+  overriddenByRole?: string;
+  overriddenAt?: string;
+  aiMarksAtOverride?: number | null;
+}
+
 export interface Answer {
   id: string;
   examSessionId?: string;
@@ -279,6 +344,25 @@ export interface Answer {
   similarityLevel?: "unique" | "partial" | "plagiarized";
   similarityReportId?: string;
   plagiarismDetected?: boolean;
+  /**
+   * The mark the student sees. Derived from `teacherOverride` -> `aiEvaluation`
+   * -> `grading`, and mirrored onto `score`/`totalMarks`/`accuracy` so older
+   * readers keep working.
+   */
+  finalMarks?: number;
+  finalTotalMarks?: number;
+  finalPercentage?: number;
+  finalMarksSource?: FinalMarksSourceType;
+  aiEvaluation?: AiEvaluation;
+  /** Mirrored to the top level so submission lists can filter without a nested read. */
+  aiEvaluationStatus?: AiEvaluationStatusType;
+  /**
+   * Estimate of whether a human or an LLM wrote the script. Deliberately
+   * separate from OCR success and from every mark — a suspected AI answer is
+   * marked exactly as a human one would be.
+   */
+  authorship?: AuthorshipEstimateType & { model?: string; analyzedAt?: string; affectsMarks?: false };
+  teacherOverride?: TeacherOverride;
   score?: number;
   totalMarks?: number;
   accuracy?: number;
@@ -420,6 +504,14 @@ export interface Result {
   isPublished: boolean;
   position?: number; // optional rank
   passFailStatus: "Pass" | "Fail";
+  /**
+   * Where this result's marks came from, and whether the AI evaluation that
+   * produces them has finished. A result synthesised from a submission whose
+   * evaluation is still `queued`/`processing` carries no meaningful mark yet —
+   * the results screen shows "AI Evaluation Processing…" rather than a zero.
+   */
+  evaluationStatus?: AiEvaluationStatusType;
+  marksSource?: FinalMarksSourceType;
   // Metadata
   createdBy?: string;
   createdAt: FirestoreDate;

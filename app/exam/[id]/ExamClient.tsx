@@ -51,7 +51,7 @@ import {
   calculateBehaviorScore,
   getBehaviorLevel,
 } from "@/lib/utils/helpers";
-import { analyzeSubmittedAnswer } from "@/lib/utils/ai-client";
+import { analyzeSubmittedAnswer, requestAiEvaluation } from "@/lib/utils/ai-client";
 import { performSimilarityCheck } from "@/lib/utils/similarity";
 import { startStudentLiveBroadcast } from "@/lib/services/liveVideo";
 import CameraPermission from "@/components/CameraPermission";
@@ -1436,7 +1436,12 @@ export default function ExamClient() {
       // what they are worth.
       const submission = await retryAsync(
         () =>
-          authedFetch<{ success: boolean; answerId: string | null; grading: any }>(
+          authedFetch<{
+            success: boolean;
+            answerId: string | null;
+            grading: any;
+            aiEvaluationQueued?: boolean;
+          }>(
             "/api/exams/grade",
             {
               method: "POST",
@@ -1461,10 +1466,26 @@ export default function ExamClient() {
 
       const answerId: string | null = submission?.answerId ?? null;
 
+      // AI evaluation is started by the server itself (see the `after()` block
+      // in /api/exams/grade), so the student can close the tab the moment they
+      // submit. This is a belt-and-braces nudge for hosts that tear the process
+      // down before scheduled work runs: the endpoint claims the submission
+      // transactionally, so if the server-side run already started, this call
+      // is a no-op rather than a second, duplicate evaluation.
+      if (answerId && submission?.aiEvaluationQueued) {
+        requestAiEvaluation(answerId).catch((err) => {
+          // The submission is already safely recorded; a failure here only
+          // means the evaluation stays queued for the teacher to trigger.
+          console.warn("Could not confirm AI evaluation start:", err);
+        });
+      }
+
       // Non-blocking background OCR + plagiarism pass for upload-mode exams.
-      // Kept client-initiated (the AI call is slow and the student should not
-      // wait on it), but both the OCR endpoint and the similarity check are
-      // server-side and authenticated.
+      //
+      // This is TEXT EXTRACTION for the cross-student similarity check — it is
+      // not the marking pass, and a successful extraction says nothing about
+      // whether a human wrote the script. Marking and authorship both happen
+      // server-side in the AI evaluation above.
       if (answerId && answerFiles.length > 0) {
         (async () => {
           try {

@@ -1,22 +1,22 @@
 "use client";
 
 /**
- * Teacher/admin manual marking for one exam submission.
+ * Teacher/admin override of one submission's mark.
  *
- * Auto-grading can only score what the answer key decides — option-based
- * questions in an online exam. An UPLOAD-mode submission (a scanned answer
- * script) has no key at all, so before this panel existed those students sat
- * permanently at "0 / total" with no way for anyone to mark them. Written
- * answers inside an online exam had the same problem one step down.
+ * Marks now arrive automatically: the AI evaluation reads the question paper
+ * and the answer script and awards a mark per question. This panel is where a
+ * teacher disagrees with it — overall here, or question by question in the
+ * AI evaluation panel above.
  *
  * The mark is submitted to `/api/exams/evaluate`, which owns the write: it
- * checks that this teacher owns the exam and updates the answer, the session
- * and the derived percentage together, so the mark cannot appear in one screen
- * and not another.
+ * checks that this teacher owns the exam, records the override in its OWN
+ * field (the AI evaluation is never overwritten), and updates the answer, the
+ * session and the derived percentage together, so the mark cannot appear in
+ * one screen and not another.
  *
- * The AI suggestion is deliberately a separate, opt-in button that fills the
- * box rather than submitting anything. A model reading a scanned script is
- * useful as a starting point and is not a grade.
+ * "Clear override" exists because the final mark is derived rather than stored
+ * twice: removing the override hands the student's mark straight back to the
+ * AI evaluation, with no need to remember what it was.
  */
 
 import { useState } from "react";
@@ -49,6 +49,12 @@ export interface EvaluationTarget {
   /** OCR text of the uploaded script, used for the AI suggestion. */
   ocrText?: string;
   ocrAnalysis?: { extractedText?: string } | null;
+  /** The AI's own mark, shown for comparison and never modified here. */
+  aiEvaluation?: { status?: string; totalMarks?: number; maxMarks?: number } | null;
+  teacherOverride?: { marks?: number; totalMarks?: number; overriddenByName?: string } | null;
+  finalMarks?: number;
+  finalTotalMarks?: number;
+  finalMarksSource?: "teacher" | "ai" | "auto";
 }
 
 export interface EvaluationResult {
@@ -71,8 +77,26 @@ export default function ManualEvaluationPanel({
 }) {
   const { toast } = useToast();
 
-  const totalMarks = answer.grading?.totalMarks ?? answer.totalMarks ?? 100;
-  const currentMarks = answer.evaluation?.marks ?? answer.grading?.obtainedMarks ?? answer.score;
+  const aiEvaluated =
+    answer.aiEvaluation?.status === "completed" || answer.aiEvaluation?.status === "needs_review";
+  const aiMarks = aiEvaluated ? answer.aiEvaluation?.totalMarks : undefined;
+
+  const totalMarks =
+    answer.finalTotalMarks ??
+    answer.aiEvaluation?.maxMarks ??
+    answer.grading?.totalMarks ??
+    answer.totalMarks ??
+    100;
+
+  // Pre-fill with whatever the student currently has, so saving without
+  // touching the box is a no-op rather than a silent change.
+  const currentMarks =
+    answer.teacherOverride?.marks ??
+    answer.finalMarks ??
+    aiMarks ??
+    answer.evaluation?.marks ??
+    answer.grading?.obtainedMarks ??
+    answer.score;
 
   const [marks, setMarks] = useState<string>(
     currentMarks === undefined || currentMarks === null ? "" : String(currentMarks)
@@ -81,11 +105,12 @@ export default function ManualEvaluationPanel({
     answer.evaluation?.feedback ?? answer.teacherFeedback ?? ""
   );
   const [saving, setSaving] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [suggesting, setSuggesting] = useState(false);
   const [suggestion, setSuggestion] = useState<{ score: number; feedback?: string } | null>(null);
 
   const extractedText = answer.ocrText || answer.ocrAnalysis?.extractedText || "";
-  const alreadyMarked = answer.evaluation?.method === "manual";
+  const hasOverride = Boolean(answer.teacherOverride) || answer.evaluation?.method === "manual";
 
   const handleSuggest = async () => {
     if (!extractedText.trim()) {
@@ -177,6 +202,42 @@ export default function ManualEvaluationPanel({
     }
   };
 
+  /**
+   * Drop the override and let the AI evaluation be the mark again.
+   *
+   * Possible only because `finalMarks` is derived: there is no "original" to
+   * restore by hand, the server just recomputes without the override.
+   */
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      const result = await authedFetch<EvaluationResult & { success: boolean; cleared: boolean }>(
+        "/api/exams/evaluate",
+        {
+          method: "POST",
+          body: { answerId: answer.id, clearOverride: true },
+          fallbackError: "Could not remove the override.",
+        }
+      );
+      toast({
+        title: "Override removed",
+        description: aiEvaluated
+          ? `The mark is back to the AI evaluation: ${result.marks} / ${result.totalMarks}.`
+          : "The teacher override has been removed.",
+      });
+      setMarks(result.marks === null || result.marks === undefined ? "" : String(result.marks));
+      onEvaluated?.(result);
+    } catch (error: any) {
+      toast({
+        title: "Could not remove the override",
+        description: error?.message || "Nothing was changed.",
+        variant: "destructive",
+      });
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <Card className="border-emerald-200 bg-emerald-50/30">
       <CardHeader className="pb-3">
@@ -187,12 +248,13 @@ export default function ManualEvaluationPanel({
               Manual Evaluation
             </CardTitle>
             <CardDescription className="text-xs">
-              Award the final mark for this submission. This is what the student sees.
+              Override the mark for this submission. This is what the student sees. The AI
+              evaluation is kept on record either way.
             </CardDescription>
           </div>
-          {alreadyMarked && (
+          {hasOverride && (
             <Badge variant="outline" className="text-[10px] bg-white">
-              Marked by {answer.evaluation?.evaluatedByName || "a teacher"}
+              Overridden by {answer.teacherOverride?.overriddenByName || answer.evaluation?.evaluatedByName || "a teacher"}
             </Badge>
           )}
         </div>
@@ -218,28 +280,72 @@ export default function ManualEvaluationPanel({
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleSuggest}
-              disabled={suggesting || saving}
-              className="bg-white"
-            >
-              {suggesting ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Sparkles className="h-4 w-4 mr-2 text-purple-600" />
-              )}
-              Suggest a mark with AI
+            {aiMarks !== undefined && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setMarks(String(aiMarks))}
+                disabled={saving || clearing}
+                className="bg-white"
+              >
+                <Bot className="h-4 w-4 mr-2 text-emerald-600" />
+                Use AI mark ({aiMarks})
+              </Button>
+            )}
+
+            {/* Only offered when there is no full AI evaluation to override —
+                otherwise it is a second, weaker opinion on the same script. */}
+            {!aiEvaluated && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleSuggest}
+                disabled={suggesting || saving}
+                className="bg-white"
+              >
+                {suggesting ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4 mr-2 text-purple-600" />
+                )}
+                Suggest a mark with AI
+              </Button>
+            )}
+
+            <Button type="button" size="sm" onClick={handleSave} disabled={saving || suggesting || clearing}>
+              {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+              Save override
             </Button>
 
-            <Button type="button" size="sm" onClick={handleSave} disabled={saving || suggesting}>
-              {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
-              Save evaluation
-            </Button>
+            {hasOverride && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={handleClear}
+                disabled={saving || clearing}
+              >
+                {clearing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+                Clear override
+              </Button>
+            )}
           </div>
         </div>
+
+        {aiMarks !== undefined && (
+          <div className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-white p-3">
+            <Bot className="h-4 w-4 shrink-0 mt-0.5 text-emerald-600" />
+            <p className="text-xs leading-relaxed text-gray-700">
+              <span className="font-medium">
+                AI mark: {aiMarks} / {answer.aiEvaluation?.maxMarks ?? totalMarks}.
+              </span>{" "}
+              Saving a different number here records a teacher override on top of it — the AI
+              evaluation and its per-question reasoning stay exactly as they are.
+            </p>
+          </div>
+        )}
 
         {suggestion && (
           <div className="flex items-start gap-2 rounded-lg border border-purple-200 bg-white p-3">
