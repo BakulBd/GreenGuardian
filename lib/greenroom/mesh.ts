@@ -20,13 +20,51 @@
  * `videoConstraintsForPeerCount()` steps resolution down as the room grows so
  * the degradation is gradual rather than a cliff.
  *
+ * THE THREE BUGS THIS MODULE WAS REPORTED FOR
+ * -------------------------------------------
+ * "Camera visible only to yourself", "nobody can hear me", and "participants
+ * can no longer see the shared screen" were all one defect wearing three hats,
+ * plus a second defect that hid any media that did get through.
+ *
+ *  1. **Senders were looked up by `sender.track.kind`.** Connections are opened
+ *     with two transceivers so the m-line layout is stable, but a transceiver
+ *     created without a track has `sender.track === null`. So
+ *     `getSenders().find(s => s.track?.kind === "video")` matched NOTHING for
+ *     anyone who joined with their camera off — the overwhelmingly common case.
+ *     The code then fell through to `addTrack()`, which appended a SECOND video
+ *     m-line instead of filling the empty one that was already there. Senders
+ *     are now held directly off the transceivers created at open time, so
+ *     `replaceTrack` always finds its slot and `addTrack` is never needed.
+ *
+ *  2. **Only one side of a pair could ever negotiate.** See `./pairing`: the
+ *     answerer's `negotiationneeded` was suppressed outright, so the extra
+ *     m-line from (1) was never signalled and its media never left the browser.
+ *     Replaced with the spec's perfect-negotiation pattern.
+ *
+ *  3. **`ontrack` read `event.streams[0]`, which is empty here.** A transceiver
+ *     added without an associated stream produces no `a=msid` in the SDP, so
+ *     the remote's track event carries an empty `streams` array. The old
+ *     handler therefore added nothing to the peer's `MediaStream` and reported
+ *     an empty stream upward — a black tile even when negotiation had
+ *     succeeded. `event.track` is used directly now.
+ *
+ * The practical consequence of the fix: toggling camera, mic, or screen share
+ * is a pure `replaceTrack` on an already-negotiated sender, which needs NO
+ * renegotiation at all and works identically on both sides of every pair.
+ *
  * This module is intentionally the ONLY place that knows media is peer-to-peer.
  * The UI talks to it through `MeshConnection`'s events, so replacing it with an
  * SFU client later does not touch a single component.
  */
 import { getIceServers } from "@/lib/services/liveVideo";
-import { publishCandidate, publishSdp, subscribeToPair, clearPair } from "./signaling";
-import { isInitiator } from "./pairing";
+import {
+  publishCandidate,
+  publishSdp,
+  subscribeToPair,
+  clearPair,
+  resetOwnSlot,
+} from "./signaling";
+import { isInitiator, isPolite } from "./pairing";
 
 export type PeerConnectionState = "new" | "connecting" | "connected" | "failed" | "closed";
 
@@ -50,8 +88,20 @@ interface Peer {
   pc: RTCPeerConnection;
   stream: MediaStream;
   unsubscribe: () => void;
-  /** Guards against applying an answer before the offer is set (rollback). */
+  /**
+   * The two transceivers created at open time, held so their senders can be
+   * addressed directly. Looking senders up by their current track is what
+   * broke — an empty sender is exactly the one we need to fill.
+   */
+  audioSender: RTCRtpSender;
+  videoSender: RTCRtpSender;
+  /** Perfect-negotiation state. */
+  polite: boolean;
   makingOffer: boolean;
+  ignoreOffer: boolean;
+  isSettingRemoteAnswerPending: boolean;
+  /** Monotonic revision for our published descriptions. */
+  rev: number;
   /** Candidates that arrived before `setRemoteDescription`. */
   pendingCandidates: RTCIceCandidateInit[];
 }
@@ -59,7 +109,7 @@ interface Peer {
 export class MeshConnection {
   private peers = new Map<string, Peer>();
   private localStream: MediaStream | null = null;
-  /** Screen-share track, published in addition to the camera when present. */
+  /** Screen-share track, published in place of the camera when present. */
   private screenTrack: MediaStreamTrack | null = null;
   private closed = false;
 
@@ -74,34 +124,26 @@ export class MeshConnection {
     return this.peers.size;
   }
 
+  /** The video track we should currently be sending: screen wins over camera. */
+  private outboundVideoTrack(): MediaStreamTrack | null {
+    return this.screenTrack || this.localStream?.getVideoTracks()[0] || null;
+  }
+
+  private outboundAudioTrack(): MediaStreamTrack | null {
+    return this.localStream?.getAudioTracks()[0] || null;
+  }
+
   /**
    * Publish (or replace) the local camera/mic stream.
    *
-   * `replaceTrack` is used rather than removing and re-adding the track so an
-   * established connection is not renegotiated — switching camera mid-call
-   * should not cause a visible reconnect for everyone else.
+   * `replaceTrack` on the sender that already exists — never `addTrack`. On an
+   * already-negotiated sender this needs no renegotiation at all, so turning a
+   * camera or microphone on mid-call is immediate for every peer and does not
+   * depend on which side of the pair we are.
    */
   async setLocalStream(stream: MediaStream | null): Promise<void> {
     this.localStream = stream;
-
-    for (const peer of this.peers.values()) {
-      const senders = peer.pc.getSenders();
-
-      for (const kind of ["audio", "video"] as const) {
-        const track = stream?.getTracks().find((t) => t.kind === kind) || null;
-        // Don't clobber the video sender while a screen share owns it.
-        if (kind === "video" && this.screenTrack) continue;
-
-        const sender = senders.find((s) => s.track?.kind === kind);
-        if (sender) {
-          await sender.replaceTrack(track).catch((error) => {
-            console.warn("[greenroom/mesh] replaceTrack failed:", error);
-          });
-        } else if (track) {
-          peer.pc.addTrack(track, stream!);
-        }
-      }
-    }
+    await this.publishTracks();
   }
 
   /**
@@ -110,22 +152,31 @@ export class MeshConnection {
    * The screen replaces the outgoing video track rather than adding a second
    * one: a second video m-line per peer would double the already-expensive
    * mesh encode cost, and every conferencing UI shows one video per participant
-   * anyway (the shared screen takes the main stage).
+   * anyway (the shared screen takes the main stage). Passing `null` restores
+   * the camera track, if there is one.
    */
   async setScreenTrack(track: MediaStreamTrack | null): Promise<void> {
     this.screenTrack = track;
-    const replacement = track || this.localStream?.getVideoTracks()[0] || null;
+    await this.publishTracks();
+  }
 
-    for (const peer of this.peers.values()) {
-      const sender = peer.pc.getSenders().find((s) => s.track?.kind === "video");
-      if (sender) {
-        await sender.replaceTrack(replacement).catch((error) => {
-          console.warn("[greenroom/mesh] screen replaceTrack failed:", error);
-        });
-      } else if (replacement) {
-        peer.pc.addTrack(replacement, this.localStream || new MediaStream([replacement]));
-      }
-    }
+  /** Push the current outbound tracks onto every peer's existing senders. */
+  private async publishTracks(): Promise<void> {
+    const video = this.outboundVideoTrack();
+    const audio = this.outboundAudioTrack();
+
+    await Promise.all(
+      Array.from(this.peers.values()).map(async (peer) => {
+        await Promise.all([
+          peer.audioSender.replaceTrack(audio).catch((error) => {
+            console.warn("[greenroom/mesh] audio replaceTrack failed:", error);
+          }),
+          peer.videoSender.replaceTrack(video).catch((error) => {
+            console.warn("[greenroom/mesh] video replaceTrack failed:", error);
+          }),
+        ]);
+      })
+    );
   }
 
   /**
@@ -154,29 +205,67 @@ export class MeshConnection {
     });
 
     const stream = new MediaStream();
+
+    // Transceivers are created up front, by KIND, so the m-line layout is
+    // fixed for the life of the connection and both sides agree on it. Their
+    // senders start empty and are filled by `replaceTrack` — which is why
+    // enabling a camera later never needs a new m-line.
+    const audioTransceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
+    const videoTransceiver = pc.addTransceiver("video", { direction: "sendrecv" });
+
     const peer: Peer = {
       userId: peerUid,
       pc,
       stream,
       unsubscribe: () => {},
+      audioSender: audioTransceiver.sender,
+      videoSender: videoTransceiver.sender,
+      polite: isPolite(this.selfUid, peerUid),
       makingOffer: false,
+      ignoreOffer: false,
+      isSettingRemoteAnswerPending: false,
+      rev: 0,
       pendingCandidates: [],
     };
     this.peers.set(peerUid, peer);
 
-    // Publish our current media to this new peer.
-    const videoTrack = this.screenTrack || this.localStream?.getVideoTracks()[0] || null;
-    const audioTrack = this.localStream?.getAudioTracks()[0] || null;
-    // Transceivers are added even when a track is absent so the m-line layout
-    // is stable; otherwise enabling the camera later would force a full
-    // renegotiation with every peer at once.
-    pc.addTransceiver(audioTrack || "audio", { direction: "sendrecv" });
-    pc.addTransceiver(videoTrack || "video", { direction: "sendrecv" });
+    // Publish whatever we are already sending to this new peer. Failures are
+    // logged rather than thrown: a peer that cannot take our camera should
+    // still receive our audio.
+    const video = this.outboundVideoTrack();
+    const audio = this.outboundAudioTrack();
+    if (audio) {
+      peer.audioSender.replaceTrack(audio).catch(() => {});
+    }
+    if (video) {
+      peer.videoSender.replaceTrack(video).catch(() => {});
+    }
 
     pc.ontrack = (event) => {
-      event.streams[0]?.getTracks().forEach((track) => {
-        if (!stream.getTracks().some((t) => t.id === track.id)) stream.addTrack(track);
-      });
+      // `event.track`, NOT `event.streams[0]` — transceivers created without an
+      // associated stream produce no msid, so `streams` is empty here and the
+      // old code silently added nothing.
+      const track = event.track;
+
+      // A renegotiated connection can deliver a replacement track of a kind we
+      // already hold; drop the stale one so the tile does not keep rendering it.
+      for (const existing of stream.getTracks()) {
+        if (existing.kind === track.kind && existing.id !== track.id) {
+          stream.removeTrack(existing);
+        }
+      }
+      if (!stream.getTracks().some((t) => t.id === track.id)) {
+        stream.addTrack(track);
+      }
+
+      // A track that ends (peer stopped their camera, or the screen share was
+      // stopped from the browser's own bar) must leave the stream, or the last
+      // frame stays frozen on the tile.
+      track.onended = () => {
+        stream.removeTrack(track);
+        this.events.onPeerStream(peerUid, stream);
+      };
+
       this.events.onPeerStream(peerUid, stream);
     };
 
@@ -194,64 +283,112 @@ export class MeshConnection {
       // is the cheap fix and works often enough to be worth trying before the
       // participant sees a dead tile; without TURN configured some pairs can
       // never connect and this will simply fail again (documented limitation).
-      if (pc.connectionState === "failed" && isInitiator(this.selfUid, peerUid)) {
-        this.renegotiate(peerUid, true).catch(() => {});
+      // Either side may attempt it now — perfect negotiation resolves the
+      // collision if both do.
+      if (pc.connectionState === "failed") {
+        pc.restartIce?.();
+        this.negotiate(peerUid).catch(() => {});
       }
     };
 
-    // Only the deterministic initiator creates offers, which is what prevents
-    // both sides offering at once (see signaling.ts).
+    // Perfect negotiation: EITHER side may offer, at any time. This is what
+    // makes "turn my camera on after joining" work for the peer that used to
+    // be the permanent answerer.
     pc.onnegotiationneeded = () => {
-      if (!isInitiator(this.selfUid, peerUid)) return;
-      this.renegotiate(peerUid, false).catch((error) => {
+      this.negotiate(peerUid).catch((error) => {
         console.warn("[greenroom/mesh] negotiation failed:", error);
       });
     };
 
-    peer.unsubscribe = subscribeToPair(this.meetingId, this.selfUid, peerUid, {
-      onRemoteSdp: (sdp) => this.handleRemoteSdp(peerUid, sdp).catch(() => {}),
-      onRemoteCandidate: (candidate) => this.handleRemoteCandidate(peerUid, candidate),
+    // Clear our own slot before listening, so a reconnect does not apply the
+    // description we left behind in a previous session to this fresh
+    // connection. Subscribing only after the reset avoids reading it back.
+    resetOwnSlot(this.meetingId, this.selfUid, peerUid).finally(() => {
+      if (!this.peers.has(peerUid)) return; // closed while we were resetting
+      peer.unsubscribe = subscribeToPair(this.meetingId, this.selfUid, peerUid, {
+        onRemoteSdp: (sdp) => this.handleRemoteSdp(peerUid, sdp).catch(() => {}),
+        onRemoteCandidate: (candidate) => this.handleRemoteCandidate(peerUid, candidate),
+      });
+
+      // The initiator opens the conversation. The other side stays quiet until
+      // it has something to say — which, thanks to perfect negotiation, it may
+      // now say whenever it likes.
+      if (isInitiator(this.selfUid, peerUid)) {
+        this.negotiate(peerUid).catch(() => {});
+      }
     });
 
     this.events.onPeerState(peerUid, "connecting");
   }
 
-  private async renegotiate(peerUid: string, iceRestart: boolean): Promise<void> {
+  /**
+   * Create and publish an offer.
+   *
+   * `setLocalDescription()` with no argument lets the browser produce the right
+   * description for the current signalling state, which is the documented
+   * perfect-negotiation form and avoids the "created an offer while not stable"
+   * race the old code guarded against by bailing out.
+   */
+  private async negotiate(peerUid: string): Promise<void> {
     const peer = this.peers.get(peerUid);
-    if (!peer || peer.makingOffer) return;
+    if (!peer || this.closed) return;
 
     try {
       peer.makingOffer = true;
-      const offer = await peer.pc.createOffer({ iceRestart });
-      // `signalingState` can change while awaiting; bail rather than throwing.
-      if (peer.pc.signalingState !== "stable") return;
-      await peer.pc.setLocalDescription(offer);
-      await publishSdp(this.meetingId, this.selfUid, peerUid, offer);
+      await peer.pc.setLocalDescription();
+      const description = peer.pc.localDescription;
+      if (!description) return;
+      peer.rev += 1;
+      await publishSdp(this.meetingId, this.selfUid, peerUid, description, peer.rev);
+    } catch (error) {
+      console.warn("[greenroom/mesh] failed to create offer:", error);
     } finally {
       peer.makingOffer = false;
     }
   }
 
+  /**
+   * Apply a remote description, resolving offer collisions by politeness.
+   *
+   * This is the heart of perfect negotiation. When an offer arrives while we
+   * have one outstanding, exactly one side backs down: the polite peer rolls
+   * its own offer back and accepts theirs; the impolite peer ignores theirs and
+   * lets its own stand. Both sides reach the same conclusion with no extra
+   * messages.
+   */
   private async handleRemoteSdp(peerUid: string, sdp: RTCSessionDescriptionInit): Promise<void> {
     const peer = this.peers.get(peerUid);
-    if (!peer) return;
+    if (!peer || this.closed) return;
 
-    if (sdp.type === "offer") {
-      // Only the answering side should ever receive an offer; ignoring a
-      // stray one is safer than entering a renegotiation loop.
-      if (isInitiator(this.selfUid, peerUid)) return;
-      await peer.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    const pc = peer.pc;
+    const readyForOffer =
+      !peer.makingOffer && (pc.signalingState === "stable" || peer.isSettingRemoteAnswerPending);
+    const offerCollision = sdp.type === "offer" && !readyForOffer;
+
+    peer.ignoreOffer = !peer.polite && offerCollision;
+    if (peer.ignoreOffer) return;
+
+    try {
+      peer.isSettingRemoteAnswerPending = sdp.type === "answer";
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      peer.isSettingRemoteAnswerPending = false;
+
       this.flushCandidates(peer);
-      const answer = await peer.pc.createAnswer();
-      await peer.pc.setLocalDescription(answer);
-      await publishSdp(this.meetingId, this.selfUid, peerUid, answer);
-      return;
-    }
 
-    // An answer only makes sense while we have an outstanding local offer.
-    if (peer.pc.signalingState !== "have-local-offer") return;
-    await peer.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-    this.flushCandidates(peer);
+      if (sdp.type === "offer") {
+        await pc.setLocalDescription();
+        const description = pc.localDescription;
+        if (description) {
+          peer.rev += 1;
+          await publishSdp(this.meetingId, this.selfUid, peerUid, description, peer.rev);
+        }
+      }
+    } catch (error) {
+      peer.isSettingRemoteAnswerPending = false;
+      // A description we cannot apply is not fatal; the connection either
+      // recovers on the next negotiation or the state handler restarts ICE.
+      console.warn("[greenroom/mesh] setRemoteDescription failed:", error);
+    }
   }
 
   private handleRemoteCandidate(peerUid: string, candidate: RTCIceCandidateInit): void {
@@ -265,7 +402,10 @@ export class MeshConnection {
       return;
     }
     peer.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch((error) => {
-      console.warn("[greenroom/mesh] addIceCandidate failed:", error);
+      // Expected while an offer we chose to ignore is in flight.
+      if (!peer.ignoreOffer) {
+        console.warn("[greenroom/mesh] addIceCandidate failed:", error);
+      }
     });
   }
 
@@ -281,11 +421,32 @@ export class MeshConnection {
     if (!peer) return;
 
     peer.unsubscribe();
+
+    // Detach handlers before closing so a late event cannot resurrect state for
+    // a peer we have already reported as gone.
+    peer.pc.ontrack = null;
+    peer.pc.onicecandidate = null;
+    peer.pc.onnegotiationneeded = null;
+    peer.pc.onconnectionstatechange = null;
+
+    // Remote tracks belong to the connection; stopping them releases the
+    // decoder rather than leaving it running behind a removed tile.
+    for (const track of peer.stream.getTracks()) {
+      track.onended = null;
+      try {
+        track.stop();
+      } catch {
+        /* already stopped */
+      }
+      peer.stream.removeTrack(track);
+    }
+
     try {
       peer.pc.close();
     } catch {
       /* already closed */
     }
+
     this.peers.delete(peerUid);
     clearPair(this.meetingId, this.selfUid, peerUid).catch(() => {});
     this.events.onPeerGone(peerUid);

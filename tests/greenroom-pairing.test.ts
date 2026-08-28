@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pairId, isInitiator, signalFields } from "@/lib/greenroom/pairing";
+import { pairId, isInitiator, isPolite, signalFields } from "@/lib/greenroom/pairing";
 
 /**
  * These tests pin down the invariant the whole mesh depends on: for any pair
@@ -86,13 +86,50 @@ describe("signalFields", () => {
     }
   });
 
-  it("has the initiator writing the offer", () => {
-    const initiator = signalFields("alice", "bob");
-    expect(initiator.mySdp).toBe("offer");
-    expect(initiator.myCandidates).toBe("offerCandidates");
+  it("names slots by position in the sorted pair, not by negotiation role", () => {
+    // Position, not role: under perfect negotiation either side may send an
+    // offer, so a slot called "offer" would be written by both of them.
+    const smaller = signalFields("alice", "bob");
+    expect(smaller.mySdp).toBe("sdpA");
+    expect(smaller.myCandidates).toBe("candidatesA");
 
-    const answerer = signalFields("bob", "alice");
-    expect(answerer.mySdp).toBe("answer");
-    expect(answerer.myCandidates).toBe("answerCandidates");
+    const larger = signalFields("bob", "alice");
+    expect(larger.mySdp).toBe("sdpB");
+    expect(larger.myCandidates).toBe("candidatesB");
+  });
+
+  it("assigns the A slot to whichever uid sorts first", () => {
+    for (const a of uids) {
+      for (const b of uids) {
+        if (a === b) continue;
+        const expected = a < b ? "sdpA" : "sdpB";
+        expect(signalFields(a, b).mySdp).toBe(expected);
+      }
+    }
+  });
+});
+
+describe("isPolite", () => {
+  it("makes exactly one side of each pair polite", () => {
+    // This is what resolves an offer collision without a round-trip: one side
+    // rolls back and accepts, the other holds its ground. If both were polite
+    // (or both impolite) a simultaneous offer would deadlock or drop.
+    for (const a of uids) {
+      for (const b of uids) {
+        if (a === b) continue;
+        expect(isPolite(a, b) !== isPolite(b, a)).toBe(true);
+      }
+    }
+  });
+
+  it("makes the initiator the impolite peer", () => {
+    // The initiator sent the opening offer, so letting its description survive
+    // a collision converges faster.
+    for (const a of uids) {
+      for (const b of uids) {
+        if (a === b) continue;
+        expect(isPolite(a, b)).toBe(!isInitiator(a, b));
+      }
+    }
   });
 });

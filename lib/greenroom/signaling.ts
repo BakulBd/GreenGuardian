@@ -3,16 +3,19 @@
 /**
  * Green Room — WebRTC signalling over Firestore.
  *
- * Every ordered pair of participants gets one signalling document:
+ * Every unordered pair of participants gets one signalling document:
  *
  *   greenRoomSignals/{meetingId}/peers/{lowUid}__{highUid}
  *
  * The id is built from the two uids **sorted**, so both sides compute the same
- * path without negotiating one. That also settles the glare problem — when two
- * peers notice each other simultaneously, both would otherwise send an offer
- * and the connection would deadlock. Here the lexicographically smaller uid is
- * always the **initiator** (it creates the offer) and the larger one always
- * answers. Deterministic, no coordination round-trip, no glare.
+ * path without negotiating one.
+ *
+ * Each side owns two fields, named by its POSITION in the sorted pair (A = the
+ * smaller uid, B = the larger): its session description and its ICE candidate
+ * list. Ownership is by position rather than by negotiation role because under
+ * perfect negotiation either side may send an offer at any time — see
+ * `./pairing`. Because the two sides write disjoint fields, neither can clobber
+ * the other's description, and one listener per pair carries both directions.
  *
  * Kept separate from the peer-connection code in `mesh.ts` so the ordering
  * rules can be unit-tested without a browser or a WebRTC stack.
@@ -33,19 +36,27 @@ import { SIGNALS } from "./constants";
 
 // The pairing rules live in ./pairing (no Firebase imports) so they can be
 // unit-tested directly. Re-exported here so callers have one import site.
-export { pairId, isInitiator, signalFields } from "./pairing";
+export { pairId, isInitiator, isPolite, signalFields } from "./pairing";
 import { pairId, signalFields } from "./pairing";
 
 function pairRef(meetingId: string, selfUid: string, peerUid: string) {
   return doc(collection(doc(db, SIGNALS, meetingId), "peers"), pairId(selfUid, peerUid));
 }
 
-/** Publish this side's SDP (offer or answer) for the pair. */
+/**
+ * Publish this side's session description.
+ *
+ * `rev` is a per-connection counter supplied by the caller. Renegotiation can
+ * legitimately produce two descriptions whose SDP text is byte-identical (a
+ * repeated `replaceTrack` cycle, say), and comparing SDP strings would silently
+ * swallow the second one. A counter makes "this is new" explicit.
+ */
 export async function publishSdp(
   meetingId: string,
   selfUid: string,
   peerUid: string,
-  sdp: RTCSessionDescriptionInit
+  sdp: RTCSessionDescriptionInit,
+  rev: number
 ): Promise<void> {
   const { mySdp } = signalFields(selfUid, peerUid);
   await setDoc(
@@ -53,7 +64,7 @@ export async function publishSdp(
     {
       meetingId,
       participants: [selfUid, peerUid].sort(),
-      [mySdp]: { type: sdp.type, sdp: sdp.sdp },
+      [mySdp]: { type: sdp.type, sdp: sdp.sdp, rev, from: selfUid },
       updatedAt: serverTimestamp(),
     },
     { merge: true }
@@ -94,15 +105,44 @@ export async function publishCandidate(
   });
 }
 
+/**
+ * Clear this side's own slot.
+ *
+ * Called when a connection is (re)opened, so a peer that reconnects does not
+ * immediately read the description and candidates from our previous session and
+ * try to apply them to a brand-new `RTCPeerConnection`. Only our own fields are
+ * touched — the peer's slot is theirs to manage.
+ */
+export async function resetOwnSlot(
+  meetingId: string,
+  selfUid: string,
+  peerUid: string
+): Promise<void> {
+  const { mySdp, myCandidates } = signalFields(selfUid, peerUid);
+  await setDoc(
+    pairRef(meetingId, selfUid, peerUid),
+    {
+      meetingId,
+      participants: [selfUid, peerUid].sort(),
+      [mySdp]: null,
+      [myCandidates]: [],
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  ).catch(() => {
+    /* best-effort: a stale slot costs one ignored description, not the call */
+  });
+}
+
 export interface PairSignalHandlers {
-  /** The remote side's SDP appeared (or changed). */
+  /** The remote side's session description appeared (or changed). */
   onRemoteSdp: (sdp: RTCSessionDescriptionInit) => void;
   /** A remote ICE candidate we have not seen before. */
   onRemoteCandidate: (candidate: RTCIceCandidateInit) => void;
 }
 
 /**
- * Watch the pair document for the other side's SDP and ICE.
+ * Watch the pair document for the other side's description and ICE.
  *
  * Candidates are de-duplicated locally: `arrayUnion` re-delivers the whole
  * array on every change, and re-adding a candidate that is already applied
@@ -116,7 +156,7 @@ export function subscribeToPair(
 ): () => void {
   const { theirSdp, theirCandidates } = signalFields(selfUid, peerUid);
   const seenCandidates = new Set<string>();
-  let lastSdp = "";
+  let lastRev = -1;
 
   return onSnapshot(
     pairRef(meetingId, selfUid, peerUid),
@@ -125,9 +165,12 @@ export function subscribeToPair(
       if (!data) return;
 
       const remoteSdp = data[theirSdp];
-      if (remoteSdp?.sdp && remoteSdp.sdp !== lastSdp) {
-        lastSdp = remoteSdp.sdp;
-        handlers.onRemoteSdp({ type: remoteSdp.type, sdp: remoteSdp.sdp });
+      if (remoteSdp?.sdp && remoteSdp?.type) {
+        const rev = Number.isFinite(Number(remoteSdp.rev)) ? Number(remoteSdp.rev) : lastRev + 1;
+        if (rev > lastRev) {
+          lastRev = rev;
+          handlers.onRemoteSdp({ type: remoteSdp.type, sdp: remoteSdp.sdp });
+        }
       }
 
       const candidates: any[] = Array.isArray(data[theirCandidates]) ? data[theirCandidates] : [];

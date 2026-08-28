@@ -24,6 +24,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import PreJoin from "@/components/greenroom/PreJoin";
 import MeetingStage, { StageLayout, StageTile } from "@/components/greenroom/MeetingStage";
+import PeerAudio from "@/components/greenroom/PeerAudio";
 import MeetingControls from "@/components/greenroom/MeetingControls";
 import ParticipantsPanel from "@/components/greenroom/ParticipantsPanel";
 import ChatPanel from "@/components/greenroom/ChatPanel";
@@ -96,6 +97,13 @@ export default function MeetingClient() {
   const [elapsed, setElapsed] = useState(0);
 
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  /**
+   * Set when a browser refused to start remote audio without a gesture.
+   * Drives the one-tap "Enable audio" prompt; `audioRetry` is bumped by that
+   * tap so every blocked element retries inside the gesture.
+   */
+  const [audioBlocked, setAudioBlocked] = useState(false);
+  const [audioRetry, setAudioRetry] = useState(0);
   const [peerStates, setPeerStates] = useState<Record<string, PeerConnectionState>>({});
 
   const meshRef = useRef<MeshConnection | null>(null);
@@ -721,6 +729,32 @@ export default function MeetingClient() {
         <main className="relative min-w-0 flex-1 p-2">
           <MeetingStage tiles={tiles} layout={effectiveLayout} featuredUserId={featuredUserId} />
           <ReactionOverlay reactions={reactions} />
+
+          {/* Remote audio, one element per peer, mounted for EVERY peer for as
+              long as they are here — deliberately not tied to the tile grid,
+              which is capped and would otherwise silence everyone past the cap. */}
+          {Object.entries(remoteStreams).map(([userId, stream]) => (
+            <PeerAudio
+              key={`audio-${userId}`}
+              stream={stream}
+              onBlocked={() => setAudioBlocked(true)}
+              retryToken={audioRetry}
+            />
+          ))}
+
+          {audioBlocked && (
+            <button
+              type="button"
+              onClick={() => {
+                // Inside a real user gesture, so the retry is permitted.
+                setAudioRetry((n) => n + 1);
+                setAudioBlocked(false);
+              }}
+              className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-amber-500 px-4 py-2 text-sm font-semibold text-white shadow-lg hover:bg-amber-600"
+            >
+              Your browser blocked meeting audio — tap to enable sound
+            </button>
+          )}
 
           {showReactions && (
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2">

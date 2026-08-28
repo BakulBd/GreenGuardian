@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 export interface VideoTileProps {
   name: string;
   stream?: MediaStream | null;
-  /** Local preview: muted and mirrored, never plays your own audio back. */
+  /** Local preview: mirrored. (All tiles are muted — see the video element.) */
   isLocal?: boolean;
   micOn: boolean;
   camOn: boolean;
@@ -82,7 +82,11 @@ export default function VideoTile({
         ref={videoRef}
         autoPlay
         playsInline
-        muted={isLocal}
+        /* ALWAYS muted. Remote audio is played by `PeerAudio`, one element per
+           peer, mounted regardless of whether that peer has a tile on screen —
+           the grid is capped, so tying audio to a tile silenced everyone past
+           the cap. Leaving these unmuted too would play each speaker twice. */
+        muted
         aria-label={`${name}${isLocal ? " (you)" : ""} video`}
         className={cn(
           "h-full w-full object-cover",
